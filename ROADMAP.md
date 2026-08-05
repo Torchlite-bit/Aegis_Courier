@@ -79,8 +79,32 @@ Landed in 0.4.0.
   per-character view a filter and answers it. Capped at 250 per direction.
 - Written on collection / send confirmation, matching the ledger.
 
-### C.3 pfUI skin — planned
-Every call `pcall`-guarded so a pfUI API change can only cost the default look.
+### C.3 pfUI skin ✅
+Landed in 1.0.0 (**restart** — adds `ui/skin.lua`).
+
+- Restyles window, wells, buttons, checkboxes, edit boxes and scrollbars
+  through `pfUI:GetEnvironment()`, the same entry point pfUI-addonskinner uses.
+- **On by default**, exposed in the Courier tab and greyed out when pfUI is
+  absent. Turning it on applies live; turning it off needs a `/reload`, which
+  the addon says rather than appearing to do nothing.
+- Every pfUI call is `pcall`-guarded, so a pfUI API change can only cost the
+  default look. Covered by tests that make every helper throw.
+- Inbox rows and attachment slots opt out — they are click targets and icon
+  wells, not buttons.
+- `pfui/Aegis_Courier.lua` is a drop-in for pfUI-addonskinner users. It is
+  **not** in the `.toc` and costs nothing to ship.
+
+---
+
+## Status: the roadmap is complete
+
+Stages A through C are done. Courier replaces TurtleMail feature-for-feature
+per `docs/turtlemail-audit.md`, and adds the auction ledger TurtleMail never
+had. There is no Stage D planned; further work is whatever real use turns up.
+
+The one outstanding external dependency is Aegis: Exchange's `RecordExternalTxn`
+(its Phase 0.2). Courier's side is written and tested; it goes live by itself
+when Aegis ships.
 
 ---
 

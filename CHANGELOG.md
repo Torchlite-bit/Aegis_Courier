@@ -3,11 +3,56 @@
 All notable changes to Aegis: Courier are documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project uses `MAJOR.MINOR.PATCH`. Anything below 1.0.0 is
-pre-release development.
+and this project uses `MAJOR.MINOR.PATCH`. 1.0.0 is the first complete
+release; everything below it was pre-release development.
 
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
+
+## [1.0.0] - 2026-08-05 — **restart**
+
+Stage C.3, and the first complete release. Every stage on the roadmap is done:
+Courier replaces TurtleMail feature-for-feature per `docs/turtlemail-audit.md`,
+and adds the auction ledger TurtleMail never had.
+
+**Adds `ui/skin.lua` to the `.toc`, so a full client restart is required** —
+1.12 reads the file list at startup and `/reload` will not pick it up.
+
+### Added
+- **Optional pfUI skin.** When pfUI is installed, Courier restyles its window,
+  wells, buttons, checkboxes, edit boxes and scrollbars through
+  `pfUI:GetEnvironment()` — the same entry point pfUI-addonskinner uses.
+- **On by default**, with an option in the Courier tab. With pfUI absent the
+  option is greyed out and labelled, rather than hidden, so it is clear the
+  feature exists and why it is inactive. The setting stays on, so installing
+  pfUI later just works.
+- Turning it **on** applies immediately. Turning it **off** needs a `/reload`,
+  since pfUI's styling cannot be cleanly undone — Courier says so rather than
+  appearing to do nothing.
+- `pfui/Aegis_Courier.lua`, a drop-in for pfUI-addonskinner users. It is
+  **not** in the `.toc` and is not loaded by Courier.
+
+### Behaviour worth knowing
+- pfUI is **never** a dependency. It is not in the `.toc`, every call into it
+  is `pcall`-guarded, and the worst a pfUI API change can do is leave you with
+  Courier's default look. Tests cover a pfUI that throws on every helper, one
+  whose environment cannot be fetched, and one exposing no helpers at all.
+- Inbox rows and attachment slots opt out of button styling — they are click
+  targets and icon wells, not buttons.
+- Sub-tab tinting follows pfUI: `CreateBackdrop` attaches a child frame, and
+  the selected-tab colour is applied to whichever backdrop is real, so the
+  selected tab still reads as selected.
+
+### Tests
+- Harness grows to **328 checks**.
+- **The frame mock now models the frame tree and distinguishes methods from
+  data.** Two bugs had been hiding in it: unknown keys returned a truthy no-op
+  function, so data fields like `frame.backdrop` looked real; and there was no
+  parent/child wiring, so anything that walks the frame tree traversed an empty
+  list and passed vacuously. Methods are CamelCase and data fields are
+  lowercase in this codebase, so the mock now uses the initial capital to tell
+  them apart, and `CreateFrame` records children. The skin's tree walk is
+  genuinely exercised as a result.
 
 ## [0.5.0] - 2026-08-05
 
@@ -250,6 +295,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[1.0.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.0
 [0.5.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.3.0

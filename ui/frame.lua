@@ -128,12 +128,20 @@ function ui.SelectSubTab(name)
         local key = SUBTABS[i]
         local btn = ui.subTabs[key]
         local panel = ui.panels[key]
+        -- pfUI's CreateBackdrop replaces the visible border with a child
+        -- frame called `backdrop`; tinting the button itself would then do
+        -- nothing and every tab would look identical. Tint whichever is real,
+        -- checking the type rather than mere truthiness -- `backdrop` is only
+        -- a frame once pfUI has actually created one.
+        local bd = btn.backdrop
+        local target = btn
+        if type(bd) == "table" and bd.SetBackdropColor then target = bd end
         if key == name then
-            btn:SetBackdropColor(C.tabOn[1], C.tabOn[2], C.tabOn[3], 1)
+            target:SetBackdropColor(C.tabOn[1], C.tabOn[2], C.tabOn[3], 1)
             btn.label:SetTextColor(C.gold[1], C.gold[2], C.gold[3])
             panel:Show()
         else
-            btn:SetBackdropColor(C.tabOff[1], C.tabOff[2], C.tabOff[3], 1)
+            target:SetBackdropColor(C.tabOff[1], C.tabOff[2], C.tabOff[3], 1)
             btn.label:SetTextColor(C.text[1], C.text[2], C.text[3])
             panel:Hide()
         end
@@ -206,6 +214,7 @@ function ui.BuildWindow()
     title:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -4)
     title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
     Backdrop(title, C.titleBG, false)
+    ui.titleBar = title
 
     local titleText = Label(title, "GameFontNormal", C.gold)
     titleText:SetPoint("LEFT", title, "LEFT", 10, 0)
@@ -217,6 +226,7 @@ function ui.BuildWindow()
     close:SetHeight(28)
     close:SetPoint("RIGHT", title, "RIGHT", 2, 0)
     close:SetScript("OnClick", function() ui.CloseWindow() end)
+    close.courierCloseButton = true
 
     -- Hand back to the stock mail UI. Mirrors the "Courier" button we put on
     -- the Blizzard frame, so the swap works in both directions.
@@ -268,6 +278,10 @@ function ui.BuildWindow()
 
     local saved = db.char and db.char.ui and db.char.ui.tab
     ui.SelectSubTab(saved or "Inbox")
+
+    -- Optional pfUI styling, applied once the whole window exists. A no-op
+    -- when pfUI is absent or the setting is off.
+    if A.skin then A.skin.Apply() end
 end
 
 -- ---------------------------------------------------------------------------
@@ -352,6 +366,7 @@ function ui.BuildInboxPanel()
     well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -58)
     well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 22)
     Backdrop(well, C.well, true)
+    ui.inboxWell = well
 
     local scroll = CreateFrame("ScrollFrame", "AegisCourierInboxScroll", well,
         "FauxScrollFrameTemplate")
@@ -373,6 +388,9 @@ function ui.BuildInboxPanel()
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -4 - (i - 1) * ROW_H)
         row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        -- A pfUI border around every row would be noise: these are click
+        -- targets, not buttons. See ui/skin.lua.
+        row.courierNoSkin = true
         -- Right-click takes this one mail, matching TurtleMail's muscle
         -- memory. Left-click is left free for a future preview.
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
@@ -725,6 +743,7 @@ function ui.BuildSendPanel()
     bodyWell:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -46)
     bodyWell:SetHeight(104)
     Backdrop(bodyWell, C.well, true)
+    ui.sendBodyWell = bodyWell
 
     local bodyBox = MakeEditBox("Body", bodyWell, 1, true)
     bodyBox:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 6, -4)
@@ -753,6 +772,9 @@ function ui.BuildSendPanel()
             col * (ATTACH_SIZE + 4), -6 - row * (ATTACH_SIZE + 4))
         Backdrop(b, C.well, true)
         b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+        -- An icon well rather than a button: pfUI backdrop, no button skin.
+        b.courierNoSkin = true
+        b.courierBackdrop = true
 
         local icon = b:CreateTexture(nil, "ARTWORK")
         icon:SetPoint("TOPLEFT", b, "TOPLEFT", 3, -3)
@@ -1045,6 +1067,7 @@ function ui.BuildLogPanel()
     well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -28)
     well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 26)
     Backdrop(well, C.well, true)
+    ui.logWell = well
 
     local scroll = CreateFrame("ScrollFrame", "AegisCourierLogScroll", well,
         "FauxScrollFrameTemplate")
@@ -1236,6 +1259,7 @@ function ui.BuildLedgerPanel()
     well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -22)
     well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 22)
     Backdrop(well, C.well, true)
+    ui.ledgerWell = well
 
     local scroll = CreateFrame("ScrollFrame", "AegisCourierLedgerScroll", well,
         "FauxScrollFrameTemplate")
@@ -1337,6 +1361,8 @@ local function MakeCheck(parent, name, label, setting, onChange)
         ui.Refresh()
     end)
     c.setting = setting
+    -- Kept so SetToggleEnabled can grey the label with the box; see MakeToggle.
+    c.labelText = text
     return c
 end
 
@@ -1369,16 +1395,28 @@ function ui.BuildCourierPanel()
         "Keep a log of mail sent and collected", "logEnabled")
     logOn:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -8)
 
+    -- Defaults ON, but only ever does anything when pfUI is installed --
+    -- skin.Enabled() requires both. When pfUI is absent the box is greyed
+    -- below rather than hidden, so it is clear the feature exists and why it
+    -- is inactive.
+    local pfSkin = MakeCheck(panel, "PfSkin",
+        "Match pfUI's look when pfUI is installed", "pfSkin",
+        function(on)
+            if A.skin then A.skin.OnSettingChanged(on) end
+        end)
+    pfSkin:SetPoint("TOPLEFT", logOn, "BOTTOMLEFT", 0, -8)
+
     ui.checkTakeover = takeover
     ui.checkPush = push
     ui.checkLog = logOn
+    ui.checkPfSkin = pfSkin
 
     -- A rule between the two groups. Without it -- and with the Integration
     -- heading previously anchored to `push` rather than to the last checkbox --
     -- the heading was drawn straight on top of the log option.
     local divider = panel:CreateTexture(nil, "ARTWORK")
     divider:SetHeight(1)
-    divider:SetPoint("TOPLEFT", logOn, "BOTTOMLEFT", 0, -14)
+    divider:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 0, -14)
     divider:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
     divider:SetTexture(C.goldDim[1], C.goldDim[2], C.goldDim[3], 0.35)
 
@@ -1413,6 +1451,17 @@ function ui.RefreshCourier()
     ui.checkTakeover:SetChecked(db.Setting("takeover") and true or false)
     ui.checkPush:SetChecked(db.Setting("pushToAegis") and true or false)
     ui.checkLog:SetChecked(db.Setting("logEnabled") and true or false)
+    ui.checkPfSkin:SetChecked(db.Setting("pfSkin") and true or false)
+
+    -- Grey the pfUI option out when pfUI is not there to match. The setting
+    -- itself stays on, so installing pfUI later just works.
+    local pfHere = A.skin and A.skin.Available()
+    SetToggleEnabled(ui.checkPfSkin, pfHere and true or false)
+    if ui.checkPfSkin.labelText then
+        ui.checkPfSkin.labelText:SetText(pfHere
+            and "Match pfUI's look"
+            or "Match pfUI's look   (pfUI not installed)")
+    end
 
     local status = A.bridge.StatusText()
     if not AegisExchange then
@@ -1571,6 +1620,7 @@ function ui.HookMailFrame()
         b:SetText("Courier")
         b:SetScript("OnClick", function() ui.OpenWindow() end)
         ui.swapBtn = b
+        if A.skin then A.skin.ApplyExternal() end
     end
 
     ui.mailHooked = true
