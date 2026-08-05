@@ -68,14 +68,16 @@ Landed in 0.3.0 (**restart** — adds `core/send.lua`).
 - Attach by bag right-click (scoped to the Send tab at a mailbox) or drag.
 - Aborts before sending if an item will not attach, preserving the list.
 
-### C.2 Mail log — next
-Sent + received log with participant and category filters (audit §4). The
-auction ledger already covers sales; this is general correspondence.
-Deliberately **not** porting TurtleMail's bundled calendar date-picker.
+### C.2 Mail log ✅
+Landed in 0.4.0.
 
-Open question to settle first: whether the log is per-character (TurtleMail's
-choice) or account-wide. Per-character matches expectations but makes "did I
-send that on my bank alt?" unanswerable, which is the common real question.
+- Sent + received, with participant/subject/item/category all reachable from a
+  single search box (audit §4). No calendar date-picker, as decided.
+- **Account-wide, with the character on each entry** — the open question is
+  settled. TurtleMail stores per-character, which structurally cannot answer
+  "did I send that on my bank alt?"; storing account-wide makes the
+  per-character view a filter and answers it. Capped at 250 per direction.
+- Written on collection / send confirmation, matching the ledger.
 
 ### C.3 pfUI skin — planned
 Every call `pcall`-guarded so a pfUI API change can only cost the default look.

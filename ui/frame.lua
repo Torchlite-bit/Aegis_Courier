@@ -49,7 +49,7 @@ local WIN_W, WIN_H  = 660, 440
 local ROW_H         = 28
 local ROWS          = 10
 
-local SUBTABS = { "Inbox", "Send", "Ledger", "Courier" }
+local SUBTABS = { "Inbox", "Send", "Log", "Ledger", "Courier" }
 
 -- ---------------------------------------------------------------------------
 -- Small helpers
@@ -262,6 +262,7 @@ function ui.BuildWindow()
 
     ui.BuildInboxPanel()
     ui.BuildSendPanel()
+    ui.BuildLogPanel()
     ui.BuildLedgerPanel()
     ui.BuildCourierPanel()
 
@@ -956,6 +957,216 @@ function ui.OnSendComplete()
 end
 
 -- ---------------------------------------------------------------------------
+-- Log panel
+-- ---------------------------------------------------------------------------
+--
+-- The correspondence log, distinct from the Ledger next door: the Ledger is
+-- money (auction sales, with the consignment split), this is who wrote to
+-- whom and what was attached, across every mail Courier handled.
+--
+-- Storage is account-wide with the character on each entry, so "this
+-- character only" is a FILTER here rather than a storage decision. TurtleMail
+-- stores per-character, which makes "did I send that on my bank alt?"
+-- unanswerable; that is the common question, so Courier answers it.
+
+function ui.BuildLogPanel()
+    local panel = ui.panels["Log"]
+    ui.logDir = "received"
+
+    local function DirButton(name, label, dir)
+        local b = CreateFrame("Button", "AegisCourierLogDir" .. name, panel,
+            "UIPanelButtonTemplate")
+        b:SetWidth(76)
+        b:SetHeight(21)
+        b:SetText(label)
+        b:SetScript("OnClick", function()
+            ui.logDir = dir
+            ui.RefreshLog()
+        end)
+        return b
+    end
+
+    local recvBtn = DirButton("Received", "Received", "received")
+    recvBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -2)
+    local sentBtn = DirButton("Sent", "Sent", "sent")
+    sentBtn:SetPoint("LEFT", recvBtn, "RIGHT", 4, 0)
+    ui.logRecvBtn, ui.logSentBtn = recvBtn, sentBtn
+
+    local findLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    findLbl:SetPoint("LEFT", sentBtn, "RIGHT", 16, 0)
+    findLbl:SetText("Find")
+
+    -- One search box covers both filters the audit calls for: it matches the
+    -- participant, the subject, the item and the auction tag, so "Bob",
+    -- "cloth" and "sold" all work without a dropdown widget.
+    local findBox = MakeEditBox("LogFind", panel, 130)
+    findBox:SetPoint("LEFT", findLbl, "RIGHT", 8, 0)
+    findBox:SetScript("OnTextChanged", function() ui.RefreshLog() end)
+    ui.logFind = findBox
+
+    local mine = MakeToggle(panel, "LogMine", "this character only")
+    mine:SetPoint("LEFT", findBox, "RIGHT", 14, 0)
+    mine:SetScript("OnClick", function() ui.RefreshLog() end)
+    ui.logMine = mine
+
+    local well = CreateFrame("Frame", nil, panel)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -28)
+    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 26)
+    Backdrop(well, C.well, true)
+
+    local scroll = CreateFrame("ScrollFrame", "AegisCourierLogScroll", well,
+        "FauxScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -4)
+    scroll:SetPoint("BOTTOMRIGHT", well, "BOTTOMRIGHT", -26, 4)
+    scroll:SetScript("OnVerticalScroll", function()
+        FauxScrollFrame_OnVerticalScroll(ROW_H, ui.RefreshLog)
+    end)
+    ui.logScroll = scroll
+
+    ui.logRows = {}
+    local i = 1
+    while i <= ROWS do
+        local row = CreateFrame("Frame", nil, well)
+        row:SetHeight(ROW_H)
+        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -4 - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
+
+        local when = Label(row, "GameFontNormalSmall", C.dim)
+        when:SetPoint("LEFT", row, "LEFT", 0, 0)
+        row.when = when
+
+        local who = Label(row, "GameFontNormalSmall", C.text)
+        who:SetPoint("LEFT", row, "LEFT", 84, 0)
+        row.who = who
+
+        local subject = Label(row, "GameFontNormalSmall", C.text)
+        subject:SetPoint("LEFT", row, "LEFT", 200, 0)
+        row.subject = subject
+
+        local amount = Label(row, "GameFontNormalSmall", C.gold)
+        amount:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        row.amount = amount
+
+        row:Hide()
+        ui.logRows[i] = row
+        i = i + 1
+    end
+
+    local summary = Label(panel, "GameFontNormalSmall", C.dim)
+    summary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 6)
+    ui.logSummary = summary
+
+    local clear = CreateFrame("Button", "AegisCourierBtnClearLog", panel,
+        "UIPanelButtonTemplate")
+    clear:SetWidth(90)
+    clear:SetHeight(20)
+    clear:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
+    clear:SetText("Clear view")
+    clear:SetScript("OnClick", function()
+        -- Clears the direction currently on screen, not both -- wiping the
+        -- half you are not looking at would be a nasty surprise.
+        db.ClearLog(ui.logDir)
+        ui.RefreshLog()
+    end)
+end
+
+-- Entries for the current direction, newest first, after filtering.
+function ui.LogRows()
+    local out = {}
+    local entries = db.Log(ui.logDir)
+    local find = string.lower(util.Trim(ui.logFind:GetText() or ""))
+    local mineOnly = ui.logMine:GetChecked() and true or false
+    local me = UnitName and UnitName("player") or nil
+
+    local i = table.getn(entries)
+    while i >= 1 do
+        local e = entries[i]
+        local keep = true
+        if mineOnly and me and e.char and e.char ~= me then keep = false end
+        if keep and find ~= "" then
+            -- Match across everything visible in the row, so one box serves as
+            -- both the participant filter and the category filter.
+            local hay = string.lower((e.who or "") .. " " .. (e.subject or "")
+                .. " " .. (e.item or "") .. " " .. (e.auction or "")
+                .. " " .. (e.char or ""))
+            if not util.Contains(hay, find) then keep = false end
+        end
+        if keep then table.insert(out, e) end
+        i = i - 1
+    end
+    return out
+end
+
+function ui.RefreshLog()
+    if not ui.frame or not ui.frame:IsVisible() then return end
+    if ui.selectedSubTab ~= "Log" then return end
+
+    -- Selected direction reads as pressed.
+    if ui.logDir == "sent" then
+        ui.logRecvBtn:UnlockHighlight()
+        ui.logSentBtn:LockHighlight()
+    else
+        ui.logRecvBtn:LockHighlight()
+        ui.logSentBtn:UnlockHighlight()
+    end
+
+    local rows = ui.LogRows()
+    local total = table.getn(rows)
+
+    FauxScrollFrame_Update(ui.logScroll, total, ROWS, ROW_H)
+    local offset = FauxScrollFrame_GetOffset(ui.logScroll) or 0
+    local now = time()
+
+    local i = 1
+    while i <= ROWS do
+        local row = ui.logRows[i]
+        local e = rows[offset + i]
+        if e then
+            row.when:SetText(util.FormatAgo(now - (e.t or now)))
+            SetClipped(row.who, e.who or "?", 108)
+
+            local subject = e.subject or ""
+            if e.auction then
+                subject = "|cffffd700[" .. e.auction .. "]|r " .. subject
+            elseif e.returned then
+                subject = "|cffd08050[returned]|r " .. subject
+            end
+            if e.item then
+                subject = subject .. "  |cff8fd6a8" .. e.item ..
+                    (e.count and e.count > 1 and (" x" .. e.count) or "") .. "|r"
+            end
+            SetClipped(row.subject, subject, 250)
+
+            if e.cod and e.cod > 0 then
+                row.amount:SetText("|cffd05050COD " ..
+                    util.FormatMoney(e.cod, false) .. "|r")
+            elseif e.money and e.money > 0 then
+                local sign = (ui.logDir == "sent") and "-" or "+"
+                row.amount:SetText(sign .. util.FormatMoney(e.money, true))
+            else
+                row.amount:SetText("")
+            end
+            row:Show()
+        else
+            row:Hide()
+        end
+        i = i + 1
+    end
+
+    local stored = table.getn(db.Log(ui.logDir))
+    local label = (ui.logDir == "sent") and "sent" or "received"
+    if stored == 0 then
+        ui.logSummary:SetText("Nothing logged yet. Mail is recorded as you " ..
+            "collect and send it.")
+    elseif total == stored then
+        ui.logSummary:SetText(stored .. " " .. label)
+    else
+        ui.logSummary:SetText(total .. " of " .. stored .. " " .. label ..
+            " shown")
+    end
+end
+
+-- ---------------------------------------------------------------------------
 -- Ledger panel
 -- ---------------------------------------------------------------------------
 
@@ -1099,8 +1310,13 @@ function ui.BuildCourierPanel()
         "Send matched auction mail to Aegis: Exchange", "pushToAegis")
     push:SetPoint("TOPLEFT", takeover, "BOTTOMLEFT", 0, -4)
 
+    local logOn = MakeCheck(panel, "Log",
+        "Keep a log of mail sent and collected", "logEnabled")
+    logOn:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -4)
+
     ui.checkTakeover = takeover
     ui.checkPush = push
+    ui.checkLog = logOn
 
     local integHead = Label(panel, "GameFontNormal", C.gold)
     integHead:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -18)
@@ -1123,6 +1339,7 @@ function ui.RefreshCourier()
 
     ui.checkTakeover:SetChecked(db.Setting("takeover") and true or false)
     ui.checkPush:SetChecked(db.Setting("pushToAegis") and true or false)
+    ui.checkLog:SetChecked(db.Setting("logEnabled") and true or false)
 
     local status = A.bridge.StatusText()
     if not AegisExchange then
@@ -1157,6 +1374,8 @@ function ui.Refresh()
         ui.OnTakeStateChanged()
     elseif ui.selectedSubTab == "Send" then
         ui.RefreshSend()
+    elseif ui.selectedSubTab == "Log" then
+        ui.RefreshLog()
     elseif ui.selectedSubTab == "Ledger" then
         ui.RefreshLedger()
     elseif ui.selectedSubTab == "Courier" then

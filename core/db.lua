@@ -52,7 +52,15 @@ local SETTING_DEFAULTS = {
     skipCOD      = true,
     -- Match pfUI's look when pfUI is installed.
     pfSkin       = true,
+    -- Keep a log of mail sent and collected. On by default: it is capped, and
+    -- a log you have to know to switch on is one you never have when you want
+    -- it. (TurtleMail defaults its log off.)
+    logEnabled   = true,
 }
+
+-- Entries retained per direction. Two capped arrays, so the log cannot grow
+-- without bound however long the account lives.
+local LOG_MAX = 250
 
 -- Default shape of the account-wide DB.
 local function DefaultAccountDB()
@@ -73,6 +81,14 @@ local function DefaultAccountDB()
         ledgerSeen = {},
         -- User settings, read through db.Setting.
         settings   = {},
+        -- Correspondence log: what was actually sent and collected.
+        --
+        -- ACCOUNT-WIDE, deliberately, where TurtleMail's is per-character.
+        -- Each entry carries the character it belongs to, so a per-character
+        -- view is a filter rather than a storage decision -- and "did I send
+        -- that on my bank alt?", which is the question people actually have,
+        -- becomes answerable instead of structurally impossible.
+        log        = { sent = {}, received = {} },
         -- Recipient autocomplete: realm|faction -> { name -> lastSeenEpoch }.
         -- Scoped that way because you cannot mail across a realm, and mailing
         -- the opposing faction is not possible either -- so a flat account-wide
@@ -291,6 +307,64 @@ end
 function db.SeenCount()
     if not db.account or not db.account.ledgerSeen then return 0 end
     return A.util.CountKeys(db.account.ledgerSeen)
+end
+
+-- ---------------------------------------------------------------------------
+-- Correspondence log
+-- ---------------------------------------------------------------------------
+-- Distinct from the ledger. The ledger is money: auction sales, with the
+-- consignment split, and it only ever books "sold" mail. The log is a record
+-- of correspondence -- who, what subject, what was attached -- across every
+-- mail Courier actually handled, auction or not.
+
+local function LogBucket(dir)
+    if not db.account then return nil end
+    if not db.account.log then db.account.log = { sent = {}, received = {} } end
+    if dir ~= "sent" then dir = "received" end
+    if not db.account.log[dir] then db.account.log[dir] = {} end
+    return db.account.log[dir]
+end
+
+-- Append a log entry. `dir` is "sent" or "received".
+--
+-- `entry` is stored as given plus a timestamp and the acting character, so a
+-- per-character view is a filter over account-wide data rather than a
+-- separate store. Honours the logEnabled setting; callers need not check.
+function db.LogAdd(dir, entry)
+    if not db.account or not entry then return nil end
+    if not db.Setting("logEnabled") then return nil end
+    local bucket = LogBucket(dir)
+    if not bucket then return nil end
+
+    entry.t = entry.t or time()
+    if not entry.char and UnitName then
+        entry.char = UnitName("player")
+    end
+    table.insert(bucket, entry)
+    while table.getn(bucket) > LOG_MAX do
+        table.remove(bucket, 1)
+    end
+    return entry
+end
+
+function db.Log(dir)
+    return LogBucket(dir) or {}
+end
+
+function db.ClearLog(dir)
+    if not db.account then return end
+    if dir then
+        local bucket = LogBucket(dir)
+        if bucket then
+            local n = table.getn(bucket)
+            while n > 0 do
+                table.remove(bucket)
+                n = n - 1
+            end
+        end
+    else
+        db.account.log = { sent = {}, received = {} }
+    end
 end
 
 -- ---------------------------------------------------------------------------

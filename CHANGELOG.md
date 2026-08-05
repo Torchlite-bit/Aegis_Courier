@@ -9,6 +9,61 @@ pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [0.4.0] - 2026-08-05
+
+Stage C.2: the correspondence log, plus three Send tab fixes from play testing.
+No new `.lua` file, so this is a `/reload`.
+
+### Added
+- **Log tab.** Every mail Courier collects or sends, recorded with the
+  participant, subject, attached item and money. Distinct from the Ledger next
+  door: the Ledger is money (auction sales and the consignment split), the Log
+  is correspondence.
+- **Account-wide storage with the character on each entry**, where TurtleMail's
+  log is per-character. That makes "this character only" a filter rather than a
+  storage decision, and makes *"did I send that on my bank alt?"* answerable —
+  the question people usually have.
+- **One search box** matching participant, subject, item, auction tag and
+  character, so `Bob`, `cloth` and `sold` all work. This covers both the
+  participant and category filters the TurtleMail audit calls for without a
+  dropdown widget.
+- Received / Sent toggle, and a **Clear view** button that clears only the
+  direction on screen.
+- `logEnabled` setting in the Courier tab, **on** by default. TurtleMail
+  defaults its log off; a log you have to know to switch on is one you never
+  have when you want it. Both directions are capped at 250 entries.
+
+### Behaviour worth knowing
+- Entries are written on **collection** and on send **confirmation**, matching
+  the ledger. A take the server refused, and a mail that failed to send, are
+  not recorded.
+- Delete-read logs nothing: an already-empty mail carries nothing worth
+  recording.
+- COD is logged as COD, never as attached gold.
+
+### Fixed
+- **Stray input box inside the mail body.** The body used `InputBoxTemplate`,
+  whose border is 9-slice art built for a one-line box — it does not stretch
+  with a tall multiline frame, so it stayed one line tall and rendered as an
+  input-shaped rectangle floating in the body. The body now uses no template;
+  we already draw our own well behind it.
+- **Recipient suggestions no longer drop open on their own.** An empty
+  recipient box matches every contact, so the list opened the moment the Send
+  tab did and covered the form. It now appears once something is typed, and a
+  dropdown button lists everyone on demand.
+- **"on every mail" moved under the C.O.D. box** it modifies and greyed until
+  C.O.D. is checked. It is also unchecked when disabled, so a greyed box cannot
+  sit there checked and silently apply on the next send.
+
+### Tests
+- Harness grows to **285 checks**, covering the log end to end and the two
+  Send tab behaviours above.
+- **Fixed a harness bug that was hiding behaviour**, not just failing: the
+  frame mock's catch-all `__index` returns a no-op function for any unknown
+  key, including *data* fields, so `GetText()` on a box that had never had
+  `SetText` called returned a function rather than nil. All mock accessors now
+  read through `rawget`.
+
 ## [0.3.0] - 2026-08-05 — **restart**
 
 Stage C.1: sending mail. **This release adds `core/send.lua` to the `.toc`, so
@@ -158,6 +213,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[0.4.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.1.0
