@@ -142,6 +142,14 @@ end
 DeleteInboxItem = function(i)
     if INBOX[i] then table.remove(INBOX, i) end
 end
+returned = {}
+ReturnInboxItem = function(i)
+    local m = INBOX[i]
+    if not m then return end
+    table.insert(returned, m.sender)
+    -- Like a delete, this removes the mail and shifts every later index down.
+    table.remove(INBOX, i)
+end
 
 ERR_INV_FULL = "Your bags are full."
 INVENTORY_FULL = "Inventory is full."
@@ -1009,6 +1017,57 @@ check(true, "send tab refresh runs without error")
 -- =========================================================================
 -- Stage C.2: the correspondence log
 -- =========================================================================
+
+print("== inbox: return to sender ==")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+returned = {}
+INBOX = {
+    mail{ sender = "Bob", subject = "wrong person", item = "Copper Ore" },
+    mail{ sender = AH, subject = "Auction expired: Silk Cloth",
+          item = "Silk Cloth" },
+    mail{ sender = "GMBob", subject = "ticket", gm = true },
+}
+-- canReply is what FrameXML itself gates its Reply button on. The mail helper
+-- sets it for every mail, so clear it on the ones the server would not.
+INBOX[2].canReply = nil
+INBOX[3].canReply = nil
+
+A.ui.RefreshInbox()
+check(A.ui.inboxRows[1].ret:IsVisible(), "player mail offers Return")
+check(not A.ui.inboxRows[2].ret:IsVisible(),
+      "auction mail does not -- it cannot be returned")
+check(not A.ui.inboxRows[3].ret:IsVisible(), "GM mail does not either")
+
+A.ui.ReturnMail(1)
+check(table.getn(returned) == 1, "returned once", table.getn(returned))
+check(returned[1] == "Bob", "to the right sender", returned[1])
+check(table.getn(INBOX) == 2, "and the mail left the inbox", table.getn(INBOX))
+
+-- Refusals.
+returned = {}
+A.ui.ReturnMail(1)      -- now the auction mail, canReply unset
+check(table.getn(returned) == 0, "refuses mail that cannot be returned")
+A.ui.ReturnMail(nil)
+check(table.getn(returned) == 0, "nil index is safe")
+A.ui.ReturnMail(99)
+check(table.getn(returned) == 0, "out-of-range index is safe")
+
+print("== inbox: Return is unavailable during a run ==")
+INBOX = { mail{ sender = "Bob", subject = "x", money = 100 },
+          mail{ sender = "Ann", subject = "y", money = 200 } }
+returned = {}
+take.Start(take.MODE_TAKE)
+A.ui.RefreshInbox()
+check(not A.ui.inboxRows[1].ret:IsVisible(),
+      "hidden while the take engine is walking the inbox")
+A.ui.ReturnMail(1)
+check(table.getn(returned) == 0,
+      "and refused if called anyway -- it would shift indices mid-run")
+take.Stop(true)
+A.ui.RefreshInbox()
+check(A.ui.inboxRows[1].ret:IsVisible(), "back once the run ends")
 
 print("== log: received mail is logged on collection ==")
 A.db.ClearLog()
