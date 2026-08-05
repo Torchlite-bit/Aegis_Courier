@@ -269,6 +269,10 @@ Aegis_Courier/
   core/inbox.lua         -- inbox reads (A.inbox) + the take engine (A.take)
   core/send.lua          -- outgoing mail: attachments + the batch send engine
   ui/frame.lua           -- standalone Courier window + mailbox takeover
+  ui/skin.lua            -- OPTIONAL pfUI restyle; every call pcall-guarded so
+                         -- a pfUI API change can only cost us the default look
+  pfui/Aegis_Courier.lua -- drop-in for pfUI-addonskinner users. NOT in the .toc
+                         -- and NOT loaded by us; it just calls A.skin.Apply()
   tests/harness.lua      -- off-client test harness; stubs the 1.12 API
   docs/turtlemail-audit.md -- feature audit that defines the replacement scope
   CLAUDE.md              -- this file
@@ -276,7 +280,8 @@ Aegis_Courier/
 ```
 
 Load order is fixed by the `.toc`: `init` → `util` → `db` → `bridge` →
-`inbox` → `send` → `frame`. `init.lua` must load first (it creates the namespace and
+`inbox` → `send` → `frame` → `skin`. `skin` is only reached at runtime, so its
+position is not load-critical. `init.lua` must load first (it creates the namespace and
 dispatcher); `util` second (every other module takes a file-scope
 `local util = A.util`).
 

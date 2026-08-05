@@ -17,16 +17,27 @@ end
 
 -- ---- Frame mock ----------------------------------------------------------
 --
--- The catch-all __index below returns a no-op function for ANY key we have not
--- implemented, which is what lets the mock absorb the hundreds of frame
--- methods the addon calls. The trap is that it does the same for DATA fields:
--- `self.text` on a frame that has never had SetText called is a function, not
--- nil. Every accessor therefore reads through rawget -- returning a function
--- from GetText silently poisons whatever the addon does with it, and cost a
--- debugging round here.
+-- The fallback below absorbs the hundreds of widget methods the addon calls
+-- without implementing each one. It must NOT do the same for data fields: an
+-- earlier version returned a no-op function for every unknown key, so
+-- `frame.text` and `frame.backdrop` came back as functions -- truthy, and
+-- silently wrong wherever the addon tested them. That cost two debugging
+-- rounds before it was pinned down.
+--
+-- WoW widget methods are CamelCase (SetPoint, GetObjectType); the fields this
+-- addon and pfUI attach are lowercase (backdrop, labelText, mailIndex). So the
+-- initial capital is the discriminator: methods get a no-op, data fields get
+-- nil like a real table. Accessors additionally use rawget.
+local function MockIndex(_, key)
+    if type(key) == "string" and string.find(key, "^%u") then
+        return function() end
+    end
+    return nil
+end
+
 local function newRegion()
     local r = { visible = true }
-    setmetatable(r, { __index = function() return function() end end })
+    setmetatable(r, { __index = MockIndex })
     function r:SetText(t) rawset(self, "text", t) end
     function r:GetText() return rawget(self, "text") end
     function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
@@ -39,8 +50,18 @@ end
 
 CreateFrame = function(kind, name, parent, template)
     local f = { name = name, kind = kind, template = template,
-                scripts = {}, events = {}, visible = false, checked = false }
-    setmetatable(f, { __index = function() return function() end end })
+                scripts = {}, events = {}, children = {},
+                visible = false, checked = false }
+    setmetatable(f, { __index = MockIndex })
+    -- Real parent/child wiring, so anything that WALKS the frame tree (the
+    -- pfUI skin does) is actually exercised rather than silently traversing an
+    -- empty list. Regions from CreateFontString/CreateTexture are deliberately
+    -- not children, matching GetChildren's real behaviour.
+    if type(parent) == "table" and rawget(parent, "children") then
+        table.insert(parent.children, f)
+    end
+    function f:GetChildren() return unpack(rawget(self, "children") or {}) end
+    function f:GetObjectType() return rawget(self, "kind") or "Frame" end
     function f:SetScript(k, fn) self.scripts[k] = fn end
     function f:GetScript(k) return self.scripts[k] end
     function f:HasScript() return true end
@@ -227,7 +248,7 @@ MailFrameCloseButton = CreateFrame("Button", "MailFrameCloseButton")
 -- ---- Load the addon in .toc order ---------------------------------------
 local files = { "core/init.lua", "core/util.lua", "core/db.lua",
                 "core/bridge.lua", "core/inbox.lua", "core/send.lua",
-                "ui/frame.lua" }
+                "ui/frame.lua", "ui/skin.lua" }
 for _, f in ipairs(files) do assert(loadfile(f))() end
 
 local A = AegisCourier
@@ -1220,6 +1241,127 @@ A.ui.RefreshLog()
 A.ui.logDir = "received"
 A.ui.Refresh()
 check(true, "log tab refreshes in both directions")
+
+-- =========================================================================
+-- Stage C.3: the optional pfUI skin
+-- =========================================================================
+
+local skin = A.skin
+check(skin ~= nil, "skin module loaded")
+
+print("== skin: dormant and harmless without pfUI ==")
+check(pfUI == nil, "no pfUI in this environment")
+check(skin.Available() == false, "not available")
+check(skin.Enabled() == false, "not enabled")
+check(skin.Apply() == false, "Apply is a no-op")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+check(A.ui.frame ~= nil, "and the window still builds fine")
+-- Toggling the setting with no pfUI must explain itself, not fail.
+skin.OnSettingChanged(true)
+check(true, "toggling on without pfUI is safe")
+
+print("== skin: the setting defaults ON ==")
+-- So that installing pfUI later just works, with nothing to switch on.
+check(A.db.Setting("pfSkin") == true, "pfSkin defaults to on")
+
+print("== skin: the option is greyed when pfUI is absent ==")
+A.ui.SelectSubTab("Courier")
+check(A.ui.checkPfSkin ~= nil, "the option exists in the Courier tab")
+check(A.ui.checkPfSkin:GetChecked() == true, "and reads as on")
+check(A.ui.checkPfSkin:IsEnabled() == false,
+      "but is greyed out with no pfUI to match")
+
+print("== skin: applies when pfUI is present ==")
+-- A stub standing in for pfUI's helper environment.
+local calls = { backdrop = 0, button = 0, checkbox = 0, editbox = 0,
+                slider = 0, close = 0, strip = 0 }
+pfUI = {
+    GetEnvironment = function()
+        return {
+            CreateBackdrop  = function() calls.backdrop = calls.backdrop + 1 end,
+            StripTextures   = function() calls.strip = calls.strip + 1 end,
+            SkinButton      = function() calls.button = calls.button + 1 end,
+            SkinCloseButton = function() calls.close = calls.close + 1 end,
+            SkinCheckbox    = function() calls.checkbox = calls.checkbox + 1 end,
+            SkinScrollbar   = function() calls.slider = calls.slider + 1 end,
+        }
+    end,
+}
+skin.env = nil          -- force a refetch
+skin.applied = false
+check(skin.Available() == true, "now available")
+check(skin.Enabled() == true, "and enabled")
+check(skin.Apply() == true, "Apply reports success")
+check(skin.applied == true, "and marks itself applied")
+check(calls.backdrop > 0, "backdrops applied", calls.backdrop)
+check(calls.button > 0, "buttons skinned", calls.button)
+check(calls.close > 0, "the close button used pfUI's close skin", calls.close)
+check(calls.checkbox > 0, "checkboxes skinned", calls.checkbox)
+check(calls.editbox + calls.strip > 0, "edit boxes stripped and backdropped",
+      calls.strip)
+-- Opt-outs must be honoured: inbox rows and attachment slots are click targets
+-- and icon wells, not buttons.
+check(A.ui.inboxRows[1].courierSkinned == true, "inbox rows were visited")
+check(A.ui.sendSlots[1].courierSkinned == true, "attachment slots were visited")
+
+-- Second pass must not redo the work.
+local before = calls.backdrop
+skin.Apply()
+check(calls.backdrop == before, "a second Apply is idempotent",
+      calls.backdrop .. " vs " .. before)
+
+print("== skin: the option is live when pfUI is present ==")
+A.ui.SelectSubTab("Courier")
+check(A.ui.checkPfSkin:IsEnabled() == true, "no longer greyed")
+
+print("== skin: the user setting still wins ==")
+A.db.SetSetting("pfSkin", false)
+check(skin.Enabled() == false, "off means off even with pfUI installed")
+check(skin.Apply() == false, "and Apply refuses")
+A.db.SetSetting("pfSkin", true)
+check(skin.Enabled() == true, "back on")
+
+print("== skin: a broken pfUI cannot break Courier ==")
+-- Every helper throws. The addon must degrade to "unskinned", not error.
+pfUI = {
+    GetEnvironment = function()
+        return {
+            CreateBackdrop  = function() error("boom") end,
+            StripTextures   = function() error("boom") end,
+            SkinButton      = function() error("boom") end,
+            SkinCloseButton = function() error("boom") end,
+            SkinCheckbox    = function() error("boom") end,
+            SkinScrollbar   = function() error("boom") end,
+        }
+    end,
+}
+skin.env = nil
+skin.applied = false
+check(skin.Apply() == true, "Apply survives a pfUI that throws on every call")
+
+-- A pfUI whose GetEnvironment itself explodes.
+pfUI = { GetEnvironment = function() error("boom") end }
+skin.env = nil
+skin.applied = false
+check(skin.Apply() == false, "and one whose environment cannot be fetched")
+
+-- A pfUI missing every helper we want.
+pfUI = { GetEnvironment = function() return {} end }
+skin.env = nil
+skin.applied = false
+check(skin.Apply() == true, "and one exposing no helpers at all")
+
+pfUI = nil
+skin.env = nil
+skin.applied = false
+
+print("== skin: the window still works unskinned ==")
+A.ui.SelectSubTab("Inbox")
+A.ui.SelectSubTab("Send")
+A.ui.SelectSubTab("Log")
+A.ui.SelectSubTab("Courier")
+check(true, "every tab still selects after the skin passes")
 
 print("")
 if failures == 0 then

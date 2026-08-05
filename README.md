@@ -1,11 +1,11 @@
-# Aegis: Courier (v0.5.0)
+# Aegis: Courier (v1.0.0)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
 **optional** integration into [Aegis: Exchange](https://github.com/Torchlite-bit/Aegis_Exchange).
 
-> **Stage C pre-release.** Reading, taking, sending and logging mail are all
-> in and tested. The pfUI skin is what remains — see [Status](#status).
+> **v1.0.0 — feature complete.** Reading, taking, sending, logging and
+> skinning are all in and tested. Courier is a full TurtleMail replacement.
 
 ---
 
@@ -39,9 +39,8 @@ Interface/AddOns/Aegis_Courier/
     ui/
 ```
 
-Upgrading from 0.2.x or earlier adds a file, so **restart the client** —
-`/reload` is not enough for the 1.12 client to notice a new `.toc` entry.
-Upgrading from 0.3.x is a plain `/reload`.
+**Upgrading to 1.0.0 adds a file, so restart the client** — `/reload` is not
+enough for the 1.12 client to notice a new `.toc` entry.
 
 ## Mailbox actions
 
@@ -117,6 +116,25 @@ Entries are written when a mail is actually **collected** or the server
 **confirms** a send, matching the ledger — a mail that failed to send is not a
 mail you sent. Turn the whole thing off in the **Courier** tab.
 
+## Using pfUI?
+
+If [pfUI](https://github.com/shagu/pfUI) is installed, Courier restyles itself
+to match it — window, buttons, checkboxes, edit boxes and scrollbars. It is
+**on by default** and lives in the **Courier** tab; with pfUI absent the option
+is greyed out, because there is nothing to match.
+
+pfUI is never a dependency. It is not in the `.toc`, every call into it is
+guarded, and the worst a pfUI change can do is leave you with Courier's default
+look.
+
+Turning it **on** applies immediately. Turning it **off** needs a `/reload`,
+since the styling pfUI applies cannot be cleanly undone — Courier says so
+rather than appearing to do nothing.
+
+If you manage skins through
+[pfUI-addonskinner](https://github.com/mrrosh/pfUI-addonskinner), there is a
+drop-in at `pfui/Aegis_Courier.lua`; see the comments at the top of that file.
+
 ## Usage
 
 | Command | What it does |
@@ -161,10 +179,11 @@ the current state.
 | **B** | Open-all / take-all / delete-read, right-click take; auction matching; sale/cut/net ledger writes on collection | **done** |
 | **C.1** | Send tab: multi-item batch send, recipient autocomplete, C.O.D. modes, true cost preview | **done** |
 | **C.2** | Mail log (sent + received), account-wide, with search and a per-character filter | **done** |
-| **C.3** | pfUI skin | next |
+| **C.3** | pfUI skin, on by default when pfUI is installed | **done** |
 
-Courier is now a complete TurtleMail replacement. What remains is cosmetic:
-matching pfUI's look when pfUI is installed.
+**The roadmap is complete.** Everything in the TurtleMail audit that Courier
+set out to replace is implemented, plus the auction ledger TurtleMail never
+had. Future work is whatever use turns up.
 
 ## Compatibility
 
@@ -187,7 +206,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 297 checks
+lua5.1 tests/harness.lua      # 328 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**
