@@ -9,6 +9,43 @@ pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [0.5.0] - 2026-08-05
+
+Return to sender, and a pass over the Courier tab's layout. `/reload`.
+
+### Added
+- **Return button on each inbox row.** Sends a mail back to its sender
+  unopened. Money and Left move left to make room and the subject column
+  narrows to suit.
+- It only appears on mail that can actually be returned. The gate is
+  `canReply` — the same header flag FrameXML uses to enable its own Reply
+  button — so auction-house and system mail leave the column empty rather than
+  offering a button the server would refuse.
+- It also hides while a take run is in progress: `ReturnInboxItem` removes the
+  mail and shifts every later index down one, exactly like a delete, which
+  would desync the engine mid-run. `ui.ReturnMail` refuses in that state even
+  if called directly.
+
+### Fixed
+- **The Courier tab's Integration heading was drawn on top of the log
+  checkbox.** The heading was anchored to the *push* option, which was the last
+  one when it was written; 0.4.0 added the log option below it and the heading
+  did not move. It now anchors to the last option, with a rule between the two
+  groups and more room throughout.
+- The settings statistics line no longer reports "0 tracked mail ids". Stage B
+  removed mail fingerprinting entirely, so `db.SeenCount()` is always zero and
+  read as though something were broken. It now shows ledger and log counts,
+  with correct singular/plural.
+
+### Changed
+- `CLAUDE.md` rule 15 extended: returning shifts indices like deleting, and
+  return is gated on `canReply`.
+
+### Tests
+- Harness grows to **297 checks**, covering which mail offers Return, that the
+  right sender receives it, that the inbox shrinks, and that Return is both
+  hidden and refused during a run.
+
 ## [0.4.0] - 2026-08-05
 
 Stage C.2: the correspondence log, plus three Send tab fixes from play testing.
@@ -213,6 +250,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[0.5.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.2.0

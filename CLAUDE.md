@@ -129,6 +129,12 @@ section, which is Courier's equivalent hazard surface.
     already on. Taking money or an item shifts nothing, so a mode that keeps
     the mail must advance itself. Getting this backwards silently skips every
     other mail.
+    - **`ReturnInboxItem` shifts indices the same way**, so it must never run
+      while the take engine is walking the inbox. The Return button hides for
+      the duration of a run, and `ui.ReturnMail` refuses anyway.
+    - Return is gated on **`canReply`** (header field 12) — the same flag
+      FrameXML uses to enable its own Reply button. Auction-house and system
+      mail have it unset and genuinely cannot be returned.
 16. **A progress guard must measure CHANGE, not attempts.** Because the delete
     path deliberately does not advance, a raw per-index action counter climbs
     straight through healthy mail and eventually skips a live one. Compare a

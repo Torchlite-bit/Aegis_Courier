@@ -336,12 +336,15 @@ function ui.BuildInboxPanel()
     hSubject:SetPoint("LEFT", head, "LEFT", 156, 0)
     hSubject:SetText("Subject")
 
+    -- Money and Left sit further left than the row's right edge to leave a
+    -- Return column. Header offsets are the row offsets + 26, because the rows
+    -- inset for the scrollbar and this header does not.
     local hMoney = Label(head, "GameFontNormalSmall", C.goldDim)
-    hMoney:SetPoint("RIGHT", head, "RIGHT", -62, 0)
+    hMoney:SetPoint("RIGHT", head, "RIGHT", -122, 0)
     hMoney:SetText("Money")
 
     local hExpire = Label(head, "GameFontNormalSmall", C.goldDim)
-    hExpire:SetPoint("RIGHT", head, "RIGHT", -22, 0)
+    hExpire:SetPoint("RIGHT", head, "RIGHT", -84, 0)
     hExpire:SetText("Left")
 
     -- The list well.
@@ -396,12 +399,28 @@ function ui.BuildInboxPanel()
         row.subject = subject
 
         local money = Label(row, "GameFontNormalSmall", C.gold)
-        money:SetPoint("RIGHT", row, "RIGHT", -46, 0)
+        money:SetPoint("RIGHT", row, "RIGHT", -96, 0)
         row.money = money
 
         local expire = Label(row, "GameFontNormalSmall", C.dim)
-        expire:SetPoint("RIGHT", row, "RIGHT", -6, 0)
+        expire:SetPoint("RIGHT", row, "RIGHT", -58, 0)
         row.expire = expire
+
+        -- Return to sender. Parented to the row so it scrolls with it, and
+        -- shown only for mail that can actually be returned -- see
+        -- ui.RefreshInbox. A dead greyed button on every auction mail would be
+        -- worse than an empty cell.
+        local ret = CreateFrame("Button", "AegisCourierInboxReturn" .. i, row,
+            "UIPanelButtonTemplate")
+        ret:SetWidth(52)
+        ret:SetHeight(18)
+        ret:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+        ret:SetText("Return")
+        ret:SetScript("OnClick", function()
+            ui.ReturnMail(row.mailIndex)
+        end)
+        ret:Hide()
+        row.ret = ret
 
         row:Hide()
         ui.inboxRows[i] = row
@@ -410,7 +429,8 @@ function ui.BuildInboxPanel()
 
     local note = Label(panel, "GameFontNormalSmall", C.dim)
     note:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 4)
-    note:SetText("Right-click a mail to take it. COD and GM mail are always skipped.")
+    note:SetText("Right-click a mail to take it. Return sends it back unopened. " ..
+        "COD and GM mail are always skipped.")
     ui.inboxNote = note
 end
 
@@ -493,7 +513,7 @@ function ui.RefreshInbox()
             if h.wasReturned then
                 subject = "|cffd08050[returned]|r " .. subject
             end
-            SetClipped(row.subject, subject, 240)
+            SetClipped(row.subject, subject, 230)
 
             if h.cod > 0 then
                 row.money:SetText("|cffd05050COD " ..
@@ -506,9 +526,21 @@ function ui.RefreshInbox()
 
             row.expire:SetText(util.FormatDaysLeft(h.daysLeft))
             row.mailIndex = h.index
+
+            -- `canReply` is the same gate FrameXML uses to enable its own
+            -- Reply button: auction-house and system mail have it unset and
+            -- genuinely cannot be returned. Hidden during a run because
+            -- returning removes the mail and shifts every later index, which
+            -- would desync the take engine mid-flight.
+            if h.canReply and not h.isGM and not A.take.running then
+                row.ret:Show()
+            else
+                row.ret:Hide()
+            end
             row:Show()
         else
             row.mailIndex = nil
+            row.ret:Hide()
             row:Hide()
         end
         i = i + 1
@@ -1166,6 +1198,29 @@ function ui.RefreshLog()
     end
 end
 
+-- Return one mail to its sender.
+--
+-- ReturnInboxItem removes the mail from our inbox and shifts every later index
+-- down one, exactly like a delete -- so it must never run while the take
+-- engine is walking the inbox.
+function ui.ReturnMail(index)
+    if not index then return end
+    if A.take.running then
+        A.Print("finish the current run before returning mail.")
+        return
+    end
+    local h = inbox.Header(index)
+    if not h then return end
+    if not h.canReply or h.isGM then
+        A.Print("that mail cannot be returned to its sender.")
+        return
+    end
+    if not ReturnInboxItem then return end
+    ReturnInboxItem(index)
+    A.Print("returned \"" .. h.subject .. "\" to " .. h.sender .. ".")
+    -- MAIL_INBOX_UPDATE repaints the list once the server confirms.
+end
+
 -- ---------------------------------------------------------------------------
 -- Ledger panel
 -- ---------------------------------------------------------------------------
@@ -1304,33 +1359,51 @@ function ui.BuildCourierPanel()
                 if ui.mailOpen then ui.ShowBlizzardMail() end
             end
         end)
-    takeover:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -8)
+    takeover:SetPoint("TOPLEFT", head, "BOTTOMLEFT", 0, -12)
 
     local push = MakeCheck(panel, "Push",
         "Send matched auction mail to Aegis: Exchange", "pushToAegis")
-    push:SetPoint("TOPLEFT", takeover, "BOTTOMLEFT", 0, -4)
+    push:SetPoint("TOPLEFT", takeover, "BOTTOMLEFT", 0, -8)
 
     local logOn = MakeCheck(panel, "Log",
         "Keep a log of mail sent and collected", "logEnabled")
-    logOn:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -4)
+    logOn:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -8)
 
     ui.checkTakeover = takeover
     ui.checkPush = push
     ui.checkLog = logOn
 
+    -- A rule between the two groups. Without it -- and with the Integration
+    -- heading previously anchored to `push` rather than to the last checkbox --
+    -- the heading was drawn straight on top of the log option.
+    local divider = panel:CreateTexture(nil, "ARTWORK")
+    divider:SetHeight(1)
+    divider:SetPoint("TOPLEFT", logOn, "BOTTOMLEFT", 0, -14)
+    divider:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
+    divider:SetTexture(C.goldDim[1], C.goldDim[2], C.goldDim[3], 0.35)
+
     local integHead = Label(panel, "GameFontNormal", C.gold)
-    integHead:SetPoint("TOPLEFT", push, "BOTTOMLEFT", 0, -18)
+    integHead:SetPoint("TOPLEFT", divider, "BOTTOMLEFT", 0, -12)
     integHead:SetText("Integration")
 
     local integ = Label(panel, "GameFontNormalSmall", C.text)
-    integ:SetPoint("TOPLEFT", integHead, "BOTTOMLEFT", 2, -6)
-    integ:SetWidth(WIN_W - 40)
+    integ:SetPoint("TOPLEFT", integHead, "BOTTOMLEFT", 2, -8)
+    integ:SetWidth(WIN_W - 48)
     integ:SetJustifyH("LEFT")
+    -- The status runs to several lines when Aegis is absent or out of date;
+    -- without extra leading the wrapped lines crowd each other.
+    integ:SetSpacing(2)
     ui.integStatus = integ
 
     local stats = Label(panel, "GameFontNormalSmall", C.dim)
-    stats:SetPoint("TOPLEFT", integ, "BOTTOMLEFT", 0, -14)
+    stats:SetPoint("TOPLEFT", integ, "BOTTOMLEFT", 0, -18)
     ui.courierStats = stats
+end
+
+-- "1 entry" / "2 entries", so the settings tab does not read like a stub.
+local function Plural(n, one, many)
+    if n == 1 then return n .. " " .. one end
+    return n .. " " .. many
 end
 
 function ui.RefreshCourier()
@@ -1354,8 +1427,12 @@ function ui.RefreshCourier()
     end
     ui.integStatus:SetText(status)
 
-    ui.courierStats:SetText("Ledger: " .. table.getn(db.Ledger()) ..
-        " entries, " .. db.SeenCount() .. " tracked mail ids.")
+    -- Deliberately NOT db.SeenCount(): Stage B stopped using mail
+    -- fingerprints, so it is always 0 and reads as though something is broken.
+    ui.courierStats:SetText(
+        "Ledger: " .. Plural(table.getn(db.Ledger()), "entry", "entries") ..
+        "   |   Log: " .. table.getn(db.Log("received")) .. " received, " ..
+        table.getn(db.Log("sent")) .. " sent")
 end
 
 -- ---------------------------------------------------------------------------

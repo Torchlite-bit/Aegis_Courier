@@ -1,4 +1,4 @@
-# Aegis: Courier (v0.4.0)
+# Aegis: Courier (v0.5.0)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
@@ -51,9 +51,16 @@ Upgrading from 0.3.x is a plain `/reload`.
 | **Take All** | take gold and items, **keep** the mail |
 | **Delete Read** | delete read mail that is already empty — never anything holding gold or an item |
 | **right-click a mail** | take that one mail |
+| **Return** | send a mail back to its sender, unopened |
 
 COD and GM mail are **always** skipped, in every mode and by right-click. That
 is not a setting: paying a COD by accident cannot be undone.
+
+The **Return** button only appears on mail that can actually be returned — the
+server does not allow returning auction-house or system mail, so those rows
+leave the column empty rather than offering a button that would fail. It also
+hides while a run is in progress, since returning a mail shifts every later
+one's index.
 
 Everything runs one mail at a time, clocked by the server's own inbox refresh,
 and stops by itself if your bags fill up. A mail is never deleted while it
@@ -180,7 +187,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 285 checks
+lua5.1 tests/harness.lua      # 297 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**
