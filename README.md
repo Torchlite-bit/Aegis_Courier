@@ -1,11 +1,11 @@
-# Aegis: Courier (v0.2.0)
+# Aegis: Courier (v0.3.0)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
 **optional** integration into [Aegis: Exchange](https://github.com/Torchlite-bit/Aegis_Exchange).
 
-> **Stage B pre-release.** The window, the mailbox takeover, the mail actions
-> and the auction ledger are all in and tested. Sending mail is Stage C — see
+> **Stage C pre-release.** Reading, taking and sending mail are all in and
+> tested. The mail log and the pfUI skin are what remain — see
 > [Status](#status).
 
 ---
@@ -40,6 +40,9 @@ Interface/AddOns/Aegis_Courier/
     ui/
 ```
 
+Upgrading from 0.2.x adds a file, so **restart the client** — `/reload` is not
+enough for the 1.12 client to notice a new `.toc` entry.
+
 ## Mailbox actions
 
 | Action | What it does |
@@ -66,6 +69,28 @@ that you have not received.
 Only `Auction successful` mail books income. `Outbid on …` mail carries gold
 too, but that is your own returned bid, so it is collected and deliberately
 **not** counted as a sale.
+
+## Sending mail
+
+Vanilla mail carries **one attachment per message**. Courier does not pretend
+otherwise — it queues up to 12 items and sends them as 12 mails, back to back,
+and the cost line shows the **real** total postage rather than a single mail's.
+
+| | |
+|---|---|
+| **attach** | right-click an item in your bags, or drag it onto a slot |
+| **remove** | click a filled slot |
+| **subject** | leave it blank and each mail is named after its item (`Silk Cloth (20)`); fill it in and a batch is numbered `subject [2/5]` |
+| **recipient** | starts suggesting names you have mailed or been mailed by, most recent first |
+| **gold** | type `12g 30s`, or a bare number for gold |
+| **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
+
+Attached gold rides the **first** mail only, so a 10-item send does not send
+your gold ten times. If an item cannot be attached — moved, sold, soulbound —
+the batch stops before that mail goes out rather than posting an empty one.
+
+Right-click in your bags only attaches while the Send tab is actually open at
+a mailbox; everywhere else it keeps its normal meaning.
 
 ## Usage
 
@@ -109,10 +134,12 @@ the current state.
 |---|---|---|
 | **A** | Own window, mailbox takeover, inbox list, ledger/settings tabs, Aegis seam | **done** |
 | **B** | Open-all / take-all / delete-read, right-click take; auction matching; sale/cut/net ledger writes on collection | **done** |
-| **C** | Send-mail (multi-attach, autocomplete, COD modes), mail log, pfUI skin | next |
+| **C.1** | Send tab: multi-item batch send, recipient autocomplete, C.O.D. modes, true cost preview | **done** |
+| **C.2** | Mail log (sent + received) with participant and category filters | next |
+| **C.3** | pfUI skin | planned |
 
-What Courier does **not** do yet: sending mail. The send tab is still the stock
-Blizzard one — use the **Blizzard UI** button when you need it.
+What Courier does **not** do yet: keep a log of mail sent and received. The
+ledger covers auction sales; a general correspondence log is C.2.
 
 ## Compatibility
 
@@ -135,7 +162,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 154 checks
+lua5.1 tests/harness.lua      # 233 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**
@@ -143,7 +170,9 @@ end the mail session and that the takeover hide is never synchronous — the two
 mistakes that leave a mailbox looking fine while it silently refuses to hand
 over mail — and that the take engine never deletes a mail holding an item,
 never books a sale the server refused, and never counts an outbid refund as
-income.
+income. The send engine is covered end to end too: batch numbering, gold on
+the first mail only, C.O.D. modes, and an unattachable item stopping the batch
+before an empty mail goes out.
 
 ## Credits
 

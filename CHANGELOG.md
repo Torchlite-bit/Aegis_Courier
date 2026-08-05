@@ -9,6 +9,60 @@ pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [0.3.0] - 2026-08-05 — **restart**
+
+Stage C.1: sending mail. **This release adds `core/send.lua` to the `.toc`, so
+a full client restart is required** — 1.12 reads the file list at startup and
+`/reload` will not pick it up.
+
+### Added
+- **Send tab.** Courier hides the Blizzard mail frame, so until now there was
+  no way to send mail without handing the window back. Recipient, subject,
+  body, gold, C.O.D. and a 12-slot attachment grid.
+- **Multi-item send.** Vanilla mail carries one attachment per message, so a
+  12-item send is 12 mails issued back to back, clocked by `MAIL_SEND_SUCCESS`.
+  Subjects are numbered `subject [2/5]`; a blank subject names each mail after
+  its item (`Silk Cloth (20)`).
+- **True cost preview** — postage multiplied by the number of mails the batch
+  will actually produce, which the stock UI cannot show because it never sends
+  a batch.
+- **Recipient autocomplete**, harvested from everyone who mails you (excluding
+  the auction house and GMs) and every successful send, scoped per
+  realm+faction and aged out after 30 days.
+- **C.O.D. on the first mail or on every mail** of a batch.
+- Attach by right-clicking an item in your bags or dragging it onto a slot;
+  click a filled slot to remove it.
+
+### Behaviour worth knowing
+- **Attached gold rides the first mail only.** A 10-item send would otherwise
+  send the same gold ten times. C.O.D. is a charge rather than a transfer, so
+  it may repeat — but only when asked.
+- **An unattachable item stops the batch before sending.** `GetSendMailItem()`
+  is checked after the attach; if the stack moved, sold or is soulbound,
+  `SendMail` would post an **empty** mail and leave the item behind. On abort
+  the attachment list is preserved so the send can be retried.
+- Bag right-click is only intercepted while the Send tab is open at a mailbox.
+  Everywhere else it keeps its normal meaning.
+- `MAIL_FAILED` aborts the batch and reports how many of the mails went out.
+
+### Fixed
+- Reclaim keyboard focus after each send. Blizzard's `MailFrame` is hidden but
+  still receives `MAIL_SEND_SUCCESS`, and its `SendMailFrame_Reset()` calls
+  `SetFocus()` on its own recipient box — which would have swallowed the next
+  keystroke into an invisible frame.
+
+### Changed
+- `CLAUDE.md` gains five send hard rules (20–24): one attachment per mail, no
+  `GetCursorInfo` on 1.12, verify the attach before sending, the C-vs-FrameXML
+  split, and gold on the first mail only.
+- `core/db.lua` stores contacts per realm+faction.
+
+### Tests
+- Harness grows to **233 checks**, adding the send engine end to end: batch
+  numbering, auto-subjects, gold and C.O.D. placement, failed attaches,
+  `MAIL_FAILED`, autocomplete matching and harvesting, and the bag right-click
+  hook's scoping.
+
 ## [0.2.0] - 2026-08-05
 
 Stage B: mail actions and the auction ledger. No new `.lua` file, so this is a
@@ -104,5 +158,6 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[0.3.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.1.0

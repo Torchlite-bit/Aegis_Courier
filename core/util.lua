@@ -61,6 +61,38 @@ function util.FormatMoney(copper, colored)
     return table.concat(parts, " ")
 end
 
+-- Parse a money string like "12g 34s 56c" (units case-insensitive, spaces
+-- optional) into total copper. A bare number is read as GOLD, which is what
+-- someone typing "50" into a mail money box means. Returns nil when nothing
+-- parseable is found. Uses string.gfind (Lua 5.0), NOT string.gmatch.
+function util.ParseMoney(str)
+    if type(str) ~= "string" then return nil end
+    local trimmed = util.Trim(str)
+    if trimmed == "" then return nil end
+
+    -- Bare number -> gold.
+    local s, e = string.find(trimmed, "^%d+$")
+    if s then return tonumber(trimmed) * COPPER_PER_GOLD end
+
+    local total, found = 0, false
+    for amount, unit in string.gfind(trimmed, "(%d+)%s*([gscGSC])") do
+        local n = tonumber(amount)
+        if n then
+            unit = string.lower(unit)
+            if unit == "g" then
+                total = total + n * COPPER_PER_GOLD
+            elseif unit == "s" then
+                total = total + n * COPPER_PER_SILVER
+            else
+                total = total + n
+            end
+            found = true
+        end
+    end
+    if not found then return nil end
+    return total
+end
+
 -- Given the money actually attached to a sale mail (the NET proceeds), return
 -- (gross, cut, net) in copper.
 --
@@ -161,6 +193,24 @@ function util.SubjectItem(subject, fmt)
 
     if finish < start then return nil end
     return util.Trim(string.sub(subject, start, finish))
+end
+
+-- Pull the display name out of an item link. Bag slots DO have links on 1.12
+-- (unlike the mail inbox -- see CLAUDE.md rule 10), and the name sits between
+-- the square brackets:
+--   |cff1eff00|Hitem:2589:0:0:0|h[Linen Cloth]|h|r  ->  "Linen Cloth"
+-- string.find with a capture; NOT string.match.
+function util.ItemNameFromLink(link)
+    if type(link) ~= "string" then return nil end
+    local _, _, name = string.find(link, "%[(.+)%]")
+    return name
+end
+
+-- Pull the numeric itemID out of an item link or item string.
+function util.ItemIdFromLink(link)
+    if type(link) ~= "string" then return nil end
+    local _, _, id = string.find(link, "item:(%d+)")
+    return tonumber(id)
 end
 
 -- ---------------------------------------------------------------------------

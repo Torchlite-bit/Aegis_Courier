@@ -57,15 +57,28 @@ since Courier only books what its own engine takes.
 
 ## Stage C — send mail and the log
 
-- Multi-item send: attachment grid, one mail per item, `[i/n]` subjects,
-  true multi-mail cost preview (audit §3).
-- Recipient autocomplete, harvested from inbox senders and successful sends,
-  aged out after 30 days.
-- COD on first / every mail.
-- Mail log (sent + received) with participant and category filters.
-  Deliberately **not** porting TurtleMail's bundled calendar date-picker.
-- pfUI skin, every call `pcall`-guarded so a pfUI API change can only cost the
-  default look.
+### C.1 Send tab ✅
+Landed in 0.3.0 (**restart** — adds `core/send.lua`).
+
+- Multi-item send: 12-slot attachment grid, one mail per item, `[i/n]`
+  subjects, blank-subject auto-naming, true multi-mail postage preview.
+- Recipient autocomplete harvested from inbox senders and successful sends,
+  scoped per realm+faction, aged out after 30 days.
+- C.O.D. on the first mail or every mail; attached gold on the first only.
+- Attach by bag right-click (scoped to the Send tab at a mailbox) or drag.
+- Aborts before sending if an item will not attach, preserving the list.
+
+### C.2 Mail log — next
+Sent + received log with participant and category filters (audit §4). The
+auction ledger already covers sales; this is general correspondence.
+Deliberately **not** porting TurtleMail's bundled calendar date-picker.
+
+Open question to settle first: whether the log is per-character (TurtleMail's
+choice) or account-wide. Per-character matches expectations but makes "did I
+send that on my bank alt?" unanswerable, which is the common real question.
+
+### C.3 pfUI skin — planned
+Every call `pcall`-guarded so a pfUI API change can only cost the default look.
 
 ---
 

@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: Aegis: Courier
 ## Notes: Standalone mailbox companion for Turtle WoW
-## Version: 0.2.0
+## Version: 0.3.0
 ## SavedVariables: CourierDB
 ## SavedVariablesPerCharacter: CourierCharDB
 
@@ -10,4 +10,5 @@ core\util.lua
 core\db.lua
 core\bridge.lua
 core\inbox.lua
+core\send.lua
 ui\frame.lua

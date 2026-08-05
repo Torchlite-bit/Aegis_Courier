@@ -132,6 +132,69 @@ ERR_INV_FULL = "Your bags are full."
 INVENTORY_FULL = "Inventory is full."
 ERR_ITEM_MAX_COUNT = "You cannot carry any more of those items."
 
+-- ---- outgoing mail + bags ------------------------------------------------
+BAGS = {}            -- BAGS[bag][slot] = { name, texture, count }
+SENT = {}            -- every SendMail call, in order
+playerMoney = 10000000
+attachSlot = nil     -- the single vanilla attachment slot
+cursor = nil
+sendMoneyAmt, sendCODAmt = 0, 0
+failAttach = false   -- simulate an item that will not attach
+failSend = false     -- simulate the server rejecting a mail
+
+GetMoney = function() return playerMoney end
+GetSendMailPrice = function() return 30 end
+GetCVar = function(k) return k == "realmName" and "TestRealm" or "" end
+UnitFactionGroup = function() return "Alliance" end
+UnitName = function() return "Tester" end
+ClearCursor = function() cursor = nil end
+CursorHasItem = function() return cursor ~= nil end
+
+GetContainerItemInfo = function(bag, slot)
+    local it = BAGS[bag] and BAGS[bag][slot]
+    if not it then return nil end
+    return it.texture, it.count
+end
+GetContainerItemLink = function(bag, slot)
+    local it = BAGS[bag] and BAGS[bag][slot]
+    if not it then return nil end
+    return "|cff1eff00|Hitem:1:0:0:0|h[" .. it.name .. "]|h|r"
+end
+PickupContainerItem = function(bag, slot)
+    local it = BAGS[bag] and BAGS[bag][slot]
+    if it then cursor = { bag = bag, slot = slot, item = it } end
+end
+SplitContainerItem = function() end
+useContainerCalls = 0
+UseContainerItem = function() useContainerCalls = useContainerCalls + 1 end
+
+ClickSendMailItemButton = function()
+    if cursor then
+        if not failAttach then
+            attachSlot = cursor.item
+            BAGS[cursor.bag][cursor.slot] = nil
+        end
+        cursor = nil
+    else
+        attachSlot = nil        -- empty cursor picks the attachment back up
+    end
+end
+GetSendMailItem = function()
+    if not attachSlot then return nil end
+    return attachSlot.name, attachSlot.texture, attachSlot.count
+end
+SetSendMailMoney = function(c) sendMoneyAmt = c or 0 end
+SetSendMailCOD   = function(c) sendCODAmt = c or 0 end
+
+SendMail = function(to, subject, body)
+    table.insert(SENT, { to = to, subject = subject, body = body,
+        item = attachSlot and attachSlot.name or nil,
+        count = attachSlot and attachSlot.count or nil,
+        money = sendMoneyAmt, cod = sendCODAmt })
+    attachSlot = nil
+    sendMoneyAmt, sendCODAmt = 0, 0
+end
+
 -- MailFrame as FrameXML builds it: an OnHide that ends the session.
 MailFrame = CreateFrame("Frame", "MailFrame")
 MailFrame:SetScript("OnHide", function() CloseMail() end)
@@ -140,7 +203,8 @@ MailFrameCloseButton = CreateFrame("Button", "MailFrameCloseButton")
 
 -- ---- Load the addon in .toc order ---------------------------------------
 local files = { "core/init.lua", "core/util.lua", "core/db.lua",
-                "core/bridge.lua", "core/inbox.lua", "ui/frame.lua" }
+                "core/bridge.lua", "core/inbox.lua", "core/send.lua",
+                "ui/frame.lua" }
 for _, f in ipairs(files) do assert(loadfile(f))() end
 
 local A = AegisCourier
@@ -636,6 +700,251 @@ check(not take.HasWork(take.MODE_OPEN), "no work on an empty inbox")
 check(not take.HasWork(take.MODE_DELETE), "nothing to delete either")
 A.ui.OnTakeStateChanged()
 check(true, "action bar refresh runs clean on an empty inbox")
+
+-- =========================================================================
+-- Stage C: sending mail
+-- =========================================================================
+
+local send = A.send
+local sdriver = getglobal("AegisCourierSender")
+check(sdriver ~= nil, "send driver frame exists")
+
+-- Our tick issues one mail; the server then confirms it. Sending a batch from
+-- inside the success handler is exactly what this deferral avoids.
+local function pumpSend(limit)
+    local n, seen = 0, table.getn(SENT)
+    while send.sending and n < (limit or 60) do
+        sdriver.scripts.OnUpdate()
+        local now = table.getn(SENT)
+        if now > seen then
+            seen = now
+            fire("MAIL_SEND_SUCCESS")
+        end
+        n = n + 1
+    end
+    return n
+end
+
+local function stockBags()
+    BAGS = { [0] = {
+        [1] = { name = "Silk Cloth",   texture = "t1", count = 20 },
+        [2] = { name = "Copper Ore",   texture = "t2", count = 5 },
+        [3] = { name = "Black Lotus",  texture = "t3", count = 1 },
+    } }
+    SENT = {}
+    attachSlot, cursor = nil, nil
+    send.ClearAttachments()
+end
+
+print("== util: item links and money parsing ==")
+check(A.util.ItemNameFromLink("|cff1eff00|Hitem:2589:0:0:0|h[Linen Cloth]|h|r")
+      == "Linen Cloth", "name extracted from link")
+check(A.util.ItemNameFromLink(nil) == nil, "nil link safe")
+check(A.util.ItemIdFromLink("|Hitem:2589:0:0:0|h") == 2589, "id extracted")
+check(A.util.ParseMoney("12g 30s") == 123000, "g+s parsed", A.util.ParseMoney("12g 30s"))
+check(A.util.ParseMoney("50") == 500000, "bare number reads as gold",
+      A.util.ParseMoney("50"))
+check(A.util.ParseMoney("7c") == 7, "copper parsed")
+check(A.util.ParseMoney("") == nil, "empty is nil")
+check(A.util.ParseMoney("abc") == nil, "junk is nil")
+
+print("== send: attachment list ==")
+stockBags()
+check(send.Attach(0, 1), "attached first item")
+check(send.Count() == 1, "count is 1")
+check(send.attachments[1].name == "Silk Cloth", "name resolved from the link",
+      send.attachments[1].name)
+check(send.attachments[1].count == 20, "stack count kept")
+check(send.Attach(0, 1) == false, "same slot cannot be attached twice")
+check(send.Attach(0, 99) == false, "empty slot cannot be attached")
+check(send.Attach(0, 2), "second item attached")
+check(send.Count() == 2, "count is 2")
+check(send.Detach(1), "detached")
+check(send.Count() == 1 and send.attachments[1].name == "Copper Ore",
+      "the right one was removed")
+send.ClearAttachments()
+check(send.Count() == 0, "cleared")
+
+print("== send: cost is per MAIL, not per send ==")
+stockBags()
+check(send.MailCount() == 1, "no attachments still means one mail")
+check(send.Postage() == 30, "one mail's postage", send.Postage())
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+check(send.MailCount() == 3, "three items means three mails")
+check(send.Postage() == 90, "postage multiplies", send.Postage())
+check(send.TotalCost(5000, false) == 5090, "attached gold is spent",
+      send.TotalCost(5000, false))
+check(send.TotalCost(5000, true) == 90, "COD gold is collected, not spent",
+      send.TotalCost(5000, true))
+
+print("== send: validation ==")
+stockBags()
+local ok, why = send.Validate("", 0, false)
+check(not ok and why == "no recipient", "empty recipient rejected", why)
+ok, why = send.Validate("   ", 0, false)
+check(not ok, "whitespace recipient rejected")
+ok, why = send.Validate("Bob", 0, false)
+check(not ok and why == "nothing to send", "empty mail rejected", why)
+ok, why = send.Validate("Bob", 5000, true)
+check(not ok and why == "COD needs an item", "COD without an item rejected", why)
+send.Attach(0, 1)
+ok, why = send.Validate("Bob", 0, false)
+check(ok, "item alone is sendable", why)
+playerMoney = 10
+ok, why = send.Validate("Bob", 0, false)
+check(not ok, "cannot afford postage", why)
+playerMoney = 10000000
+
+print("== send: one item, one mail ==")
+stockBags()
+send.Attach(0, 1)
+check(send.Start("Bob", "hello", "body text", 0, false, false), "send started")
+pumpSend()
+check(not send.sending, "finished")
+check(table.getn(SENT) == 1, "one mail sent", table.getn(SENT))
+check(SENT[1].to == "Bob", "recipient")
+check(SENT[1].subject == "hello", "subject verbatim for a single mail",
+      SENT[1].subject)
+check(SENT[1].body == "body text", "body")
+check(SENT[1].item == "Silk Cloth", "item attached", tostring(SENT[1].item))
+check(send.Count() == 0, "attachment list cleared after success")
+
+print("== send: three items become three mails ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Ann", "stuff", "", 0, false, false)
+pumpSend()
+check(table.getn(SENT) == 3, "three mails", table.getn(SENT))
+check(SENT[1].subject == "stuff [1/3]", "batch subjects numbered", SENT[1].subject)
+check(SENT[3].subject == "stuff [3/3]", "last numbered", SENT[3].subject)
+check(SENT[1].item == "Silk Cloth" and SENT[2].item == "Copper Ore"
+      and SENT[3].item == "Black Lotus", "one item per mail, in order")
+check(send.sentCount == 3, "count tracked")
+
+print("== send: blank subject auto-names from the item ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 3)
+send.Start("Ann", "", "", 0, false, false)
+pumpSend()
+check(SENT[1].subject == "Silk Cloth (20)", "stack count included",
+      SENT[1].subject)
+check(SENT[2].subject == "Black Lotus", "single item has no count suffix",
+      SENT[2].subject)
+
+print("== send: gold rides the FIRST mail only ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "gold", "", 5000, false, false)
+pumpSend()
+check(table.getn(SENT) == 2, "two mails")
+check(SENT[1].money == 5000, "first mail carries the gold", SENT[1].money)
+check(SENT[2].money == 0, "second does NOT resend it", SENT[2].money)
+
+print("== send: COD on the first vs on every mail ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "cod", "", 5000, true, false)
+pumpSend()
+check(SENT[1].cod == 5000, "COD on the first", SENT[1].cod)
+check(SENT[2].cod == 0, "not on the second", SENT[2].cod)
+
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "cod", "", 5000, true, true)
+pumpSend()
+check(SENT[1].cod == 5000 and SENT[2].cod == 5000, "codAll charges every mail",
+      tostring(SENT[1].cod) .. "/" .. tostring(SENT[2].cod))
+
+print("== send: an item that will not attach stops the batch ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+failAttach = true
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+failAttach = false
+check(not send.sending, "aborted")
+check(table.getn(SENT) == 0, "NOTHING was sent -- no empty mail went out",
+      table.getn(SENT))
+check(send.Count() == 2, "attachments kept so the user can retry", send.Count())
+
+print("== send: MAIL_FAILED aborts the batch ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "x", "", 0, false, false)
+sdriver.scripts.OnUpdate()          -- first mail issued
+check(table.getn(SENT) == 1, "first mail out")
+fire("MAIL_FAILED")
+check(not send.sending, "run aborted on failure")
+check(send.Count() == 2, "attachment list preserved")
+
+print("== send: recipient autocomplete ==")
+A.db.ForgetContacts()
+A.db.AddContact("Bobbie")
+A.db.AddContact("Bobby")
+A.db.AddContact("Annie")
+local m = A.db.MatchContacts("Bob", 5)
+check(table.getn(m) == 2, "prefix matched", table.getn(m))
+check(A.db.MatchContacts("bob", 5)[1] ~= nil, "match is case-insensitive")
+check(table.getn(A.db.MatchContacts("Zed", 5)) == 0, "no false matches")
+check(table.getn(A.db.MatchContacts("", 2)) == 2, "limit respected")
+-- A successful send remembers the recipient.
+stockBags()
+send.Attach(0, 1)
+send.Start("Carlos", "hi", "", 0, false, false)
+pumpSend()
+check(table.getn(A.db.MatchContacts("Carl", 5)) == 1, "recipient remembered")
+
+print("== send: contacts harvested from the inbox ==")
+A.db.ForgetContacts()
+INBOX = {
+    mail{ sender = "Wanda", subject = "hello" },
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 10 },
+    mail{ sender = "GMBob", subject = "ticket", gm = true },
+}
+fire("MAIL_INBOX_UPDATE")
+check(table.getn(A.db.MatchContacts("Wanda", 5)) == 1, "player sender kept")
+check(table.getn(A.db.MatchContacts("Stormwind", 5)) == 0,
+      "auction house not offered as a contact")
+check(table.getn(A.db.MatchContacts("GMBob", 5)) == 0, "GM not offered")
+
+print("== send: bag right-click only hijacked on the Send tab ==")
+stockBags()
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+check(not A.ui.SendAttachActive(), "not active on the Inbox tab")
+local before = useContainerCalls
+UseContainerItem(0, 1)
+check(useContainerCalls == before + 1, "right-click passed through to the game")
+check(send.Count() == 0, "and attached nothing")
+
+A.ui.SelectSubTab("Send")
+check(A.ui.SendAttachActive(), "active on the Send tab at a mailbox")
+before = useContainerCalls
+UseContainerItem(0, 1)
+check(useContainerCalls == before, "right-click intercepted")
+check(send.Count() == 1, "and attached the item", send.Count())
+
+A.ui.mailOpen = false
+check(not A.ui.SendAttachActive(), "not active away from a mailbox")
+A.ui.mailOpen = true
+
+print("== send: drag-to-attach uses the remembered cursor origin ==")
+stockBags()
+A.ui.SelectSubTab("Send")
+PickupContainerItem(0, 2)           -- goes through our hook
+check(send.cursorItem ~= nil, "cursor origin remembered")
+check(send.AttachCursor(), "attached from the cursor")
+check(send.attachments[1].name == "Copper Ore", "the right item",
+      send.attachments[1].name)
+
+print("== send: UI refresh paths run clean ==")
+A.ui.RefreshSend()
+A.ui.ClearSendForm()
+check(send.Count() == 0, "Clear empties the form")
+A.ui.SelectSubTab("Send")
+A.ui.Refresh()
+check(true, "send tab refresh runs without error")
 
 print("")
 if failures == 0 then

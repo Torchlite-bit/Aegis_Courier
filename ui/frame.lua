@@ -49,7 +49,7 @@ local WIN_W, WIN_H  = 660, 440
 local ROW_H         = 28
 local ROWS          = 10
 
-local SUBTABS = { "Inbox", "Ledger", "Courier" }
+local SUBTABS = { "Inbox", "Send", "Ledger", "Courier" }
 
 -- ---------------------------------------------------------------------------
 -- Small helpers
@@ -261,6 +261,7 @@ function ui.BuildWindow()
     ui.footer = footer
 
     ui.BuildInboxPanel()
+    ui.BuildSendPanel()
     ui.BuildLedgerPanel()
     ui.BuildCourierPanel()
 
@@ -514,6 +515,380 @@ function ui.RefreshInbox()
 end
 
 -- ---------------------------------------------------------------------------
+-- Send panel
+-- ---------------------------------------------------------------------------
+--
+-- Courier hides the Blizzard mail frame outright, so until this existed there
+-- was no way to send mail at all without handing the window back. The send
+-- ENGINE (and the reason a 12-item send is really 12 mails) lives in
+-- core/send.lua; this is only the form.
+
+local ATTACH_COLS, ATTACH_SIZE = 6, 32
+local AUTOCOMPLETE_ROWS = 5
+
+-- A plain checkbox with no SavedVariables binding, for the send form's
+-- per-mail toggles. (The settings tab's MakeCheck writes through to the DB and
+-- is declared further down, so it is not in scope here anyway.)
+local function MakeToggle(parent, name, label)
+    local c = CreateFrame("CheckButton", "AegisCourierToggle" .. name, parent,
+        "UICheckButtonTemplate")
+    c:SetWidth(20)
+    c:SetHeight(20)
+    local text = getglobal("AegisCourierToggle" .. name .. "Text")
+    if text then
+        text:SetText(label)
+        text:SetTextColor(C.text[1], C.text[2], C.text[3])
+    end
+    return c
+end
+
+local function MakeEditBox(name, parent, width, multiline)
+    local e = CreateFrame("EditBox", "AegisCourierEdit" .. name, parent,
+        "InputBoxTemplate")
+    e:SetWidth(width)
+    e:SetHeight(multiline and 96 or 18)
+    e:SetAutoFocus(false)      -- otherwise opening the tab steals the keyboard
+    e:SetFontObject("GameFontHighlightSmall")
+    if multiline then
+        e:SetMultiLine(true)
+        e:SetMaxLetters(500)
+        e:SetTextInsets(4, 4, 4, 4)
+    else
+        e:SetMaxLetters(64)
+    end
+    e:SetScript("OnEscapePressed", function() e:ClearFocus() end)
+    return e
+end
+
+function ui.BuildSendPanel()
+    local panel = ui.panels["Send"]
+    local send = A.send
+
+    -- ---- recipient ------------------------------------------------------
+    local toLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    toLbl:SetPoint("TOPLEFT", panel, "TOPLEFT", 6, -8)
+    toLbl:SetText("To")
+
+    local toBox = MakeEditBox("To", panel, 150)
+    toBox:SetPoint("LEFT", toLbl, "RIGHT", 10, 0)
+    ui.sendTo = toBox
+
+    -- ---- subject --------------------------------------------------------
+    local subjLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    subjLbl:SetPoint("LEFT", toBox, "RIGHT", 22, 0)
+    subjLbl:SetText("Subject")
+
+    local subjBox = MakeEditBox("Subject", panel, 300)
+    subjBox:SetPoint("LEFT", subjLbl, "RIGHT", 10, 0)
+    ui.sendSubject = subjBox
+
+    local subjHint = Label(panel, "GameFontNormalSmall", C.dim)
+    subjHint:SetPoint("TOPLEFT", toLbl, "BOTTOMLEFT", 0, -6)
+    subjHint:SetText("Leave the subject blank to use each item's name.")
+
+    -- ---- autocomplete ---------------------------------------------------
+    -- Anchored to the recipient box and drawn above the form so it overlays
+    -- rather than pushes anything down.
+    local ac = CreateFrame("Frame", "AegisCourierAutoComplete", panel)
+    ac:SetWidth(150)
+    ac:SetHeight(AUTOCOMPLETE_ROWS * 16 + 8)
+    ac:SetPoint("TOPLEFT", toBox, "BOTTOMLEFT", 0, -2)
+    ac:SetFrameStrata("DIALOG")
+    Backdrop(ac, C.titleBG, true)
+    ac:Hide()
+    ui.sendAuto = ac
+
+    ui.sendAutoRows = {}
+    local i = 1
+    while i <= AUTOCOMPLETE_ROWS do
+        local b = CreateFrame("Button", "AegisCourierAutoRow" .. i, ac)
+        b:SetHeight(16)
+        b:SetPoint("TOPLEFT", ac, "TOPLEFT", 4, -4 - (i - 1) * 16)
+        b:SetPoint("TOPRIGHT", ac, "TOPRIGHT", -4, -4 - (i - 1) * 16)
+        b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        local fs = Label(b, "GameFontNormalSmall", C.text)
+        fs:SetPoint("LEFT", b, "LEFT", 4, 0)
+        b.label = fs
+        b:SetScript("OnClick", function()
+            if b.name then
+                toBox:SetText(b.name)
+                ac:Hide()
+                toBox:ClearFocus()
+                ui.RefreshSend()
+            end
+        end)
+        b:Hide()
+        ui.sendAutoRows[i] = b
+        i = i + 1
+    end
+
+    toBox:SetScript("OnTextChanged", function()
+        ui.UpdateAutoComplete()
+        ui.RefreshSend()
+    end)
+    toBox:SetScript("OnEditFocusLost", function() ac:Hide() end)
+    -- Escape should close the suggestions before it closes the box.
+    toBox:SetScript("OnEscapePressed", function()
+        if ac:IsVisible() then ac:Hide() else toBox:ClearFocus() end
+    end)
+
+    -- ---- body -----------------------------------------------------------
+    local bodyWell = CreateFrame("Frame", nil, panel)
+    bodyWell:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -46)
+    bodyWell:SetPoint("TOPRIGHT", panel, "TOPRIGHT", -4, -46)
+    bodyWell:SetHeight(104)
+    Backdrop(bodyWell, C.well, true)
+
+    local bodyBox = MakeEditBox("Body", bodyWell, 1, true)
+    bodyBox:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 6, -4)
+    bodyBox:SetPoint("BOTTOMRIGHT", bodyWell, "BOTTOMRIGHT", -6, 4)
+    ui.sendBody = bodyBox
+
+    -- ---- attachments ----------------------------------------------------
+    local attLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    attLbl:SetPoint("TOPLEFT", bodyWell, "BOTTOMLEFT", 2, -8)
+    attLbl:SetText("Attachments")
+    ui.sendAttachLabel = attLbl
+
+    local attHint = Label(panel, "GameFontNormalSmall", C.dim)
+    attHint:SetPoint("LEFT", attLbl, "RIGHT", 10, 0)
+    attHint:SetText("right-click or drag from your bags   |   click a slot to remove")
+
+    ui.sendSlots = {}
+    i = 1
+    while i <= send.MAX_ATTACHMENTS do
+        local col = math.mod(i - 1, ATTACH_COLS)
+        local row = math.floor((i - 1) / ATTACH_COLS)
+        local b = CreateFrame("Button", "AegisCourierAttach" .. i, panel)
+        b:SetWidth(ATTACH_SIZE)
+        b:SetHeight(ATTACH_SIZE)
+        b:SetPoint("TOPLEFT", attLbl, "BOTTOMLEFT",
+            col * (ATTACH_SIZE + 4), -6 - row * (ATTACH_SIZE + 4))
+        Backdrop(b, C.well, true)
+        b:SetHighlightTexture("Interface\\Buttons\\ButtonHilight-Square")
+
+        local icon = b:CreateTexture(nil, "ARTWORK")
+        icon:SetPoint("TOPLEFT", b, "TOPLEFT", 3, -3)
+        icon:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -3, 3)
+        b.icon = icon
+
+        local count = Label(b, "GameFontNormalSmall", C.text)
+        count:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -2, 2)
+        b.count = count
+
+        b.slotIndex = i
+        -- Clicking an occupied slot removes it; clicking an empty one while
+        -- carrying an item attaches that item.
+        b:SetScript("OnClick", function()
+            if A.send.attachments[b.slotIndex] then
+                A.send.Detach(b.slotIndex)
+            elseif CursorHasItem and CursorHasItem() then
+                A.send.AttachCursor()
+            end
+        end)
+        b:SetScript("OnReceiveDrag", function() A.send.AttachCursor() end)
+        ui.sendSlots[i] = b
+        i = i + 1
+    end
+
+    -- ---- money ----------------------------------------------------------
+    local firstSlot = ui.sendSlots[1]
+    local moneyLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    moneyLbl:SetPoint("TOPLEFT", firstSlot, "BOTTOMLEFT",
+        0, -6 - (ATTACH_SIZE + 4))
+    moneyLbl:SetText("Gold")
+
+    local moneyBox = MakeEditBox("Money", panel, 90)
+    moneyBox:SetPoint("LEFT", moneyLbl, "RIGHT", 10, 0)
+    moneyBox:SetScript("OnTextChanged", function() ui.RefreshSend() end)
+    ui.sendMoney = moneyBox
+
+    local moneyHint = Label(panel, "GameFontNormalSmall", C.dim)
+    moneyHint:SetPoint("LEFT", moneyBox, "RIGHT", 8, 0)
+    moneyHint:SetText("e.g. 12g 30s")
+
+    local cod = MakeToggle(panel, "COD", "C.O.D. (charge the recipient)")
+    cod:SetPoint("TOPLEFT", moneyLbl, "BOTTOMLEFT", -4, -4)
+    cod:SetScript("OnClick", function() ui.RefreshSend() end)
+    ui.sendCOD = cod
+
+    local codAll = MakeToggle(panel, "CODAll", "on every mail, not just the first")
+    codAll:SetPoint("LEFT", cod, "RIGHT", 210, 0)
+    codAll:SetScript("OnClick", function() ui.RefreshSend() end)
+    ui.sendCODAll = codAll
+
+    -- ---- cost + actions -------------------------------------------------
+    local cost = Label(panel, "GameFontNormalSmall", C.text)
+    cost:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 6, 8)
+    ui.sendCost = cost
+
+    local sendBtn = CreateFrame("Button", "AegisCourierBtnSend", panel,
+        "UIPanelButtonTemplate")
+    sendBtn:SetWidth(80)
+    sendBtn:SetHeight(22)
+    sendBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -6, 4)
+    sendBtn:SetText("Send")
+    sendBtn:SetScript("OnClick", function() ui.DoSend() end)
+    ui.btnSend = sendBtn
+
+    local clearBtn = CreateFrame("Button", "AegisCourierBtnClearSend", panel,
+        "UIPanelButtonTemplate")
+    clearBtn:SetWidth(70)
+    clearBtn:SetHeight(22)
+    clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -4, 0)
+    clearBtn:SetText("Clear")
+    clearBtn:SetScript("OnClick", function() ui.ClearSendForm() end)
+end
+
+-- True while the Send tab is the thing the user is actually looking at, at a
+-- mailbox. The bag right-click hook checks this so right-click keeps its
+-- normal meaning everywhere else in the game.
+function ui.SendAttachActive()
+    if not ui.frame or not ui.frame:IsVisible() then return false end
+    if ui.selectedSubTab ~= "Send" then return false end
+    return ui.mailOpen and true or false
+end
+
+function ui.UpdateAutoComplete()
+    local ac = ui.sendAuto
+    if not ac then return end
+    local typed = ui.sendTo:GetText() or ""
+    local names = db.MatchContacts(typed, AUTOCOMPLETE_ROWS)
+    local n = table.getn(names)
+
+    -- An exact single match is not a suggestion worth showing.
+    if n == 0 or (n == 1 and names[1] == typed) then
+        ac:Hide()
+        return
+    end
+
+    local i = 1
+    while i <= AUTOCOMPLETE_ROWS do
+        local row = ui.sendAutoRows[i]
+        if names[i] then
+            row.name = names[i]
+            row.label:SetText(names[i])
+            row:Show()
+        else
+            row.name = nil
+            row:Hide()
+        end
+        i = i + 1
+    end
+    ac:SetHeight(n * 16 + 8)
+    ac:Show()
+end
+
+-- Read the money box. Returns copper, or 0 when empty/unparseable.
+function ui.SendMoneyValue()
+    local raw = ui.sendMoney and ui.sendMoney:GetText() or ""
+    return util.ParseMoney(raw) or 0
+end
+
+function ui.RefreshSend()
+    if not ui.frame or not ui.frame:IsVisible() then return end
+    if ui.selectedSubTab ~= "Send" then return end
+    local send = A.send
+
+    -- Attachment slots.
+    local i = 1
+    while i <= send.MAX_ATTACHMENTS do
+        local slot = ui.sendSlots[i]
+        local a = send.attachments[i]
+        if a then
+            slot.icon:SetTexture(a.texture)
+            slot.count:SetText(a.count > 1 and a.count or "")
+        else
+            slot.icon:SetTexture(nil)
+            slot.count:SetText("")
+        end
+        i = i + 1
+    end
+
+    local n = send.Count()
+    ui.sendAttachLabel:SetText("Attachments  " .. n .. "/" ..
+        send.MAX_ATTACHMENTS)
+
+    -- COD-all only means anything for a batch with COD set.
+    local isCOD = ui.sendCOD:GetChecked() and true or false
+    if isCOD and n > 1 then
+        ui.sendCODAll:Enable()
+    else
+        ui.sendCODAll:Disable()
+    end
+
+    local money = ui.SendMoneyValue()
+    local mails = send.MailCount()
+    local postage = send.Postage()
+
+    -- The number the stock UI cannot show, because it never sends a batch.
+    local costText = mails .. (mails == 1 and " mail" or " mails") ..
+        "  |  postage " .. util.FormatMoney(postage, true)
+    if money > 0 then
+        if isCOD then
+            costText = costText .. "  |  C.O.D. " ..
+                util.FormatMoney(money, true) ..
+                ((ui.sendCODAll:GetChecked() and mails > 1)
+                    and " on each" or " on the first")
+        else
+            costText = costText .. "  |  sending " ..
+                util.FormatMoney(money, true)
+        end
+    end
+
+    local ok, why = send.Validate(ui.sendTo:GetText(), money, isCOD)
+    if send.sending then
+        costText = "sending " .. (send.sentCount + 1) .. " of " ..
+            send.total .. "..."
+        ui.btnSend:Disable()
+    elseif ok then
+        ui.btnSend:Enable()
+    else
+        ui.btnSend:Disable()
+        if why and why ~= "no recipient" and why ~= "nothing to send" then
+            costText = costText .. "  |  |cffd05050" .. why .. "|r"
+        end
+    end
+    ui.sendCost:SetText(costText)
+end
+
+function ui.DoSend()
+    local send = A.send
+    send.Start(ui.sendTo:GetText(), ui.sendSubject:GetText(),
+        ui.sendBody:GetText(), ui.SendMoneyValue(),
+        ui.sendCOD:GetChecked() and true or false,
+        ui.sendCODAll:GetChecked() and true or false)
+    ui.RefreshSend()
+end
+
+function ui.ClearSendForm()
+    A.send.ClearAttachments()
+    ui.sendSubject:SetText("")
+    ui.sendBody:SetText("")
+    ui.sendMoney:SetText("")
+    ui.sendCOD:SetChecked(false)
+    ui.sendCODAll:SetChecked(false)
+    ui.RefreshSend()
+end
+
+-- Called by the send engine once a whole batch has gone out.
+function ui.OnSendComplete()
+    if not ui.sendSubject then return end
+    ui.sendSubject:SetText("")
+    ui.sendBody:SetText("")
+    ui.sendMoney:SetText("")
+    ui.sendCOD:SetChecked(false)
+    ui.sendCODAll:SetChecked(false)
+    -- Blizzard's MailFrame is hidden but still receives MAIL_SEND_SUCCESS, and
+    -- its SendMailFrame_Reset calls SetFocus() on ITS recipient box. Take the
+    -- keyboard back so the next keystroke does not vanish into a frame the
+    -- user cannot see.
+    local blizName = getglobal("SendMailNameEditBox")
+    if blizName and blizName.ClearFocus then blizName:ClearFocus() end
+    ui.RefreshSend()
+end
+
+-- ---------------------------------------------------------------------------
 -- Ledger panel
 -- ---------------------------------------------------------------------------
 
@@ -713,6 +1088,8 @@ function ui.Refresh()
         -- Updates the action bar for the current inbox contents, then repaints
         -- the list. Does not re-enter ui.Refresh.
         ui.OnTakeStateChanged()
+    elseif ui.selectedSubTab == "Send" then
+        ui.RefreshSend()
     elseif ui.selectedSubTab == "Ledger" then
         ui.RefreshLedger()
     elseif ui.selectedSubTab == "Courier" then
