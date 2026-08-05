@@ -1,12 +1,12 @@
-# Aegis: Courier (v0.1.0)
+# Aegis: Courier (v0.2.0)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
 **optional** integration into [Aegis: Exchange](https://github.com/Torchlite-bit/Aegis_Exchange).
 
-> **Stage A pre-release.** The window and the mailbox takeover are in and
-> tested. Mail actions (open-all / take / delete) and the auction ledger are
-> Stage B — see [Status](#status) before installing with expectations.
+> **Stage B pre-release.** The window, the mailbox takeover, the mail actions
+> and the auction ledger are all in and tested. Sending mail is Stage C — see
+> [Status](#status).
 
 ---
 
@@ -39,6 +39,33 @@ Interface/AddOns/Aegis_Courier/
     core/
     ui/
 ```
+
+## Mailbox actions
+
+| Action | What it does |
+|---|---|
+| **Open All** | take gold and items, then delete the emptied mail |
+| **Take All** | take gold and items, **keep** the mail |
+| **Delete Read** | delete read mail that is already empty — never anything holding gold or an item |
+| **right-click a mail** | take that one mail |
+
+COD and GM mail are **always** skipped, in every mode and by right-click. That
+is not a setting: paying a COD by accident cannot be undone.
+
+Everything runs one mail at a time, clocked by the server's own inbox refresh,
+and stops by itself if your bags fill up. A mail is never deleted while it
+still holds gold or an item, even if the take failed.
+
+## The ledger
+
+Every completed auction sale you collect is booked with its **gross price, the
+5% consignment cut, and the net** that reached you. The entry is written when
+the gold actually arrives — not when the mail shows up — so nothing is counted
+that you have not received.
+
+Only `Auction successful` mail books income. `Outbid on …` mail carries gold
+too, but that is your own returned bid, so it is collected and deliberately
+**not** counted as a sale.
 
 ## Usage
 
@@ -80,13 +107,12 @@ the current state.
 
 | Stage | Scope | State |
 |---|---|---|
-| **A** | Own window, mailbox takeover, read-only inbox list, ledger/settings tabs, Aegis seam | **done** |
-| **B** | Open-all, take, delete-read; auction mail matching; sale/cut/net ledger writes on collection; dedupe | next |
-| **C** | Send-mail (multi-attach, autocomplete, COD modes), mail log, pfUI skin | planned |
+| **A** | Own window, mailbox takeover, inbox list, ledger/settings tabs, Aegis seam | **done** |
+| **B** | Open-all / take-all / delete-read, right-click take; auction matching; sale/cut/net ledger writes on collection | **done** |
+| **C** | Send-mail (multi-attach, autocomplete, COD modes), mail log, pfUI skin | next |
 
-What Stage A does **not** do yet: it will not take, open, or delete anything,
-and nothing is written to the ledger. It is a viewer and the foundation the
-rest sits on.
+What Courier does **not** do yet: sending mail. The send tab is still the stock
+Blizzard one — use the **Blizzard UI** button when you need it.
 
 ## Compatibility
 
@@ -104,18 +130,20 @@ that fail *silently* when got wrong are documented in
 The scope of "TurtleMail replacement" is pinned to a source audit in
 [`docs/turtlemail-audit.md`](docs/turtlemail-audit.md).
 
-There is an off-client test harness that stubs the 1.12 API so the load path,
-the subject parsing, the money maths and the takeover state machine can be run
-without the game:
+There is an off-client test harness that stubs the 1.12 API, so the load path,
+the subject parsing, the money maths, the takeover and the whole take engine
+run without the game:
 
 ```sh
-lua5.1 tests/harness.lua
+lua5.1 tests/harness.lua      # 154 checks
 ```
 
-It asserts, among other things, that hiding the Blizzard mail frame does **not**
+Among other things it asserts that hiding the Blizzard mail frame does **not**
 end the mail session and that the takeover hide is never synchronous — the two
-mistakes that leave a mailbox that looks fine and silently refuses to hand over
-mail.
+mistakes that leave a mailbox looking fine while it silently refuses to hand
+over mail — and that the take engine never deletes a mail holding an item,
+never books a sale the server refused, and never counts an outbid refund as
+income.
 
 ## Credits
 

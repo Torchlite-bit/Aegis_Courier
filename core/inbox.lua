@@ -1,13 +1,15 @@
 -- Aegis: Courier
 -- core/inbox.lua
 --
--- READ-ONLY accessors over the 1.12 mailbox API.
+-- The 1.12 mailbox: reads (A.inbox) and the take engine (A.take).
 --
--- Stage A scope: this module reads and classifies. It does NOT take money,
--- take items, delete mail, or write to the ledger -- that engine is Stage B
--- and lands in its own module. Keeping the read layer separate means the
--- open-all state machine can be built and reasoned about without also owning
--- the parsing rules.
+-- Stage A shipped the read layer alone and its header said the take engine
+-- would land in "its own module". That was wrong, and deliberately reversed
+-- here: a new .lua file means a new .toc line, and 1.12 reads the file list at
+-- STARTUP, so it would force every user through a full client restart --
+-- the exact cost Stage A's "lay the module set down complete" decision was
+-- taken to avoid. The engine lives here instead. The two halves stay cleanly
+-- separated below; only the file boundary is gone.
 --
 -- Two client facts shape everything here (CLAUDE.md rules 8-10):
 --   * GetInboxHeaderInfo returns 13 values and `daysLeft` is FRACTIONAL DAYS.
@@ -126,10 +128,15 @@ end
 --
 -- On `arrival`: 1.12 gives us no mail id and no send time. `daysLeft` counts
 -- DOWN in real time while time() counts UP, so time() - (30 - daysLeft)*86400
--- is roughly constant for a given mail across sessions. That makes it useful
--- for display and as an INPUT to a dedupe key -- but it is an approximation,
--- not an identity, and the dedupe design that consumes it is deliberately
--- deferred to Stage B (see docs/turtlemail-audit.md, "Note on mail identity").
+-- is roughly constant for a given mail across sessions.
+--
+-- It is a DISPLAY value only. It was once the intended basis of a dedupe key,
+-- and Stage B deliberately rejected that: bucketing it wide enough to be
+-- stable makes two identical stacks sold at the same price in the same hour
+-- collide, and a collision silently UNDER-counts. Recording on collection
+-- instead (see take.Confirm) removes the need for a fingerprint entirely --
+-- an emptied mail has nothing left to book. Do not reintroduce a key built
+-- from this field.
 function inbox.Header(index)
     if not GetInboxHeaderInfo then return nil end
     local packageIcon, stationeryIcon, sender, subject, money, codAmount,
@@ -219,3 +226,398 @@ function inbox.Summary()
     end
     return total, unread, money
 end
+
+-- ===========================================================================
+-- Take engine
+-- ===========================================================================
+--
+-- Everything below MUTATES the mailbox. The read layer above never does.
+--
+-- Shape: a state machine clocked by MAIL_INBOX_UPDATE, processing ONE mail
+-- action per step -- the design TurtleMail uses and the reason it is reliable.
+-- A `for i = 1, GetInboxNumItems()` loop looks obviously correct and is not:
+-- every take and delete mutates the inbox underneath it, the server's replies
+-- arrive asynchronously, and the loop runs off the end of a list that is
+-- shifting beneath it. The server's own inbox refresh is the only honest clock.
+--
+-- Index discipline, which is where this kind of engine usually goes wrong:
+--   * Deleting a mail SHIFTS every later mail down one, so after a delete we
+--     do NOT advance -- the next mail slides into the index we are already on.
+--   * Taking money or an item does NOT shift anything, so in a mode that keeps
+--     the mail we DO advance once it is empty.
+--   * Skipped mail (COD, GM) is stepped over.
+--
+-- Ledger writes happen on COLLECTION, never on arrival: an entry is only
+-- written once the money has verifiably left the mail. See take.Confirm.
+
+A.take = {}
+local take = A.take
+
+-- Modes.
+--   "open"   -- take money + item, then delete. TurtleMail's Open All.
+--   "take"   -- take money + item, KEEP the mail. TurtleMail has no equivalent.
+--   "delete" -- delete read mail that is already empty. Takes nothing.
+take.MODE_OPEN   = "open"
+take.MODE_TAKE   = "take"
+take.MODE_DELETE = "delete"
+
+-- Give up on an index after this many steps with no observable progress, so a
+-- mail the server will not hand over can never wedge the run in a tight loop.
+-- TurtleMail has no such guard and relies purely on UI_ERROR_MESSAGE.
+local MAX_ATTEMPTS = 4
+
+-- Passive CheckInbox() pacing, in OnUpdate ticks. CheckInbox is throttled
+-- server-side (CLAUDE.md rule 13); this matches TurtleMail's cadence.
+local CHECK_TICKS = 200
+
+take.running = false
+
+local function ResetCounters()
+    take.money   = 0     -- copper collected this run
+    take.items   = 0     -- items taken this run
+    take.mails   = 0     -- mails fully processed this run
+    take.sales   = 0     -- auction sales recorded this run
+end
+ResetCounters()
+
+-- Is there anything at all for `mode` to do? Drives button enable state.
+function take.HasWork(mode)
+    local n = inbox.NumItems()
+    local i = 1
+    while i <= n do
+        local h = inbox.Header(i)
+        if h and not h.isGM and not (h.cod > 0) then
+            if mode == take.MODE_DELETE then
+                if h.wasRead and h.money == 0 and not h.hasItem then
+                    return true
+                end
+            elseif h.money > 0 or h.hasItem then
+                return true
+            end
+        end
+        i = i + 1
+    end
+    return false
+end
+
+-- ---------------------------------------------------------------------------
+-- Ledger recording
+-- ---------------------------------------------------------------------------
+
+-- Record a collected auction sale.
+--
+-- ONLY "sold" mail becomes a ledger entry, and the distinction is not
+-- cosmetic. "Outbid on <item>" mail also carries money -- your own returned
+-- bid -- and booking that as income would inflate every total the addon
+-- reports. "Auction won" delivers the item with no money at all (the buyer
+-- paid at purchase time), and "expired" / "cancelled" return the goods. None
+-- of those carry a price, so none of them produce entries.
+function take.RecordSale(h)
+    if not h or h.auctionKind ~= "sold" then return false end
+    if not h.money or h.money <= 0 then return false end
+
+    -- The money that arrives is already NET of the 5% consignment cut.
+    local gross, cut, net = A.util.SaleSplit(h.money)
+    local item = h.auctionItem or h.subject
+
+    -- Courier's own ledger first -- it is the record of truth and is kept
+    -- whether or not Aegis: Exchange is installed.
+    A.db.RecordTxn("sale", item, net, nil, gross, cut, net)
+    -- Then mirror it. Dormant and harmless when Aegis is absent.
+    A.bridge.Push("sale", item, net, nil)
+
+    take.sales = take.sales + 1
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Collection confirmation
+-- ---------------------------------------------------------------------------
+
+-- A take is issued, then confirmed on the NEXT inbox update. `pending` holds
+-- what we asked for; Confirm decides whether it actually happened.
+--
+-- This is what "finalize on collection, not arrival" means concretely. Aegis:
+-- Exchange's own scanner books a sale the moment the mail is SEEN, which
+-- counts gold the player has not received and may never receive. Matching that
+-- would be a bug, not compatibility.
+function take.Confirm()
+    local p = take.pending
+    if not p then return end
+    take.pending = nil
+
+    local h = inbox.Header(p.index)
+
+    -- Did the mail we acted on still exist, unchanged, with its money intact?
+    -- If so the take did NOT happen and we must not book anything.
+    local unchanged = h
+        and h.subject == p.subject
+        and h.sender  == p.sender
+        and h.money   == p.money
+        and p.money > 0
+
+    if unchanged then
+        return false
+    end
+
+    -- Otherwise the money left the mail: either the field is now zero, or the
+    -- mail is gone entirely (it can only have gone to us -- we are the only
+    -- thing acting on this mailbox). Book it.
+    if p.money > 0 then
+        take.money = take.money + p.money
+        take.RecordSale(p.header)
+    end
+    if p.item then
+        take.items = take.items + 1
+    end
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- The state machine
+-- ---------------------------------------------------------------------------
+
+-- Process ONE action at the current index, then return and wait for the
+-- server. Never loops over the inbox.
+function take.Step()
+    if not take.running then return end
+
+    -- Settle the previous action before deciding the next one.
+    take.Confirm()
+
+    local n = inbox.NumItems()
+    if take.index > n then return take.Finish() end
+
+    local h = inbox.Header(take.index)
+    if not h then return take.Finish() end
+
+    -- Wedge guard. It has to count steps that produced NO OBSERVABLE CHANGE,
+    -- not steps taken: in "open" mode a successful mail is deleted and we
+    -- deliberately do not advance, so a raw action counter climbs right
+    -- through healthy mail and eventually skips a live one. Comparing a
+    -- signature of what is actually sitting at this index resets the count
+    -- whenever the mailbox moved.
+    local sig = take.index .. "|" .. h.subject .. "|" .. h.money .. "|" ..
+        (h.hasItem and "1" or "0")
+    if sig ~= take.lastSig then
+        take.lastSig = sig
+        take.attempts = 0
+    end
+    if take.attempts >= MAX_ATTEMPTS then
+        take.Advance()
+        return
+    end
+
+    -- Never auto-pay COD, and never touch GM mail. Both are skipped in every
+    -- mode -- this is not a setting, because paying a COD by accident is not
+    -- recoverable.
+    if h.cod > 0 or h.isGM then
+        take.Advance()
+        return
+    end
+
+    if take.mode == take.MODE_DELETE then
+        -- Delete-read only removes mail that is already empty AND read, so it
+        -- can never destroy an attachment or unclaimed gold.
+        if h.wasRead and h.money == 0 and not h.hasItem then
+            take.attempts = take.attempts + 1
+            DeleteInboxItem(take.index)
+            take.mails = take.mails + 1
+            -- No advance: the next mail shifts down into this index.
+            take.pending = nil
+            return
+        end
+        take.Advance()
+        return
+    end
+
+    -- Money first: it always succeeds where an item can fail on a full bag.
+    if h.money > 0 then
+        take.attempts = take.attempts + 1
+        take.pending = { index = take.index, subject = h.subject,
+            sender = h.sender, money = h.money, item = nil, header = h }
+        TakeInboxMoney(take.index)
+        return
+    end
+
+    if h.hasItem then
+        take.attempts = take.attempts + 1
+        take.pending = { index = take.index, subject = h.subject,
+            sender = h.sender, money = 0, item = true, header = h }
+        -- 1.12 mail carries a single attachment, so one call empties it.
+        TakeInboxItem(take.index)
+        return
+    end
+
+    -- The mail is empty. Delete it in "open" mode, keep it in "take" mode.
+    if take.mode == take.MODE_OPEN then
+        take.attempts = take.attempts + 1
+        DeleteInboxItem(take.index)
+        take.mails = take.mails + 1
+        -- Deliberately no advance -- see the index discipline note at the top.
+        return
+    end
+
+    take.mails = take.mails + 1
+    take.Advance()
+end
+
+function take.Advance()
+    take.index = take.index + 1
+    take.attempts = 0
+    take.lastSig = nil
+    take.pending = nil
+end
+
+-- ---------------------------------------------------------------------------
+-- Run control
+-- ---------------------------------------------------------------------------
+
+function take.Start(mode)
+    if take.running then return false end
+    if not inbox.NumItems or inbox.NumItems() == 0 then return false end
+    take.running  = true
+    take.mode     = mode or take.MODE_OPEN
+    take.index    = 1
+    take.attempts = 0
+    take.lastSig  = nil
+    take.pending  = nil
+    ResetCounters()
+    take.armed = true
+    if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+    return true
+end
+
+function take.Stop(quiet)
+    if not take.running then return end
+    -- Settle anything already in flight rather than dropping it: the money may
+    -- well have arrived even though the user hit Stop.
+    take.Confirm()
+    take.running = false
+    take.pending = nil
+    if not quiet then take.Report() end
+    if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+end
+
+function take.Finish()
+    take.running = false
+    take.pending = nil
+    take.Report()
+    if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+end
+
+function take.Report()
+    if take.money <= 0 and take.items <= 0 and take.mails <= 0 then return end
+    local parts = {}
+    if take.money > 0 then
+        table.insert(parts, A.util.FormatMoney(take.money, true) .. " collected")
+    end
+    if take.items > 0 then
+        table.insert(parts, take.items .. " item" ..
+            (take.items == 1 and "" or "s"))
+    end
+    if take.sales > 0 then
+        table.insert(parts, take.sales .. " sale" ..
+            (take.sales == 1 and "" or "s") .. " logged")
+    end
+    if table.getn(parts) > 0 then
+        A.Print(table.concat(parts, ", ") .. ".")
+    end
+end
+
+-- Take one specific mail, outside of a run -- the right-click action on a row.
+-- Reuses the same machine so there is exactly one code path that mutates mail.
+function take.Single(index)
+    if take.running then return false end
+    local h = inbox.Header(index)
+    if not h then return false end
+    if h.cod > 0 or h.isGM then
+        A.Print("skipped: COD and GM mail are never taken automatically.")
+        return false
+    end
+    if h.money == 0 and not h.hasItem then return false end
+    take.running  = true
+    take.mode     = take.MODE_OPEN
+    take.index    = index
+    take.attempts = 0
+    take.lastSig  = nil
+    take.pending  = nil
+    ResetCounters()
+    take.single   = true
+    take.armed    = true
+    if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+    return true
+end
+
+-- ---------------------------------------------------------------------------
+-- Driver
+-- ---------------------------------------------------------------------------
+-- One hidden frame owns both the step clock and the passive CheckInbox pacing.
+-- Shown while a mailbox is open, hidden otherwise, so we burn no OnUpdate
+-- anywhere else in the game.
+
+local driver = CreateFrame("Frame", "AegisCourierTaker")
+driver:Hide()
+local ticks = 0
+
+driver:SetScript("OnUpdate", function()
+    if take.armed then
+        take.armed = false
+        -- A single-mail take finishes as soon as its one mail is done rather
+        -- than walking the rest of the inbox.
+        if take.single and not take.running then take.single = nil end
+        take.Step()
+        if take.single and take.running then
+            -- After Step, an emptied-and-deleted single mail leaves nothing
+            -- pending and nothing in flight: stop rather than continue down
+            -- the inbox.
+            if not take.pending then
+                take.single = nil
+                take.Stop()
+            end
+        end
+    end
+
+    if take.running then return end
+
+    ticks = ticks + 1
+    if ticks >= CHECK_TICKS then
+        ticks = 0
+        if CheckInbox then CheckInbox() end
+    end
+end)
+
+function take.SetMailboxOpen(open)
+    ticks = 0
+    if open then
+        driver:Show()
+    else
+        driver:Hide()
+        if take.running then take.Stop(true) end
+    end
+end
+
+-- ---------------------------------------------------------------------------
+-- Events
+-- ---------------------------------------------------------------------------
+
+-- The server finished a mailbox operation: arm the next step. This is the
+-- clock -- not a timer.
+A.RegisterEvent("MAIL_INBOX_UPDATE", function()
+    if take.running then take.armed = true end
+end)
+
+-- Error handling, following TurtleMail's split: a full bag is fatal to the
+-- run, a per-item cap is not.
+A.RegisterEvent("UI_ERROR_MESSAGE", function(evt, message)
+    if not take.running then return end
+    if message == INVENTORY_FULL or message == ERR_INV_FULL then
+        A.Print("stopped: your bags are full.")
+        take.Stop()
+    elseif message == ERR_ITEM_MAX_COUNT then
+        -- Cannot carry more of this ONE item; step over it and continue.
+        take.pending = nil
+        take.Advance()
+        take.armed = true
+    end
+end)

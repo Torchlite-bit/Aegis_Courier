@@ -108,6 +108,30 @@ GetInboxItem = function(i)
     return m.itemName, "tex", m.itemCount or 1, 1
 end
 
+-- Mutating mail API. `failTakeMoney` / `failTakeItem` let a test simulate the
+-- server refusing, which is the case the engine must never book a ledger
+-- entry for.
+failTakeMoney, failTakeItem = false, false
+GetInboxText = function() end
+TakeInboxMoney = function(i)
+    local m = INBOX[i]
+    if not m or failTakeMoney then return end
+    m.money = 0
+end
+TakeInboxItem = function(i)
+    local m = INBOX[i]
+    if not m or failTakeItem then return end
+    m.itemName = nil
+    m.hasItem = nil
+end
+DeleteInboxItem = function(i)
+    if INBOX[i] then table.remove(INBOX, i) end
+end
+
+ERR_INV_FULL = "Your bags are full."
+INVENTORY_FULL = "Inventory is full."
+ERR_ITEM_MAX_COUNT = "You cannot carry any more of those items."
+
 -- MailFrame as FrameXML builds it: an OnHide that ends the session.
 MailFrame = CreateFrame("Frame", "MailFrame")
 MailFrame:SetScript("OnHide", function() CloseMail() end)
@@ -356,6 +380,262 @@ A.ui.SelectSubTab("Ledger")
 A.ui.SelectSubTab("Courier")
 fire("MAIL_INBOX_UPDATE")
 check(true, "all three tabs refreshed without error")
+
+-- =========================================================================
+-- Stage B: the take engine
+-- =========================================================================
+
+local take = A.take
+local driver = getglobal("AegisCourierTaker")
+check(driver ~= nil, "take driver frame exists")
+
+-- One tick of our OnUpdate, then the server's reply. That reply is the engine's
+-- clock -- the whole design rests on not driving this from a timer.
+local function pump(limit)
+    local n = 0
+    while take.running and n < (limit or 400) do
+        driver.scripts.OnUpdate()
+        if take.running then fire("MAIL_INBOX_UPDATE") end
+        n = n + 1
+    end
+    return n
+end
+
+local function mail(t)
+    return { packageIcon = "pkg", stationeryIcon = "st",
+             sender = t.sender or "Bob", subject = t.subject or "hi",
+             money = t.money or 0, cod = t.cod or 0,
+             daysLeft = t.daysLeft or 20, hasItem = t.item and 1 or nil,
+             itemName = t.item, wasRead = t.read and 1 or nil,
+             wasReturned = nil, textCreated = nil, canReply = 1,
+             isGM = t.gm and 1 or nil }
+end
+
+local AH = "Stormwind Auction House"
+
+print("== take: Open All ==")
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Bob", subject = "here you go", item = "Copper Ore" },
+    mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
+    mail{ sender = "GM", subject = "ticket", money = 700, gm = true },
+    mail{ sender = AH, subject = "Auction successful: Black Lotus", money = 190000 },
+}
+check(take.HasWork(take.MODE_OPEN), "HasWork sees collectable mail")
+check(take.Start(take.MODE_OPEN), "run started")
+local steps = pump()
+check(not take.running, "run finished", steps)
+check(table.getn(INBOX) == 2, "only COD + GM mail remain", table.getn(INBOX))
+check(INBOX[1].cod == 5000, "COD mail untouched")
+check(INBOX[1].money == 100, "COD mail money not taken")
+check(INBOX[2].isGM == 1, "GM mail untouched")
+check(INBOX[2].money == 700, "GM mail money not taken")
+check(take.money == 199500, "collected total", take.money)
+check(take.items == 1, "one item taken", take.items)
+
+local led = A.db.Ledger()
+check(table.getn(led) == 2, "two sales booked", table.getn(led))
+check(led[1].item == "Silk Cloth", "item name from subject", led[1].item)
+check(led[1].amount == 9500, "amount is NET", led[1].amount)
+check(led[1].gross == 10000, "gross derived", led[1].gross)
+check(led[1].cut == 500, "5% cut derived", led[1].cut)
+check(led[1].gross - led[1].cut == led[1].amount, "entry reconciles")
+check(led[2].item == "Black Lotus", "second sale booked")
+
+print("== take: only 'sold' mail books income ==")
+A.db.ClearLedger()
+INBOX = {
+    -- Outbid mail returns YOUR OWN BID. Booking it as income would inflate
+    -- every total the addon reports.
+    mail{ sender = AH, subject = "Outbid on Arcanite Bar", money = 50000 },
+    -- Won mail delivers the item; the buyer already paid, so there is no price.
+    mail{ sender = AH, subject = "Auction won: Righteous Orb", item = "Righteous Orb" },
+    mail{ sender = AH, subject = "Auction expired: Copper Ore", item = "Copper Ore" },
+    mail{ sender = AH, subject = "Auction cancelled: Linen Cloth", item = "Linen Cloth" },
+}
+take.Start(take.MODE_OPEN)
+pump()
+check(table.getn(INBOX) == 0, "all four collected", table.getn(INBOX))
+check(take.money == 50000, "outbid refund WAS collected", take.money)
+check(table.getn(A.db.Ledger()) == 0, "but nothing booked as a sale",
+      table.getn(A.db.Ledger()))
+local income = A.db.LedgerTotals(nil)
+check(income == 0, "income stays zero", income)
+
+print("== take: Take All keeps the mail ==")
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Bob", subject = "gift", item = "Copper Ore" },
+}
+take.Start(take.MODE_TAKE)
+pump()
+check(table.getn(INBOX) == 2, "mails kept", table.getn(INBOX))
+check(INBOX[1].money == 0, "money taken")
+check(INBOX[2].itemName == nil, "item taken")
+check(take.money == 9500, "money counted")
+check(table.getn(A.db.Ledger()) == 1, "sale still booked")
+
+print("== take: re-running does not double-count ==")
+-- The dedupe claim: recording on COLLECTION means an emptied mail has nothing
+-- left to book, so a second pass over the same inbox is inert. No arrival
+-- fingerprint, so no chance of two identical sales colliding into one.
+local before = table.getn(A.db.Ledger())
+take.Start(take.MODE_TAKE)
+pump()
+check(table.getn(A.db.Ledger()) == before, "second pass booked nothing",
+      table.getn(A.db.Ledger()))
+check(take.money == 0, "and collected nothing", take.money)
+
+print("== take: two identical sales both book ==")
+-- The exact case an arrival-bucket key would have collapsed into one entry.
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+}
+take.Start(take.MODE_OPEN)
+pump()
+check(table.getn(A.db.Ledger()) == 2, "both identical sales booked",
+      table.getn(A.db.Ledger()))
+local inc2 = A.db.LedgerTotals(nil)
+check(inc2 == 19000, "income counts both", inc2)
+
+print("== take: Delete Read is conservative ==")
+INBOX = {
+    mail{ sender = "Bob", subject = "read and empty", read = true },
+    mail{ sender = "Ann", subject = "unread and empty" },
+    mail{ sender = "Cid", subject = "read with gold", money = 500, read = true },
+    mail{ sender = "Dot", subject = "read with item", item = "Copper Ore", read = true },
+}
+take.Start(take.MODE_DELETE)
+pump()
+check(table.getn(INBOX) == 3, "only the read+empty mail was deleted",
+      table.getn(INBOX))
+check(INBOX[1].subject == "unread and empty", "unread kept")
+check(INBOX[2].money == 500, "unclaimed gold kept")
+check(INBOX[3].itemName == "Copper Ore", "unclaimed item kept")
+check(take.money == 0, "delete mode takes nothing")
+
+print("== take: a failed take books nothing and never deletes ==")
+A.db.ClearLedger()
+INBOX = { mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 } }
+failTakeMoney = true
+take.Start(take.MODE_OPEN)
+pump()
+failTakeMoney = false
+check(table.getn(INBOX) == 1, "mail survived a failed take", table.getn(INBOX))
+check(INBOX[1].money == 9500, "money still in the mail")
+check(table.getn(A.db.Ledger()) == 0, "nothing booked",
+      table.getn(A.db.Ledger()))
+check(take.money == 0, "nothing counted")
+
+print("== take: never deletes a mail still holding an item ==")
+INBOX = { mail{ sender = "Bob", subject = "gift", item = "Copper Ore" } }
+failTakeItem = true
+take.Start(take.MODE_OPEN)
+pump()
+failTakeItem = false
+check(table.getn(INBOX) == 1, "mail survived", table.getn(INBOX))
+check(INBOX[1].itemName == "Copper Ore", "item NOT destroyed by a delete")
+
+print("== take: bag-full aborts, item-cap skips ==")
+INBOX = {
+    mail{ sender = "Bob", subject = "a", item = "Copper Ore" },
+    mail{ sender = "Ann", subject = "b", money = 100 },
+}
+failTakeItem = true
+take.Start(take.MODE_OPEN)
+driver.scripts.OnUpdate()          -- issues TakeInboxItem
+fire("UI_ERROR_MESSAGE", ERR_INV_FULL)
+check(not take.running, "ERR_INV_FULL stopped the run")
+failTakeItem = false
+
+INBOX = {
+    mail{ sender = "Bob", subject = "a", item = "Copper Ore" },
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+}
+A.db.ClearLedger()
+failTakeItem = true
+take.Start(take.MODE_OPEN)
+driver.scripts.OnUpdate()
+fire("UI_ERROR_MESSAGE", ERR_ITEM_MAX_COUNT)
+check(take.running, "ERR_ITEM_MAX_COUNT did not stop the run")
+failTakeItem = false
+pump()
+check(table.getn(A.db.Ledger()) == 1, "run continued past the capped item",
+      table.getn(A.db.Ledger()))
+
+print("== take: wedge guard ==")
+-- A mail the server simply will not hand over must not spin forever.
+INBOX = { mail{ sender = "Bob", subject = "stuck", money = 100 },
+          mail{ sender = "Ann", subject = "fine", money = 200 } }
+failTakeMoney = true
+take.Start(take.MODE_TAKE)
+local n = pump(100)
+failTakeMoney = false
+check(not take.running, "run terminated rather than wedging", n)
+check(n < 100, "and did so promptly", n)
+
+print("== take: right-click a single mail ==")
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = "Bob", subject = "keep me", money = 300 },
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+}
+check(take.Single(2), "single take started")
+pump()
+check(not take.running, "single take finished")
+check(table.getn(INBOX) == 1, "only the clicked mail was taken",
+      table.getn(INBOX))
+check(INBOX[1].money == 300, "the other mail is untouched")
+check(table.getn(A.db.Ledger()) == 1, "its sale was booked")
+
+print("== take: COD is never taken by right-click either ==")
+INBOX = { mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 } }
+check(take.Single(1) == false, "single take refuses COD")
+check(INBOX[1].money == 100, "COD mail untouched")
+
+print("== take: pushes to Aegis when the seam is live ==")
+A.db.ClearLedger()
+local pushed2 = {}
+AegisExchange = {
+    INTEGRATION_VERSION = 1,
+    RecordExternalTxn = function(kind, item, amount, itemId)
+        table.insert(pushed2, { kind = kind, item = item, amount = amount })
+    end,
+}
+INBOX = { mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 } }
+take.Start(take.MODE_OPEN)
+pump()
+check(table.getn(pushed2) == 1, "one push", table.getn(pushed2))
+check(pushed2[1].kind == "sale" and pushed2[1].item == "Silk Cloth"
+      and pushed2[1].amount == 9500, "pushed the NET, matching Aegis's shape")
+check(table.getn(A.db.Ledger()) == 1, "and kept its own entry")
+AegisExchange = nil
+
+print("== take: driver only runs at a mailbox ==")
+take.SetMailboxOpen(true)
+check(driver.visible, "driver shown at a mailbox")
+INBOX = { mail{ sender = "Bob", subject = "x", money = 100 } }
+take.Start(take.MODE_TAKE)
+take.SetMailboxOpen(false)
+check(not driver.visible, "driver hidden away from a mailbox")
+check(not take.running, "run abandoned when the mailbox closed")
+
+print("== take: action bar enable state ==")
+A.ui.mailOpen = true
+INBOX = { mail{ sender = "Bob", subject = "x", money = 100 } }
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+check(A.ui.btnOpenAll ~= nil, "action bar built")
+check(take.HasWork(take.MODE_OPEN), "work available")
+INBOX = {}
+check(not take.HasWork(take.MODE_OPEN), "no work on an empty inbox")
+check(not take.HasWork(take.MODE_DELETE), "nothing to delete either")
+A.ui.OnTakeStateChanged()
+check(true, "action bar refresh runs clean on an empty inbox")
 
 print("")
 if failures == 0 then

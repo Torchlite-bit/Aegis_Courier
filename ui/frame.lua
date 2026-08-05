@@ -269,7 +269,7 @@ function ui.BuildWindow()
 end
 
 -- ---------------------------------------------------------------------------
--- Inbox panel (Stage A: read-only list)
+-- Inbox panel
 -- ---------------------------------------------------------------------------
 
 function ui.BuildInboxPanel()
@@ -279,11 +279,52 @@ function ui.BuildInboxPanel()
     summary:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -2)
     ui.inboxSummary = summary
 
+    -- ---- action bar -----------------------------------------------------
+    local take = A.take
+
+    local function ActionButton(name, label, width, onClick)
+        local b = CreateFrame("Button", "AegisCourierBtn" .. name, panel,
+            "UIPanelButtonTemplate")
+        b:SetWidth(width)
+        b:SetHeight(21)
+        b:SetText(label)
+        b:SetScript("OnClick", onClick)
+        return b
+    end
+
+    local openAll = ActionButton("OpenAll", "Open All", 76, function()
+        take.Start(take.MODE_OPEN)
+    end)
+    openAll:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -16)
+
+    local takeAll = ActionButton("TakeAll", "Take All", 76, function()
+        take.Start(take.MODE_TAKE)
+    end)
+    takeAll:SetPoint("LEFT", openAll, "RIGHT", 4, 0)
+
+    local delRead = ActionButton("DeleteRead", "Delete Read", 90, function()
+        take.Start(take.MODE_DELETE)
+    end)
+    delRead:SetPoint("LEFT", takeAll, "RIGHT", 4, 0)
+
+    local stop = ActionButton("Stop", "Stop", 56, function()
+        take.Stop()
+    end)
+    stop:SetPoint("LEFT", delRead, "RIGHT", 12, 0)
+
+    ui.btnOpenAll, ui.btnTakeAll, ui.btnDeleteRead, ui.btnStop =
+        openAll, takeAll, delRead, stop
+
+    -- Running total for this mailbox visit, to the right of the buttons.
+    local collected = Label(panel, "GameFontNormalSmall", C.green)
+    collected:SetPoint("LEFT", stop, "RIGHT", 12, 0)
+    ui.inboxCollected = collected
+
     -- Column headers.
     local head = CreateFrame("Frame", nil, panel)
     head:SetHeight(16)
-    head:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -20)
-    head:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, -20)
+    head:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -42)
+    head:SetPoint("TOPRIGHT", panel, "TOPRIGHT", 0, -42)
 
     local hSender = Label(head, "GameFontNormalSmall", C.goldDim)
     hSender:SetPoint("LEFT", head, "LEFT", 34, 0)
@@ -303,7 +344,7 @@ function ui.BuildInboxPanel()
 
     -- The list well.
     local well = CreateFrame("Frame", nil, panel)
-    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -36)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -58)
     well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 22)
     Backdrop(well, C.well, true)
 
@@ -327,6 +368,16 @@ function ui.BuildInboxPanel()
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -4 - (i - 1) * ROW_H)
         row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        -- Right-click takes this one mail, matching TurtleMail's muscle
+        -- memory. Left-click is left free for a future preview.
+        row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        row:SetScript("OnClick", function()
+            if not row.mailIndex then return end
+            -- 1.12 delivers the clicked button in the arg1 GLOBAL.
+            if arg1 == "RightButton" then
+                A.take.Single(row.mailIndex)
+            end
+        end)
 
         local icon = row:CreateTexture(nil, "ARTWORK")
         icon:SetWidth(22)
@@ -357,8 +408,44 @@ function ui.BuildInboxPanel()
 
     local note = Label(panel, "GameFontNormalSmall", C.dim)
     note:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 4)
-    note:SetText("Stage A: read-only view. Open-all, take and delete land in Stage B.")
+    note:SetText("Right-click a mail to take it. COD and GM mail are always skipped.")
     ui.inboxNote = note
+end
+
+-- Enable/disable the action bar for the current state. Called by the take
+-- engine whenever a run starts or ends, and on every refresh.
+function ui.OnTakeStateChanged()
+    if not ui.btnOpenAll then return end
+    local take = A.take
+    local running = take.running and true or false
+    local atMailbox = ui.mailOpen and true or false
+
+    local function SetEnabled(btn, on)
+        if on then btn:Enable() else btn:Disable() end
+    end
+
+    SetEnabled(ui.btnOpenAll,
+        atMailbox and not running and take.HasWork(take.MODE_OPEN))
+    SetEnabled(ui.btnTakeAll,
+        atMailbox and not running and take.HasWork(take.MODE_TAKE))
+    SetEnabled(ui.btnDeleteRead,
+        atMailbox and not running and take.HasWork(take.MODE_DELETE))
+    SetEnabled(ui.btnStop, running)
+
+    if ui.inboxCollected then
+        if take.money > 0 or take.items > 0 then
+            local txt = util.FormatMoney(take.money, true)
+            if take.items > 0 then
+                txt = txt .. "  " .. take.items .. " item" ..
+                    (take.items == 1 and "" or "s")
+            end
+            if running then txt = txt .. "  ..." end
+            ui.inboxCollected:SetText(txt)
+        else
+            ui.inboxCollected:SetText(running and "working..." or "")
+        end
+    end
+    ui.RefreshInbox()
 end
 
 function ui.RefreshInbox()
@@ -623,7 +710,9 @@ function ui.Refresh()
         ui.footer:SetText(where .. "  |  " .. A.bridge.StatusText())
     end
     if ui.selectedSubTab == "Inbox" then
-        ui.RefreshInbox()
+        -- Updates the action bar for the current inbox contents, then repaints
+        -- the list. Does not re-enter ui.Refresh.
+        ui.OnTakeStateChanged()
     elseif ui.selectedSubTab == "Ledger" then
         ui.RefreshLedger()
     elseif ui.selectedSubTab == "Courier" then
@@ -799,6 +888,9 @@ A.RegisterEvent("MAIL_SHOW", function()
     ui.showBlizzard = false
     ui.BuildWindow()
     ui.HookMailFrame()
+    -- Starts the take engine's driver: its step clock and the passive
+    -- CheckInbox pacing only run while a mailbox is actually open.
+    A.take.SetMailboxOpen(true)
     if not ui.TakeoverActive() then return end
     -- Queue rather than hide inline. Our own MAIL_SHOW handler runs after the
     -- client's IsVisible guard so a synchronous hide would in fact be safe
@@ -813,6 +905,9 @@ end)
 A.RegisterEvent("MAIL_CLOSED", function()
     ui.mailOpen = false
     ui.showBlizzard = false
+    -- Stops the driver and quietly abandons any run in flight -- walking away
+    -- from the mailbox ends the session, so there is nothing left to take.
+    A.take.SetMailboxOpen(false)
     if ui.frame then ui.frame:Hide() end
 end)
 

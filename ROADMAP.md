@@ -22,51 +22,36 @@ Landed in 0.1.0.
 
 ---
 
-## Stage B — mail actions and the ledger
+## Stage B — mail actions and the ledger ✅
 
-The reason the addon exists. Everything here writes to `core/db.lua` and, when
-the seam is live, mirrors through `core/bridge.lua`.
+Landed in 0.2.0. Engine lives in `core/inbox.lua` as `A.take` (no new `.toc`
+line, so no forced client restart).
 
-### B.1 Take engine
-Event-driven state machine, one mail per `MAIL_INBOX_UPDATE`, modelled on
-TurtleMail's (audit §1.1) — **not** a `for` loop, which desyncs from the server
-and drops mail.
+- **B.1 Take engine** — event-driven state machine clocked by
+  `MAIL_INBOX_UPDATE`, one action per step. Open All / Take All / Delete Read,
+  plus right-click for a single mail. COD and GM mail always skipped.
+  `ERR_INV_FULL` stops a run, `ERR_ITEM_MAX_COUNT` skips the mail. A
+  change-based progress guard stops a mail the server will not hand over from
+  wedging the run. Collected-gold readout and a chat summary.
+- **B.2 Mail identity** — **resolved by removing the problem.** No fingerprint.
+  Recording on collection means an emptied mail has nothing left to book, so a
+  re-scan is inert and two identical sales stay two entries. The
+  arrival-bucket key was rejected: no bucket width is both stable across a
+  relog and fine enough to separate a bulk seller's identical sales, and a
+  collision silently *under*-counts. `db.WasSeen` / `db.MarkSeen` remain in the
+  DB as unused primitives. See `docs/turtlemail-audit.md`.
+- **B.3 Auction matching and the money split** — localized
+  `AUCTION_*_MAIL_SUBJECT` classification; `sold` books gross / 5% cut / net.
+  Only `sold` books income: `outbid` money is the player's own returned bid,
+  and `won` / `expired` / `cancelled` carry no price.
+- **B.4 Finalize on collection** — `take.Confirm` fails closed, crediting only
+  money it can see has left the mail.
+- **B.5 Push to Aegis** — verified against a stub; goes live by itself when
+  Aegis ships `RecordExternalTxn`.
 
-- **Open all**, **take all** (money + items, keep the mail) and **delete read**
-  as three distinct actions. TurtleMail only has the first; splitting take from
-  delete is a deliberate improvement.
-- Always skip **COD** and **GM** mail.
-- Abort on `ERR_INV_FULL`; skip-and-continue on `ERR_ITEM_MAX_COUNT`.
-- Collected-gold readout, reset per mailbox visit.
-- Right-click a row for the single-mail equivalent.
-
-### B.2 Mail identity and dedupe
-**Open — settle before any ledger write lands.** 1.12 has no mail GUID. The
-candidate key is `sender|subject|money|arrival-bucket` where arrival derives
-from the fractional `daysLeft` (`core/inbox.lua` already computes it).
-
-Two identical stacks sold at the same price in the same hour **collide**, and a
-collision silently *under*-counts. Decide the bucket width and the collision
-policy first; `db.WasSeen` / `db.MarkSeen` are already in place to consume it.
-
-### B.3 Auction matching and the money split
-- Classify with the client's localized `AUCTION_*_MAIL_SUBJECT` globals —
-  already implemented in `inbox.ClassifySubject`, already tested against a
-  non-English format.
-- `sold` → gross / 5% cut / net via `util.SaleSplit` (implemented, tested).
-- `won` → a `buy` entry. `expired` / `cancelled` / `outbid` → no ledger entry,
-  but worth surfacing in the list.
-
-### B.4 Finalize on collection, not arrival
-A ledger entry is written when the money/item is **actually taken**, never when
-the mail is merely seen. This is the one behaviour Aegis's own scanner gets
-wrong (it logs on `MAIL_INBOX_UPDATE`), and matching it would be a bug, not
-compatibility.
-
-### B.5 Push to Aegis
-Mirror each finalized entry through `bridge.Push`. Already written and tested
-against a stub; it goes live by itself the moment Aegis ships
-`RecordExternalTxn`. Nothing in B.5 should need writing — verify, don't build.
+Deliberately not done in B: nothing writes the mail **log** (Stage C), and a
+mail collected through the *stock* Blizzard window is not seen by the ledger,
+since Courier only books what its own engine takes.
 
 ---
 
