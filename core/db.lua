@@ -64,11 +64,26 @@ local function DefaultAccountDB()
         -- arrived (net), which is what Aegis's own scanner records.
         ledger     = {},
         -- Dedupe: stable mail key -> epoch first seen. Pruned by SEEN_MAX_AGE.
+        --
+        -- UNUSED by the take engine, deliberately. Stage B established that
+        -- recording on collection makes a mail fingerprint unnecessary (an
+        -- emptied mail has nothing left to book), and that any fingerprint
+        -- built from `daysLeft` collides for identical sales. Kept as
+        -- primitives; do not wire them back into the take path.
         ledgerSeen = {},
         -- User settings, read through db.Setting.
         settings   = {},
+        -- Recipient autocomplete: realm|faction -> { name -> lastSeenEpoch }.
+        -- Scoped that way because you cannot mail across a realm, and mailing
+        -- the opposing faction is not possible either -- so a flat account-wide
+        -- list would offer names that can never be valid.
+        contacts   = {},
     }
 end
+
+-- Contact names older than this are dropped at load. Matches TurtleMail's
+-- 30-day window: a name you have not seen in a month is noise in a dropdown.
+local CONTACT_MAX_AGE = 30 * 86400
 
 -- Default shape of the per-character DB.
 local function DefaultCharDB()
@@ -119,6 +134,11 @@ end
 -- Bootstrap
 -- ---------------------------------------------------------------------------
 
+-- Forward declaration: db.Init calls this, but the contacts section that
+-- defines it sits further down the file, and a `local function` declared later
+-- is not in scope up here.
+local PruneContacts
+
 -- Drop dedupe keys older than SEEN_MAX_AGE. Runs once at load, which is often
 -- enough -- the table only grows by a handful of keys per mailbox visit.
 local function PruneSeen()
@@ -161,6 +181,7 @@ function db.Init()
     db.char    = CourierCharDB
 
     PruneSeen()
+    PruneContacts()
 end
 
 -- ---------------------------------------------------------------------------
@@ -270,6 +291,91 @@ end
 function db.SeenCount()
     if not db.account or not db.account.ledgerSeen then return 0 end
     return A.util.CountKeys(db.account.ledgerSeen)
+end
+
+-- ---------------------------------------------------------------------------
+-- Recipient autocomplete
+-- ---------------------------------------------------------------------------
+
+-- Key for the current realm + faction. GetCVar("realmName") is the 1.12 way to
+-- get the realm; UnitFactionGroup gives "Alliance"/"Horde".
+local function ContactKey()
+    local realm = "?"
+    if GetCVar then realm = GetCVar("realmName") or "?" end
+    local faction = "?"
+    if UnitFactionGroup then faction = UnitFactionGroup("player") or "?" end
+    return realm .. "|" .. faction
+end
+
+local function ContactBucket()
+    if not db.account then return nil end
+    if not db.account.contacts then db.account.contacts = {} end
+    local key = ContactKey()
+    if not db.account.contacts[key] then db.account.contacts[key] = {} end
+    return db.account.contacts[key]
+end
+
+-- Remember a name we have corresponded with. Called for anyone who mails us
+-- (they are by definition reachable) and for every successful send.
+function db.AddContact(name)
+    if type(name) ~= "string" or name == "" then return end
+    local bucket = ContactBucket()
+    if not bucket then return end
+    bucket[name] = time()
+end
+
+function db.ForgetContacts()
+    if not db.account then return end
+    db.account.contacts[ContactKey()] = {}
+end
+
+-- Names beginning with `prefix`, case-insensitive, most-recently-seen first.
+-- Returns an array, capped at `limit`.
+function db.MatchContacts(prefix, limit)
+    local out = {}
+    local bucket = ContactBucket()
+    if not bucket then return out end
+    if type(prefix) ~= "string" then prefix = "" end
+    local lower = string.lower(prefix)
+    local n = string.len(lower)
+
+    local matches = {}
+    for name, seen in pairs(bucket) do
+        if n == 0 or string.sub(string.lower(name), 1, n) == lower then
+            table.insert(matches, { name = name, seen = seen or 0 })
+        end
+    end
+    table.sort(matches, function(a, b)
+        if a.seen == b.seen then return a.name < b.name end
+        return a.seen > b.seen
+    end)
+    local count = table.getn(matches)
+    local i = 1
+    while i <= count and (not limit or table.getn(out) < limit) do
+        table.insert(out, matches[i].name)
+        i = i + 1
+    end
+    return out
+end
+
+-- Defined against the forward declaration above.
+function PruneContacts()
+    if not db.account or not db.account.contacts then return end
+    local cutoff = time() - CONTACT_MAX_AGE
+    for key, bucket in pairs(db.account.contacts) do
+        local stale = {}
+        for name, seen in pairs(bucket) do
+            if type(seen) ~= "number" or seen < cutoff then
+                table.insert(stale, name)
+            end
+        end
+        local n = table.getn(stale)
+        local i = 1
+        while i <= n do
+            bucket[stale[i]] = nil
+            i = i + 1
+        end
+    end
 end
 
 -- ---------------------------------------------------------------------------

@@ -115,9 +115,72 @@ section, which is Courier's equivalent hazard surface.
     path calls it once. Do not poll it on a tight timer; TurtleMail waits ~200
     OnUpdate ticks between refreshes and that is the pacing to match.
 
+### Mail mutation — the take engine
+
+14. **Never delete a mail that still holds money or an item.** `DeleteInboxItem`
+    destroys attachments with no confirmation and no undo. `TakeInboxItem` can
+    silently fail (full bag, unique-item cap), so "I called take, therefore it
+    is empty" is false. Re-read the header and delete only when `money == 0`
+    **and** `hasItem` is false. TurtleMail takes-then-deletes in one step and
+    relies on `UI_ERROR_MESSAGE` to catch the failure; that is a race we do not
+    reproduce.
+15. **Deleting SHIFTS every later mail down one index.** After a successful
+    delete, do **not** advance — the next mail slides into the index you are
+    already on. Taking money or an item shifts nothing, so a mode that keeps
+    the mail must advance itself. Getting this backwards silently skips every
+    other mail.
+16. **A progress guard must measure CHANGE, not attempts.** Because the delete
+    path deliberately does not advance, a raw per-index action counter climbs
+    straight through healthy mail and eventually skips a live one. Compare a
+    signature of what is at the index (`index|subject|money|hasItem`) and reset
+    the counter whenever it moves. See `take.Step`.
+17. **Ledger entries are finalized on COLLECTION, never on arrival**, and the
+    check fails **closed**: credit money only when it has verifiably left the
+    mail. This also *is* the dedupe — an emptied mail has nothing left to book,
+    so Courier needs no mail fingerprint. Do not add one; see
+    `docs/turtlemail-audit.md`, "Note on mail identity".
+18. **Only `sold` mail books income.** `Outbid on %s` mail carries money too —
+    the player's own returned bid — and booking it as a sale inflates every
+    total the addon reports. `won` / `expired` / `cancelled` carry no price at
+    all.
+19. **COD and GM mail are never taken automatically**, in any mode, and this is
+    not a user setting. Paying a COD by accident is unrecoverable.
+
+### Sending mail (1.12)
+
+20. **Vanilla mail carries exactly ONE attachment.** There is a single slot and
+    a single `GetSendMailItem()`. "Mail 12 items at once" is therefore **12
+    separate mails**, sent back to back and clocked by `MAIL_SEND_SUCCESS` —
+    not a bigger slot. Postage is charged **per mail**, so any cost preview
+    must multiply; the stock UI never shows this because it cannot send a
+    batch.
+21. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
+    *that* something is held, never *what*. The only way to identify a dragged
+    item is to remember where it came from: save-and-replace
+    `PickupContainerItem` / `SplitContainerItem` and record the bag+slot. See
+    `send.InstallHooks`.
+22. **Verify the attach landed before calling `SendMail`.** `GetSendMailItem()`
+    must be non-nil after `ClickSendMailItemButton()`. If the stack moved, sold
+    or is soulbound, the attach silently no-ops and `SendMail` posts an **empty
+    mail** while the item stays in the bag.
+23. **The send API is C, not FrameXML**, so it works with `MailFrame` hidden —
+    which is the state the takeover keeps it in. `SendMail`,
+    `ClickSendMailItemButton`, `GetSendMailItem`, `SetSendMailMoney`,
+    `SetSendMailCOD` and `GetSendMailPrice` are engine-level; only wrappers
+    like `SendMailFrame_SendMail` live in Lua. Do **not** call the wrappers —
+    they read the Blizzard edit boxes, which are not ours.
+    - But note the hidden `MailFrame` **still receives events**, so
+      `MAIL_SEND_SUCCESS` still runs Blizzard's `SendMailFrame_Reset()`, which
+      calls `SetFocus()` on *its* recipient box. Take the keyboard back
+      afterwards or the user's next keystroke vanishes into an invisible frame.
+24. **Money rides the FIRST mail of a batch only.** Attaching gold to every
+    mail of a 10-item send would send the gold ten times. COD is a charge to
+    the recipient rather than a transfer, so it may legitimately repeat — but
+    only when the user asked for that.
+
 ### SavedVariables
 
-14. **SavedVariables are `nil` until `ADDON_LOADED` fires for
+25. **SavedVariables are `nil` until `ADDON_LOADED` fires for
     `"Aegis_Courier"`.** Do all DB setup from the ADDON_LOADED path (queue via
     `AegisCourier.OnLoad(fn)`), never at file scope.
     - `CourierDB` — account-wide (declared `## SavedVariables`).
@@ -125,9 +188,9 @@ section, which is Courier's equivalent hazard surface.
 
 ### Frames & globals
 
-15. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
+26. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
     building `"MailItem" .. n .. "Button"`).
-16. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
+27. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
     `UIPanelButtonTemplate`, `FauxScrollFrameTemplate`, `GameTooltipTemplate`.
     - **`FauxScrollFrame_OnVerticalScroll(itemHeight, updateFn)` — 2 args on
       1.12.** The frame and scroll offset are the implicit globals `this` /
@@ -197,15 +260,17 @@ Aegis_Courier/
   core/util.lua          -- Lua 5.0 safe helpers (money fmt, strings, time, tables)
   core/db.lua            -- SavedVariables: settings, ledger, dedupe keys, mail log
   core/bridge.lua        -- the Aegis: Exchange seam; dormant when Aegis is absent
-  core/inbox.lua         -- READ-ONLY inbox accessors (header/item/sender classify)
+  core/inbox.lua         -- inbox reads (A.inbox) + the take engine (A.take)
+  core/send.lua          -- outgoing mail: attachments + the batch send engine
   ui/frame.lua           -- standalone Courier window + mailbox takeover
+  tests/harness.lua      -- off-client test harness; stubs the 1.12 API
   docs/turtlemail-audit.md -- feature audit that defines the replacement scope
   CLAUDE.md              -- this file
   ROADMAP.md             -- staged plan; check before starting a large feature
 ```
 
 Load order is fixed by the `.toc`: `init` → `util` → `db` → `bridge` →
-`inbox` → `frame`. `init.lua` must load first (it creates the namespace and
+`inbox` → `send` → `frame`. `init.lua` must load first (it creates the namespace and
 dispatcher); `util` second (every other module takes a file-scope
 `local util = A.util`).
 
@@ -246,6 +311,11 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       treated as fractional DAYS; no `GetInboxItemLink` assumed.
 - [ ] Nothing hides `MailFrame` without the `keepSessionOpen` suppression, and
       no takeover hide is synchronous with `MailFrame`'s `OnShow`.
+- [ ] No `DeleteInboxItem` on a mail that still has money or an item; no
+      advance after a delete; only `sold` mail books income; COD/GM skipped.
+- [ ] Batch sends verify `GetSendMailItem()` before `SendMail`; postage
+      multiplied per mail; gold only on the first mail.
+- [ ] `lua5.1 tests/harness.lua` passes.
 - [ ] DB touched only after `ADDON_LOADED` for `"Aegis_Courier"`.
 - [ ] No read or write of `AegisExchangeDB`; integration goes through
       `core/bridge.lua` only.

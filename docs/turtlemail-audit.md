@@ -221,16 +221,32 @@ Courier's own window.
 | 6 | Finalize on **collection**, not arrival | **New** | B |
 | — | Calendar date-picker for log filtering | **Drop for now** — a whole bundled widget for one filter; revisit if asked | — |
 
-### Note on mail identity
+### Note on mail identity — **resolved in Stage B**
 
-TurtleMail offers nothing to copy here, and it is the hardest open problem in
-the Courier design: **1.12 has no mail GUID**. The available raw material is
+TurtleMail offers nothing to copy here, and it looked like the hardest problem
+in the Courier design: **1.12 has no mail GUID**. The available raw material is
 `sender`, `subject`, `money`, `CODAmount`, `daysLeft` (fractional days), and
 `hasItem`. `daysLeft` decreases in real time while `time()` increases, so
-`time() + daysLeft * 86400` is an approximately **stable arrival timestamp** —
-which is the trick Aegis: Exchange already uses, bucketed to the hour.
+`time() - (30 - daysLeft) * 86400` is an approximately **stable arrival
+timestamp** — which is the trick Aegis: Exchange already uses, bucketed to the
+hour.
 
-That is an approximation, not an identity, and two identical stacks sold at the
-same price in the same hour will collide. Resolving this properly is Stage B
-work and should be settled before any ledger writes land — collisions here
-silently *under*-count, which is worse than a visible failure.
+**That approach was rejected.** It is an approximation, not an identity: two
+identical stacks sold at the same price in the same hour collide, and a
+collision silently *under*-counts, which is worse than a visible failure. There
+is no bucket width that is both stable enough to survive a relog and fine
+enough to separate a bulk seller's identical sales.
+
+The problem dissolves once entries are finalized on **collection** rather than
+arrival — which the design already required for its own reasons. After
+`TakeInboxMoney` succeeds the mail's `money` is `0`, so a re-scan on any later
+visit finds nothing to book. The mailbox state *is* the dedupe.
+
+So Courier has **no mail fingerprint at all**. `db.WasSeen` / `db.MarkSeen`
+remain in the DB as primitives but are unused by the take engine. The
+guarantees this buys, all covered by `tests/harness.lua`:
+
+- a second pass over an already-collected inbox books nothing;
+- two identical sales in the same hour book as **two** entries;
+- a take the server refused books **nothing** (`take.Confirm` fails closed —
+  it only credits money it can see has left the mail).
