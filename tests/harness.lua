@@ -43,6 +43,12 @@ CreateFrame = function(kind, name, parent, template)
     function f:IsVisible() return self.visible end
     function f:GetChecked() return self.checked end
     function f:SetChecked(v) self.checked = v and true or false end
+    -- EditBoxes are frames, so text lives here too, not only on regions.
+    function f:SetText(t) self.text = t end
+    function f:GetText() return self.text end
+    function f:Enable() self.enabled = true end
+    function f:Disable() self.enabled = false end
+    function f:IsEnabled() return self.enabled ~= false end
     function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
     function f:Show()
         self.visible = true
@@ -937,6 +943,51 @@ check(send.cursorItem ~= nil, "cursor origin remembered")
 check(send.AttachCursor(), "attached from the cursor")
 check(send.attachments[1].name == "Copper Ore", "the right item",
       send.attachments[1].name)
+
+print("== send UI: autocomplete stays shut until you type ==")
+A.db.ForgetContacts()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Torchlite")
+A.db.AddContact("Subtilizer")
+A.ui.SelectSubTab("Send")
+A.ui.sendTo:SetText("")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(),
+      "empty recipient box does not drop the list open")
+A.ui.sendTo:SetText("Torch")
+A.ui.UpdateAutoComplete()
+check(A.ui.sendAuto:IsVisible(), "typing opens it")
+A.ui.sendTo:SetText("")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(), "clearing closes it again")
+-- The dropdown button lists everyone regardless of what is typed.
+check(A.ui.sendAutoButton ~= nil, "dropdown button exists")
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(), "button opens the full list on an empty box")
+A.ui.sendAutoButton.scripts.OnClick()
+check(not A.ui.sendAuto:IsVisible(), "button toggles it shut")
+A.ui.sendTo:SetText("Zebra")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(), "no matches means no list")
+A.ui.sendTo:SetText("")
+
+print("== send UI: COD-all is greyed until COD is checked ==")
+A.ui.sendCOD:SetChecked(false)
+A.ui.sendCODAll:SetChecked(true)     -- stale state from a previous send
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:GetChecked() == false,
+      "a disabled COD-all cannot stay checked")
+check(A.ui.sendCODAll:IsEnabled() == false, "and is greyed out")
+A.ui.sendCOD:SetChecked(true)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:IsEnabled() == true, "checking COD enables it")
+A.ui.sendCODAll:SetChecked(true)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:GetChecked() == true, "and it stays checked while COD is on")
+A.ui.sendCOD:SetChecked(false)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:IsEnabled() == false, "unchecking COD greys it again")
+check(A.ui.sendCODAll:GetChecked() == false, "and clears it")
 
 print("== send: UI refresh paths run clean ==")
 A.ui.RefreshSend()

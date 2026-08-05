@@ -539,12 +539,45 @@ local function MakeToggle(parent, name, label)
         text:SetText(label)
         text:SetTextColor(C.text[1], C.text[2], C.text[3])
     end
+    -- Kept so the label can be greyed with the box. CheckButton:Disable()
+    -- dims the box art only; on 1.12 the FontString keeps its colour and a
+    -- disabled option still reads as available.
+    c.labelText = text
     return c
 end
 
+-- Enable/disable a MakeToggle checkbox and colour its label to match.
+local function SetToggleEnabled(toggle, enabled)
+    if enabled then
+        toggle:Enable()
+        if toggle.labelText then
+            toggle.labelText:SetTextColor(C.text[1], C.text[2], C.text[3])
+        end
+    else
+        toggle:Disable()
+        if toggle.labelText then
+            toggle.labelText:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+        end
+    end
+end
+
 local function MakeEditBox(name, parent, width, multiline)
-    local e = CreateFrame("EditBox", "AegisCourierEdit" .. name, parent,
-        "InputBoxTemplate")
+    -- The multiline body deliberately gets NO template.
+    --
+    -- InputBoxTemplate's border is 9-slice art built for a ONE-LINE box: its
+    -- Left/Right/Middle textures carry a fixed height. Stretch that template
+    -- over a tall multiline frame and the border does not stretch with it --
+    -- it stays one line tall and renders as a stray, input-shaped rectangle
+    -- floating inside the body area, which is exactly what it looked like.
+    -- We already draw our own well behind the body, so the template's border
+    -- was never wanted there in the first place.
+    local e
+    if multiline then
+        e = CreateFrame("EditBox", "AegisCourierEdit" .. name, parent)
+    else
+        e = CreateFrame("EditBox", "AegisCourierEdit" .. name, parent,
+            "InputBoxTemplate")
+    end
     e:SetWidth(width)
     e:SetHeight(multiline and 96 or 18)
     e:SetAutoFocus(false)      -- otherwise opening the tab steals the keyboard
@@ -573,9 +606,20 @@ function ui.BuildSendPanel()
     toBox:SetPoint("LEFT", toLbl, "RIGHT", 10, 0)
     ui.sendTo = toBox
 
+    -- Browse the whole contact list on demand. Without this the only way to
+    -- see who you have mailed is to guess a first letter.
+    local acBtn = CreateFrame("Button", "AegisCourierAutoButton", panel)
+    acBtn:SetWidth(16)
+    acBtn:SetHeight(16)
+    acBtn:SetPoint("LEFT", toBox, "RIGHT", 4, 0)
+    acBtn:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
+    acBtn:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down")
+    acBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight")
+    ui.sendAutoButton = acBtn
+
     -- ---- subject --------------------------------------------------------
     local subjLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
-    subjLbl:SetPoint("LEFT", toBox, "RIGHT", 22, 0)
+    subjLbl:SetPoint("LEFT", acBtn, "RIGHT", 14, 0)
     subjLbl:SetText("Subject")
 
     local subjBox = MakeEditBox("Subject", panel, 300)
@@ -627,6 +671,16 @@ function ui.BuildSendPanel()
         ui.RefreshSend()
     end)
     toBox:SetScript("OnEditFocusLost", function() ac:Hide() end)
+
+    -- Toggle the full list. Clicking the button drops focus from the edit box
+    -- first, which hides the list, so this reads as "show" on the next click.
+    acBtn:SetScript("OnClick", function()
+        if ac:IsVisible() then
+            ac:Hide()
+        else
+            ui.UpdateAutoComplete(true)
+        end
+    end)
     -- Escape should close the suggestions before it closes the box.
     toBox:SetScript("OnEscapePressed", function()
         if ac:IsVisible() then ac:Hide() else toBox:ClearFocus() end
@@ -712,8 +766,10 @@ function ui.BuildSendPanel()
     cod:SetScript("OnClick", function() ui.RefreshSend() end)
     ui.sendCOD = cod
 
+    -- Directly under the C.O.D. box it modifies, indented slightly, and greyed
+    -- until C.O.D. is actually on -- it has no meaning otherwise.
     local codAll = MakeToggle(panel, "CODAll", "on every mail, not just the first")
-    codAll:SetPoint("LEFT", cod, "RIGHT", 210, 0)
+    codAll:SetPoint("TOPLEFT", cod, "BOTTOMLEFT", 14, -2)
     codAll:SetScript("OnClick", function() ui.RefreshSend() end)
     ui.sendCODAll = codAll
 
@@ -749,10 +805,20 @@ function ui.SendAttachActive()
     return ui.mailOpen and true or false
 end
 
-function ui.UpdateAutoComplete()
+-- `showAll` comes from the dropdown button and means "list everyone".
+-- Otherwise the list only appears once the user has actually typed something:
+-- an empty recipient box matches every contact, which made the suggestions
+-- drop open the moment the Send tab was opened and sit on top of the form.
+function ui.UpdateAutoComplete(showAll)
     local ac = ui.sendAuto
     if not ac then return end
     local typed = ui.sendTo:GetText() or ""
+
+    if not showAll and typed == "" then
+        ac:Hide()
+        return
+    end
+
     local names = db.MatchContacts(typed, AUTOCOMPLETE_ROWS)
     local n = table.getn(names)
 
@@ -809,12 +875,13 @@ function ui.RefreshSend()
     ui.sendAttachLabel:SetText("Attachments  " .. n .. "/" ..
         send.MAX_ATTACHMENTS)
 
-    -- COD-all only means anything for a batch with COD set.
+    -- "on every mail" only means anything once C.O.D. is on. Uncheck it as
+    -- well as greying it, so a disabled box can never sit there checked and
+    -- silently apply on the next send.
     local isCOD = ui.sendCOD:GetChecked() and true or false
-    if isCOD and n > 1 then
-        ui.sendCODAll:Enable()
-    else
-        ui.sendCODAll:Disable()
+    SetToggleEnabled(ui.sendCODAll, isCOD)
+    if not isCOD then
+        ui.sendCODAll:SetChecked(false)
     end
 
     local money = ui.SendMoneyValue()
