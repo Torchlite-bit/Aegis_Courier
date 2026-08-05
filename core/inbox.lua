@@ -416,6 +416,24 @@ function take.Step()
         return
     end
 
+    -- Snapshot the mail the FIRST time we touch it, for the correspondence
+    -- log. It has to happen here: once the money is taken and the item pulled,
+    -- the header no longer says what the mail contained, and the attached
+    -- item's name is only readable while it is still attached.
+    if not take.logSnap and (h.money > 0 or h.hasItem) then
+        local attached = nil
+        if h.hasItem then attached = inbox.Item(take.index) end
+        take.logSnap = {
+            who     = h.sender,
+            subject = h.subject,
+            money   = h.money,
+            item    = attached and attached.name or nil,
+            count   = attached and attached.count or nil,
+            auction = h.auctionKind,
+            returned = h.wasReturned,
+        }
+    end
+
     if take.mode == take.MODE_DELETE then
         -- Delete-read only removes mail that is already empty AND read, so it
         -- can never destroy an attachment or unclaimed gold.
@@ -449,7 +467,15 @@ function take.Step()
         return
     end
 
-    -- The mail is empty. Delete it in "open" mode, keep it in "take" mode.
+    -- The mail is empty, so everything it held is now ours: log it.
+    --
+    -- Only mail we actually emptied is logged. A take the server refused never
+    -- reaches this branch (the wedge guard advances instead), and delete-read
+    -- mode does not come through here at all -- an already-empty mail carries
+    -- nothing worth recording.
+    take.LogSnapshot()
+
+    -- Delete it in "open" mode, keep it in "take" mode.
     if take.mode == take.MODE_OPEN then
         take.attempts = take.attempts + 1
         DeleteInboxItem(take.index)
@@ -462,11 +488,22 @@ function take.Step()
     take.Advance()
 end
 
+-- Flush the pending snapshot into the correspondence log.
+function take.LogSnapshot()
+    local snap = take.logSnap
+    take.logSnap = nil
+    if not snap then return nil end
+    return A.db.LogAdd("received", snap)
+end
+
 function take.Advance()
     take.index = take.index + 1
     take.attempts = 0
     take.lastSig = nil
     take.pending = nil
+    -- Moving on without emptying the mail: drop the snapshot rather than log
+    -- a collection that did not happen.
+    take.logSnap = nil
 end
 
 -- ---------------------------------------------------------------------------
@@ -482,6 +519,7 @@ function take.Start(mode)
     take.attempts = 0
     take.lastSig  = nil
     take.pending  = nil
+    take.logSnap  = nil
     ResetCounters()
     take.armed = true
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
@@ -542,6 +580,7 @@ function take.Single(index)
     take.attempts = 0
     take.lastSig  = nil
     take.pending  = nil
+    take.logSnap  = nil
     ResetCounters()
     take.single   = true
     take.armed    = true

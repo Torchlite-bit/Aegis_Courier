@@ -16,12 +16,20 @@ local function check(cond, label, extra)
 end
 
 -- ---- Frame mock ----------------------------------------------------------
+--
+-- The catch-all __index below returns a no-op function for ANY key we have not
+-- implemented, which is what lets the mock absorb the hundreds of frame
+-- methods the addon calls. The trap is that it does the same for DATA fields:
+-- `self.text` on a frame that has never had SetText called is a function, not
+-- nil. Every accessor therefore reads through rawget -- returning a function
+-- from GetText silently poisons whatever the addon does with it, and cost a
+-- debugging round here.
 local function newRegion()
     local r = { visible = true }
     setmetatable(r, { __index = function() return function() end end })
-    function r:SetText(t) self.text = t end
-    function r:GetText() return self.text end
-    function r:GetStringWidth() return string.len(self.text or "") * 6 end
+    function r:SetText(t) rawset(self, "text", t) end
+    function r:GetText() return rawget(self, "text") end
+    function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
     function r:SetTexture(t) self.texture = t end
     function r:Show() self.visible = true end
     function r:Hide() self.visible = false end
@@ -43,6 +51,13 @@ CreateFrame = function(kind, name, parent, template)
     function f:IsVisible() return self.visible end
     function f:GetChecked() return self.checked end
     function f:SetChecked(v) self.checked = v and true or false end
+    -- EditBoxes are frames, so text lives here too, not only on regions.
+    -- rawget throughout: see the note above newRegion.
+    function f:SetText(t) rawset(self, "text", t) end
+    function f:GetText() return rawget(self, "text") end
+    function f:Enable() rawset(self, "enabled", true) end
+    function f:Disable() rawset(self, "enabled", false) end
+    function f:IsEnabled() return rawget(self, "enabled") ~= false end
     function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
     function f:Show()
         self.visible = true
@@ -938,6 +953,51 @@ check(send.AttachCursor(), "attached from the cursor")
 check(send.attachments[1].name == "Copper Ore", "the right item",
       send.attachments[1].name)
 
+print("== send UI: autocomplete stays shut until you type ==")
+A.db.ForgetContacts()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Torchlite")
+A.db.AddContact("Subtilizer")
+A.ui.SelectSubTab("Send")
+A.ui.sendTo:SetText("")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(),
+      "empty recipient box does not drop the list open")
+A.ui.sendTo:SetText("Torch")
+A.ui.UpdateAutoComplete()
+check(A.ui.sendAuto:IsVisible(), "typing opens it")
+A.ui.sendTo:SetText("")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(), "clearing closes it again")
+-- The dropdown button lists everyone regardless of what is typed.
+check(A.ui.sendAutoButton ~= nil, "dropdown button exists")
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(), "button opens the full list on an empty box")
+A.ui.sendAutoButton.scripts.OnClick()
+check(not A.ui.sendAuto:IsVisible(), "button toggles it shut")
+A.ui.sendTo:SetText("Zebra")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(), "no matches means no list")
+A.ui.sendTo:SetText("")
+
+print("== send UI: COD-all is greyed until COD is checked ==")
+A.ui.sendCOD:SetChecked(false)
+A.ui.sendCODAll:SetChecked(true)     -- stale state from a previous send
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:GetChecked() == false,
+      "a disabled COD-all cannot stay checked")
+check(A.ui.sendCODAll:IsEnabled() == false, "and is greyed out")
+A.ui.sendCOD:SetChecked(true)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:IsEnabled() == true, "checking COD enables it")
+A.ui.sendCODAll:SetChecked(true)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:GetChecked() == true, "and it stays checked while COD is on")
+A.ui.sendCOD:SetChecked(false)
+A.ui.RefreshSend()
+check(A.ui.sendCODAll:IsEnabled() == false, "unchecking COD greys it again")
+check(A.ui.sendCODAll:GetChecked() == false, "and clears it")
+
 print("== send: UI refresh paths run clean ==")
 A.ui.RefreshSend()
 A.ui.ClearSendForm()
@@ -945,6 +1005,162 @@ check(send.Count() == 0, "Clear empties the form")
 A.ui.SelectSubTab("Send")
 A.ui.Refresh()
 check(true, "send tab refresh runs without error")
+
+-- =========================================================================
+-- Stage C.2: the correspondence log
+-- =========================================================================
+
+print("== log: received mail is logged on collection ==")
+A.db.ClearLog()
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Bob", subject = "a gift", item = "Copper Ore" },
+    mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
+}
+take.Start(take.MODE_OPEN)
+pump()
+local rec = A.db.Log("received")
+check(table.getn(rec) == 2, "two mails logged, COD skipped", table.getn(rec))
+check(rec[1].who == AH, "sender recorded", rec[1].who)
+check(rec[1].money == 9500, "money recorded", rec[1].money)
+check(rec[1].auction == "sold", "auction kind tagged", tostring(rec[1].auction))
+check(rec[2].item == "Copper Ore", "attached item name recorded",
+      tostring(rec[2].item))
+check(rec[2].count == 1, "item count recorded")
+check(rec[1].char == "Tester", "acting character recorded", rec[1].char)
+check(rec[1].t ~= nil, "timestamped")
+
+print("== log: a mail we never emptied is not logged ==")
+A.db.ClearLog()
+INBOX = { mail{ sender = "Bob", subject = "stuck", money = 500 } }
+failTakeMoney = true
+take.Start(take.MODE_TAKE)
+pump(60)
+failTakeMoney = false
+check(table.getn(A.db.Log("received")) == 0,
+      "a refused take logs nothing", table.getn(A.db.Log("received")))
+
+print("== log: delete-read logs nothing ==")
+A.db.ClearLog()
+INBOX = { mail{ sender = "Bob", subject = "old news", read = true } }
+take.Start(take.MODE_DELETE)
+pump()
+check(table.getn(INBOX) == 0, "mail was deleted")
+check(table.getn(A.db.Log("received")) == 0,
+      "an already-empty mail carries nothing to log")
+
+print("== log: sent mail is logged per mail, on confirmation ==")
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "supplies", "", 5000, false, false)
+pumpSend()
+local sent = A.db.Log("sent")
+check(table.getn(sent) == 2, "one entry per mail", table.getn(sent))
+check(sent[1].who == "Ann", "recipient recorded")
+check(sent[1].subject == "supplies [1/2]", "the actual subject sent",
+      sent[1].subject)
+check(sent[1].item == "Silk Cloth", "item recorded")
+check(sent[1].count == 20, "stack count recorded", sent[1].count)
+check(sent[1].money == 5000, "gold on the first entry", sent[1].money)
+check(sent[2].money == 0, "not on the second", sent[2].money)
+
+print("== log: COD is logged as COD, not as gold ==")
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1)
+send.Start("Ann", "cod parcel", "", 2500, true, false)
+pumpSend()
+sent = A.db.Log("sent")
+check(sent[1].cod == 2500, "cod recorded", sent[1].cod)
+check(sent[1].money == 0, "and not counted as attached gold", sent[1].money)
+
+print("== log: a mail the server rejected is not logged ==")
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "x", "", 0, false, false)
+sdriver.scripts.OnUpdate()      -- first mail issued, not yet confirmed
+check(table.getn(A.db.Log("sent")) == 0, "nothing logged before confirmation")
+fire("MAIL_FAILED")
+check(table.getn(A.db.Log("sent")) == 0, "and nothing after a failure",
+      table.getn(A.db.Log("sent")))
+
+print("== log: the logEnabled setting is honoured ==")
+A.db.ClearLog()
+A.db.SetSetting("logEnabled", false)
+stockBags()
+send.Attach(0, 1)
+send.Start("Ann", "quiet", "", 0, false, false)
+pumpSend()
+check(table.getn(A.db.Log("sent")) == 0, "logging off records nothing")
+A.db.SetSetting("logEnabled", true)
+
+print("== log: filtering ==")
+A.db.ClearLog()
+A.db.LogAdd("received", { who = "Bob", subject = "hello", char = "Tester" })
+A.db.LogAdd("received", { who = "Ann", subject = "cloth order",
+    item = "Silk Cloth", char = "Tester" })
+A.db.LogAdd("received", { who = "Stormwind Auction House",
+    subject = "Auction successful: Black Lotus", auction = "sold",
+    money = 500, char = "AltGuy" })
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Log")
+check(A.ui.logDir == "received", "defaults to received")
+A.ui.logFind:SetText("")
+A.ui.logMine:SetChecked(false)
+check(table.getn(A.ui.LogRows()) == 3, "all three shown",
+      table.getn(A.ui.LogRows()))
+-- Newest first.
+check(A.ui.LogRows()[1].who == "Stormwind Auction House", "newest first")
+A.ui.logFind:SetText("bob")
+check(table.getn(A.ui.LogRows()) == 1, "participant filter, case-insensitive")
+A.ui.logFind:SetText("cloth")
+check(table.getn(A.ui.LogRows()) == 1, "matches the item too")
+A.ui.logFind:SetText("sold")
+check(table.getn(A.ui.LogRows()) == 1, "matches the auction category tag")
+A.ui.logFind:SetText("zzz")
+check(table.getn(A.ui.LogRows()) == 0, "no matches")
+A.ui.logFind:SetText("")
+-- The cross-alt question TurtleMail's per-character store cannot answer.
+A.ui.logMine:SetChecked(true)
+check(table.getn(A.ui.LogRows()) == 2, "this-character filter excludes the alt",
+      table.getn(A.ui.LogRows()))
+A.ui.logMine:SetChecked(false)
+check(table.getn(A.ui.LogRows()) == 3, "and the alt is visible again")
+
+print("== log: directions are separate ==")
+A.db.ClearLog()
+A.db.LogAdd("received", { who = "Bob", subject = "in" })
+A.db.LogAdd("sent", { who = "Ann", subject = "out" })
+check(table.getn(A.db.Log("received")) == 1, "received bucket")
+check(table.getn(A.db.Log("sent")) == 1, "sent bucket")
+A.db.ClearLog("sent")
+check(table.getn(A.db.Log("sent")) == 0, "clearing one direction")
+check(table.getn(A.db.Log("received")) == 1, "leaves the other alone")
+
+print("== log: capped ==")
+A.db.ClearLog()
+local i = 1
+while i <= 300 do
+    A.db.LogAdd("received", { who = "Bob", subject = "n" .. i })
+    i = i + 1
+end
+local capped = table.getn(A.db.Log("received"))
+check(capped == 250, "capped at 250", capped)
+check(A.db.Log("received")[capped].subject == "n300",
+      "the newest entry survives", A.db.Log("received")[capped].subject)
+
+print("== log: UI refresh runs clean ==")
+A.ui.SelectSubTab("Log")
+A.ui.RefreshLog()
+A.ui.logDir = "sent"
+A.ui.RefreshLog()
+A.ui.logDir = "received"
+A.ui.Refresh()
+check(true, "log tab refreshes in both directions")
 
 print("")
 if failures == 0 then

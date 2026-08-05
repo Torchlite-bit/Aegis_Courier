@@ -1,12 +1,11 @@
-# Aegis: Courier (v0.3.0)
+# Aegis: Courier (v0.4.0)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
 **optional** integration into [Aegis: Exchange](https://github.com/Torchlite-bit/Aegis_Exchange).
 
-> **Stage C pre-release.** Reading, taking and sending mail are all in and
-> tested. The mail log and the pfUI skin are what remain — see
-> [Status](#status).
+> **Stage C pre-release.** Reading, taking, sending and logging mail are all
+> in and tested. The pfUI skin is what remains — see [Status](#status).
 
 ---
 
@@ -40,8 +39,9 @@ Interface/AddOns/Aegis_Courier/
     ui/
 ```
 
-Upgrading from 0.2.x adds a file, so **restart the client** — `/reload` is not
-enough for the 1.12 client to notice a new `.toc` entry.
+Upgrading from 0.2.x or earlier adds a file, so **restart the client** —
+`/reload` is not enough for the 1.12 client to notice a new `.toc` entry.
+Upgrading from 0.3.x is a plain `/reload`.
 
 ## Mailbox actions
 
@@ -92,6 +92,24 @@ the batch stops before that mail goes out rather than posting an empty one.
 Right-click in your bags only attaches while the Send tab is actually open at
 a mailbox; everywhere else it keeps its normal meaning.
 
+## The log
+
+Separate from the ledger next door: the ledger is *money*, the log is
+*correspondence* — who wrote to whom, what was attached, on which character.
+Every mail Courier collects or sends is recorded, capped at 250 each way.
+
+It is stored **account-wide**, with the character on each entry, so a
+per-character view is a filter rather than a limitation. TurtleMail stores its
+log per-character, which makes *"did I send that on my bank alt?"* impossible
+to answer — that being the question people usually have.
+
+One search box covers everything visible in a row, so `Bob`, `cloth` and
+`sold` all narrow the list without any dropdown to hunt through.
+
+Entries are written when a mail is actually **collected** or the server
+**confirms** a send, matching the ledger — a mail that failed to send is not a
+mail you sent. Turn the whole thing off in the **Courier** tab.
+
 ## Usage
 
 | Command | What it does |
@@ -135,11 +153,11 @@ the current state.
 | **A** | Own window, mailbox takeover, inbox list, ledger/settings tabs, Aegis seam | **done** |
 | **B** | Open-all / take-all / delete-read, right-click take; auction matching; sale/cut/net ledger writes on collection | **done** |
 | **C.1** | Send tab: multi-item batch send, recipient autocomplete, C.O.D. modes, true cost preview | **done** |
-| **C.2** | Mail log (sent + received) with participant and category filters | next |
-| **C.3** | pfUI skin | planned |
+| **C.2** | Mail log (sent + received), account-wide, with search and a per-character filter | **done** |
+| **C.3** | pfUI skin | next |
 
-What Courier does **not** do yet: keep a log of mail sent and received. The
-ledger covers auction sales; a general correspondence log is C.2.
+Courier is now a complete TurtleMail replacement. What remains is cosmetic:
+matching pfUI's look when pfUI is installed.
 
 ## Compatibility
 
@@ -162,7 +180,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 233 checks
+lua5.1 tests/harness.lua      # 285 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**

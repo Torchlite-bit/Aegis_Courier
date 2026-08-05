@@ -311,9 +311,11 @@ function send.Step()
     -- the same gold ten times. COD is a charge to the recipient, so it can
     -- legitimately repeat -- but only when the user asked for that.
     local n = send.sentCount + 1
+    local appliedMoney = 0
     if send.money > 0 then
         local applies = (n == 1) or (send.isCOD and send.codAll)
         if applies then
+            appliedMoney = send.money
             if send.isCOD then
                 if SetSendMailCOD then SetSendMailCOD(send.money) end
             else
@@ -325,11 +327,26 @@ function send.Step()
         end
     end
 
-    SendMail(send.to, send.SubjectFor(n, attachment), send.body)
+    local subject = send.SubjectFor(n, attachment)
+
+    -- Remember what THIS mail carried so it can be logged once the server
+    -- confirms it. Each mail of a batch is a real, separate mail and gets its
+    -- own log entry.
+    send.lastSent = {
+        who     = send.to,
+        subject = subject,
+        item    = attachment and attachment.name or nil,
+        count   = attachment and attachment.count or nil,
+        money   = (not send.isCOD) and appliedMoney or 0,
+        cod     = send.isCOD and appliedMoney or 0,
+    }
+
+    SendMail(send.to, subject, send.body)
 end
 
 function send.Abort()
     send.sending = false
+    send.lastSent = nil
     send.queue = nil
     send.armed = false
     if A.ui and A.ui.RefreshSend then A.ui.RefreshSend() end
@@ -384,6 +401,12 @@ end
 A.RegisterEvent("MAIL_SEND_SUCCESS", function()
     if not send.sending then return end
     send.sentCount = send.sentCount + 1
+    -- Logged on CONFIRMATION, matching the take engine: a mail the server
+    -- never accepted is not a mail you sent.
+    if send.lastSent then
+        A.db.LogAdd("sent", send.lastSent)
+        send.lastSent = nil
+    end
     if send.queue and table.getn(send.queue) > 0 then
         send.Arm()                 -- more items: next mail on the next tick
     else
