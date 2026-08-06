@@ -9,6 +9,45 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.0.1] - 2026-08-06
+
+Fixes the reported "you have unread mail" flag never clearing. `/reload`.
+
+### Fixed
+- **Mail taken by Courier was never marked read.** On 1.12 there is no
+  "mark read" call — `GetInboxText(index)` does it as a side effect of
+  fetching the body, and Courier never called it. TurtleMail calls it as the
+  first step of processing every mail; it was omitted here because that line
+  reads like it is only fetching body text. The take engine now calls
+  `inbox.MarkRead` before emptying a mail.
+- **The minimap icon is now put out explicitly.** It tracks `HasNewMail()`,
+  which the client does not re-evaluate merely because the inbox was emptied,
+  so in vanilla it can stay lit until the next login. When the mailbox closes
+  with nothing unread left, Courier hides it — the same workaround Postal
+  uses. It is only ever hidden when the unread count is known to be zero, so a
+  genuine notification is never suppressed, and new mail lights it again.
+- **Knock-on: "Delete Read" could never find anything.** Same root cause — with
+  nothing ever marked read, the button was permanently greyed out. It now
+  works after a Take All.
+
+### Behaviour worth knowing
+- Only mail Courier is **actively emptying** is marked read. Browsing the
+  inbox marks nothing, deliberately: reading a mail that still holds
+  attachments drops its expiry to three days, so marking on display would
+  quietly shorten the life of mail you meant to keep.
+- COD and GM mail are skipped entirely and are not marked read either.
+
+### Changed
+- `CLAUDE.md` gains rule 17 covering both halves of this, since it is exactly
+  the kind of detail that gets left out twice.
+
+### Tests
+- Harness grows to **346 checks**. `GetInboxText` in the stub now models the
+  read side effect, which is the whole reason for calling it. Covers: taking
+  marks read, browsing does not, COD/GM are untouched, the icon is left alone
+  while anything is unread, cleared when nothing is, and Delete Read finding
+  work after a Take All.
+
 ## [1.0.0] - 2026-08-05 — **restart**
 
 Stage C.3, and the first complete release. Every stage on the roadmap is done:
@@ -295,6 +334,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[1.0.1]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.0
 [0.5.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.4.0

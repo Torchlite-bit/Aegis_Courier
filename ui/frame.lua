@@ -1698,8 +1698,33 @@ A.RegisterEvent("MAIL_CLOSED", function()
     -- Stops the driver and quietly abandons any run in flight -- walking away
     -- from the mailbox ends the session, so there is nothing left to take.
     A.take.SetMailboxOpen(false)
+    ui.SettleMailIcon()
     if ui.frame then ui.frame:Hide() end
 end)
+
+-- Put the minimap's "you have unread mail" icon out when nothing is unread.
+--
+-- Two separate things had to be true for the icon to clear, and Courier was
+-- doing neither:
+--
+--   1. The mail must be marked READ on the server. There is no "mark read"
+--      call on 1.12 -- GetInboxText(index) does it as a side effect. The take
+--      engine now calls inbox.MarkRead before emptying a mail.
+--   2. The ICON itself must be taken down. It tracks HasNewMail(), which the
+--      client does not re-evaluate just because we emptied the inbox, so in
+--      vanilla it can stay lit until the next login. Postal solves this the
+--      same way: when the mailbox closes with nothing unread left, hide it.
+--
+-- Gated on the unread count captured while the mailbox was still open --
+-- MAIL_CLOSED arrives after the session is gone and the inbox cannot be read
+-- from here. Only ever hides when we KNOW nothing was unread, so a genuine
+-- notification is never suppressed. New mail fires UPDATE_PENDING_MAIL and
+-- FrameXML shows it again.
+function ui.SettleMailIcon()
+    if A.inbox.lastUnread ~= 0 then return end
+    local icon = getglobal("MiniMapMailFrame")
+    if icon and icon.Hide then icon:Hide() end
+end
 
 A.RegisterEvent("MAIL_INBOX_UPDATE", function()
     ui.Refresh()

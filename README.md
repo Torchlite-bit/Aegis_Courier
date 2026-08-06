@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.0.0)
+# Aegis: Courier (v1.0.1)
 
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
@@ -64,6 +64,11 @@ one's index.
 Everything runs one mail at a time, clocked by the server's own inbox refresh,
 and stops by itself if your bags fill up. A mail is never deleted while it
 still holds gold or an item, even if the take failed.
+
+Mail Courier empties is marked **read**, which is what clears the minimap's
+"you have unread mail" icon; the icon is put out when you close a mailbox with
+nothing unread left. Mail you only *look* at is deliberately left unread —
+reading a mail that still has attachments drops its expiry to three days.
 
 ## The ledger
 
@@ -206,7 +211,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 328 checks
+lua5.1 tests/harness.lua      # 346 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**

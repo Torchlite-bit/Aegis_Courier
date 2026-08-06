@@ -227,6 +227,37 @@ function inbox.Summary()
     return total, unread, money
 end
 
+-- Mark a mail READ on the server.
+--
+-- There is no "mark read" call on 1.12: GetInboxText(index) is what does it,
+-- as a side effect of fetching the body. Without it a mail stays unread
+-- forever, which leaves the minimap's "you have unread mail" icon lit and
+-- makes Delete Read permanently find nothing.
+--
+-- SIDE EFFECT, and the reason this is not called on mail we merely display:
+-- reading a mail that still holds attachments drops its expiry to three days.
+-- Only mail we are actively emptying goes through here -- the same rule
+-- TurtleMail follows.
+function inbox.MarkRead(index)
+    if GetInboxText then GetInboxText(index) end
+end
+
+-- How many mails are still unread. Tracked while the mailbox is open so the
+-- minimap icon can be settled on close, when the inbox is no longer readable.
+inbox.lastUnread = nil
+
+function inbox.UnreadCount()
+    local unread = 0
+    local n = inbox.NumItems()
+    local i = 1
+    while i <= n do
+        local h = inbox.Header(i)
+        if h and not h.wasRead then unread = unread + 1 end
+        i = i + 1
+    end
+    return unread
+end
+
 -- ===========================================================================
 -- Take engine
 -- ===========================================================================
@@ -421,6 +452,11 @@ function take.Step()
     -- the header no longer says what the mail contained, and the attached
     -- item's name is only readable while it is still attached.
     if not take.logSnap and (h.money > 0 or h.hasItem) then
+        -- Reading it here is also what clears the server's unread flag for
+        -- this mail. Do it before the takes, while the mail definitely still
+        -- exists, exactly as TurtleMail's inbox_open does.
+        inbox.MarkRead(take.index)
+
         local attached = nil
         if h.hasItem then attached = inbox.Item(take.index) end
         take.logSnap = {
@@ -644,6 +680,9 @@ end
 -- clock -- not a timer.
 A.RegisterEvent("MAIL_INBOX_UPDATE", function()
     if take.running then take.armed = true end
+    -- Remember this while we still can: MAIL_CLOSED arrives after the session
+    -- has gone, and the inbox cannot be read from there.
+    inbox.lastUnread = inbox.UnreadCount()
 end)
 
 -- Error handling, following TurtleMail's split: a full bag is fatal to the

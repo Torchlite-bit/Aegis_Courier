@@ -148,7 +148,16 @@ end
 -- server refusing, which is the case the engine must never book a ledger
 -- entry for.
 failTakeMoney, failTakeItem = false, false
-GetInboxText = function() end
+-- GetInboxText is what marks a mail READ on 1.12 -- there is no separate call.
+-- The stub models that side effect, because it is the whole point of calling it.
+readCalls = 0
+GetInboxText = function(i)
+    readCalls = readCalls + 1
+    local m = INBOX[i]
+    if m then m.wasRead = 1 end
+end
+MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
+MiniMapMailFrame:Show()
 TakeInboxMoney = function(i)
     local m = INBOX[i]
     if not m or failTakeMoney then return end
@@ -1038,6 +1047,92 @@ check(true, "send tab refresh runs without error")
 -- =========================================================================
 -- Stage C.2: the correspondence log
 -- =========================================================================
+
+print("== unread flag: taking a mail marks it read ==")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+readCalls = 0
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Bob", subject = "gift", item = "Copper Ore" },
+}
+check(INBOX[1].wasRead == nil, "starts unread")
+take.Start(take.MODE_TAKE)     -- keeps the mail, so we can inspect it after
+pump()
+check(readCalls >= 2, "GetInboxText called for each mail taken", readCalls)
+check(INBOX[1].wasRead == 1, "first mail marked read")
+check(INBOX[2].wasRead == 1, "second mail marked read")
+check(A.inbox.UnreadCount() == 0, "nothing unread left",
+      A.inbox.UnreadCount())
+
+print("== unread flag: mail we only LOOK at is never marked read ==")
+-- Reading a mail with attachments drops its expiry to three days, so merely
+-- displaying the inbox must not do it.
+readCalls = 0
+INBOX = { mail{ sender = "Bob", subject = "keep me", money = 100 } }
+A.ui.SelectSubTab("Inbox")
+A.ui.RefreshInbox()
+A.inbox.All()
+A.inbox.Summary()
+check(readCalls == 0, "browsing the inbox marks nothing read", readCalls)
+check(INBOX[1].wasRead == nil, "and the mail is still unread")
+
+print("== unread flag: COD and GM mail are not marked read either ==")
+readCalls = 0
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
+    mail{ sender = "GM", subject = "ticket", money = 700, gm = true },
+}
+take.Start(take.MODE_OPEN)
+pump()
+check(readCalls == 0, "skipped mail is left completely alone", readCalls)
+check(INBOX[1].wasRead == nil, "COD mail still unread")
+
+print("== unread flag: Delete Read now has something to find ==")
+-- Same root cause: with nothing ever marked read, Delete Read was permanently
+-- empty-handed and its button permanently greyed.
+INBOX = {
+    mail{ sender = "Bob", subject = "gift", item = "Copper Ore" },
+    mail{ sender = "Ann", subject = "note", money = 50 },
+}
+check(take.HasWork(take.MODE_DELETE) == false, "nothing to delete yet")
+take.Start(take.MODE_TAKE)      -- empties them but keeps them
+pump()
+check(table.getn(INBOX) == 2, "mails kept")
+check(take.HasWork(take.MODE_DELETE) == true,
+      "emptied-and-read mail is now deletable")
+take.Start(take.MODE_DELETE)
+pump()
+check(table.getn(INBOX) == 0, "and Delete Read clears them",
+      table.getn(INBOX))
+
+print("== unread flag: the minimap icon is put out on close ==")
+INBOX = { mail{ sender = "Bob", subject = "x", money = 100 } }
+fire("MAIL_INBOX_UPDATE")
+check(A.inbox.lastUnread == 1, "unread tracked while open", A.inbox.lastUnread)
+MiniMapMailFrame:Show()
+fire("MAIL_CLOSED")
+check(MiniMapMailFrame:IsVisible(),
+      "icon LEFT ALONE while a mail is still unread")
+
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+take.Start(take.MODE_OPEN)
+pump()
+fire("MAIL_INBOX_UPDATE")
+check(A.inbox.lastUnread == 0, "nothing unread after the run")
+MiniMapMailFrame:Show()
+fire("MAIL_CLOSED")
+check(not MiniMapMailFrame:IsVisible(), "icon cleared once nothing is unread")
+
+print("== unread flag: an empty inbox also clears it ==")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+INBOX = {}
+fire("MAIL_INBOX_UPDATE")
+MiniMapMailFrame:Show()
+fire("MAIL_CLOSED")
+check(not MiniMapMailFrame:IsVisible(), "no mail means nothing unread")
 
 print("== inbox: return to sender ==")
 A.ui.mailOpen = true
