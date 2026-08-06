@@ -6,6 +6,31 @@ a TurtleMail replacement that also understands your auction mail, with
 
 > **v1.0.0 — feature complete.** Reading, taking, sending, logging and
 > skinning are all in and tested. Courier is a full TurtleMail replacement.
+---
+
+<p align="center">
+  <img src="media/aegis-courier-logo.jpg" width="300" alt="Aegis Courier Logo"><br>
+  <b>Aegis: Courier — Complete Mailbox Suite for Turtle WoW</b>
+</p>
+
+---
+
+### 📷 Interface Overview
+
+| Inbox & Auto-Loot | Send & Attachments |
+| :---: | :---: |
+| <img src="media/screenshot-inbox.jpg" width="400"> | <img src="media/screenshot-send.jpg" width="400"> |
+
+| Transaction Log | Mail Ledger | Settings |
+| :---: | :---: | :---: |
+| <img src="media/screenshot-log.png" width="280"> | <img src="media/screenshot-ledger.png" width="280"> | <img src="media/screenshot-settings.jpg" width="280"> |
+
+---
+
+### 🎨 pfUI Theme Support
+<p align="center">
+  <img src="media/screenshot-pfui.jpg" width="600" alt="pfUI Styled Inbox">
+</p>
 
 ---
 
