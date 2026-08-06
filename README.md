@@ -1,11 +1,22 @@
 # Aegis: Courier (v1.0.0)
 
+[![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
+[![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
+[![Capy WoW](https://img.shields.io/badge/Capy%20WoW-1.18.1-8B5A2B?style=flat-square&labelColor=555)](https://capycraft.io/)
+[![Client](https://img.shields.io/badge/client-WoW%201.12%20(vanilla)-c79c6e?style=flat-square)](https://turtle-wow.org)
+
+[![AEGIS: Exchange](https://img.shields.io/badge/AEGIS:Exchange-Companion%20Addon-ff8c00?style=flat-square&labelColor=555)](https://github.com/torchlite-bit/Aegis_Exchange)
+
 A standalone mailbox companion for **Turtle WoW** (WoW 1.12 vanilla client) —
 a TurtleMail replacement that also understands your auction mail, with
 **optional** integration into [Aegis: Exchange](https://github.com/Torchlite-bit/Aegis_Exchange).
 
 > **v1.0.0 — feature complete.** Reading, taking, sending, logging and
 > skinning are all in and tested. Courier is a full TurtleMail replacement.
+
+**💬 [Join the Discord](https://discord.gg/hsgPTNkSX)** for help, bug reports,
+and feature ideas.
+
 ---
 
 <p align="center">
@@ -253,3 +264,13 @@ before an empty mail goes out.
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+---
+
+<div align="center">
+
+**[💬 Discord](https://discord.gg/hsgPTNkSX)** · **[📜 Changelog](CHANGELOG.md)** · **[🐛 Issues](https://github.com/Torchlite-bit/Aegis_Courier/issues)**
+
+*Aegis: Courier is part of the Aegis addon series. Happy shipping.* ✉️
+
+</div>
