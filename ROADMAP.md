@@ -46,8 +46,19 @@ line, so no forced client restart).
   and `won` / `expired` / `cancelled` carry no price.
 - **B.4 Finalize on collection** — `take.Confirm` fails closed, crediting only
   money it can see has left the mail.
-- **B.5 Push to Aegis** — verified against a stub; goes live by itself when
-  Aegis ships `RecordExternalTxn`.
+- **B.5 Push to Aegis** — live as of v1.0.2, and **it did not "go live by
+  itself"**. It was verified against a stub written from *this* repo's
+  assumption about Aegis rather than from Aegis's source, the assumption was
+  wrong (positional arguments; Aegis takes one table), and because Aegis
+  refuses a bad payload by returning `false` instead of raising, the `pcall`
+  around it reported success and every entry was dropped in silence. The stub
+  agreed with the caller, so the suite passed over a dead seam for the addon's
+  whole life. Fixed, along with `bridge.Push` now reading what Aegis actually
+  returned.
+
+  The lesson worth keeping: **a mock written from the caller's assumption
+  cannot fail.** Port test doubles for another addon's API from that addon's
+  source, and make the double able to disagree with you.
 
 Deliberately not done in B: nothing writes the mail **log** (Stage C), and a
 mail collected through the *stock* Blizzard window is not seen by the ledger,
@@ -102,9 +113,9 @@ Stages A through C are done. Courier replaces TurtleMail feature-for-feature
 per `docs/turtlemail-audit.md`, and adds the auction ledger TurtleMail never
 had. There is no Stage D planned; further work is whatever real use turns up.
 
-The one outstanding external dependency is Aegis: Exchange's `RecordExternalTxn`
-(its Phase 0.2). Courier's side is written and tested; it goes live by itself
-when Aegis ships.
+Aegis: Exchange shipped `RecordExternalTxn` in its v1.1.7, and Courier's push
+works against it as of **v1.0.2** — see B.5 for why that took a fix rather than
+happening on its own. There are no outstanding external dependencies.
 
 ---
 
@@ -114,6 +125,12 @@ when Aegis ships.
   `CLAUDE.md`, integration rules.
 - **Disabling Aegis's own mail scanner from our side.** Aegis stands itself
   down when it detects Courier (its Phase 0.2). We do not reach into it.
+  - Two things make it detect us, and only one is a contract. The contract is
+    our `ClaimMailScanning("Aegis: Courier")` call. The other is a fallback
+    sniff for the global **`AegisCourier`**, which Aegis pins by exact name as
+    of its v1.7.0. So **renaming this addon's global would silently break that
+    fallback** — harmless while we still claim, but do not rename it casually,
+    and tell the Aegis side if you ever do.
 - **Calendar date-picker** for log filtering — a whole bundled widget for one
   filter. Revisit if asked.
 - **Declaring Aegis in the `.toc`** as an optional dependency. `bridge.Ready()`

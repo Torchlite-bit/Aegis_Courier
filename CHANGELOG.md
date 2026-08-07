@@ -9,6 +9,48 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.0.2]
+
+Fixes the Aegis: Exchange integration, which has never once worked. `/reload`.
+Nothing changes for standalone users — Courier's own mail handling, ledger and
+history are untouched, and were always the record of truth.
+
+### Fixed
+- **Every sale pushed to Aegis: Exchange was silently discarded.** Courier
+  called Aegis's `RecordExternalTxn` with four positional arguments; it takes
+  a single table. Aegis rejects a bad payload by **returning** `false` rather
+  than raising, so the `pcall` guarding the call reported success, Courier
+  believed the entry was mirrored, and neither addon said a word. Users running
+  both saw Courier's own history fill up correctly while Aegis's stayed empty.
+
+  Both sides claimed integration contract v1, so the version check could not
+  catch it. Aegis is unchanged — its shape was always the published one.
+- **A refusal from Aegis is no longer read as success.** `bridge.Push` checked
+  only whether the call *errored*, discarding the `false, reason` Aegis returns
+  for a payload it declines. It now reports what Aegis actually said, so the
+  next contract drift surfaces instead of vanishing. This is the change that
+  matters most — it is what made the bug above invisible for the addon's whole
+  life.
+
+### Changed
+- **The test double for Aegis is now ported from Aegis's real source**, not
+  written from Courier's assumption about it. The old fake took the same wrong
+  positional arguments as the caller, so both agreed and the suite passed over
+  a dead seam. It now takes a table, validates like the real thing, and returns
+  `true` / `false, reason` — a mock that can disagree with a wrong caller.
+- **No dedup key is sent with a push**, now stated explicitly and tested.
+  Aegis's `MailTxnKey` buckets subject + money + arrival-hour, which is exactly
+  the fingerprint `inbox.lua`'s Stage B note rejects: two identical stacks sold
+  at the same price in the same hour collide, and a collision silently
+  *under*-counts. Courier books on collection, so an emptied mail cannot be
+  booked twice and needs no key.
+
+  The known trade-off: auction mail that Aegis already booked on arrival and
+  that is still sitting uncollected when Courier is installed gets counted
+  twice. That is a one-time, bounded overlap at handover, and it is preferable
+  to a permanent undercount — a missing sale is invisible, a doubled one is at
+  least conspicuous.
+
 ## [1.0.1] - 2026-08-06
 
 Fixes the reported "you have unread mail" flag never clearing. `/reload`.
@@ -334,6 +376,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[1.0.2]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.2
 [1.0.1]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.0
 [0.5.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v0.5.0
