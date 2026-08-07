@@ -382,29 +382,82 @@ check(A.bridge.Ready() == false, "bridge not ready")
 check(A.bridge.Push("sale", "Silk Cloth", 9500) == false, "push is a no-op")
 check(A.bridge.StatusText() == "standalone", "status reads standalone", A.bridge.StatusText())
 
+-- A FAITHFUL stand-in for Aegis: Exchange's RecordExternalTxn, ported from
+-- that repo's core/db.lua under the "Companion-addon integration surface"
+-- heading. Every behaviour below is one Courier depends on:
+--
+--   * it takes ONE TABLE, not positional arguments;
+--   * it RETURNS false plus a reason for a bad payload -- it does NOT error,
+--     so a pcall around it reports success either way;
+--   * it returns true when the entry is recorded.
+--
+-- This fake used to take (kind, item, amount, itemId), mirroring the mistake
+-- in bridge.Push rather than the real addon. Both agreed, so 346 checks
+-- passed over a seam that dropped every entry on the floor. A mock written
+-- from the caller's assumption tests nothing; this one is written from the
+-- far side's source and disagrees with a wrong caller on purpose.
+--
+-- If Aegis's INTEGRATION_VERSION ever moves past 1, re-port this from there.
+function FakeAegis(sink)
+    return {
+        INTEGRATION_VERSION = 1,
+        RecordExternalTxn = function(txn)
+            if type(txn) ~= "table" then
+                return false, "payload must be a table"
+            end
+            if txn.kind ~= "sale" and txn.kind ~= "buy" then
+                return false, "kind must be 'sale' or 'buy'"
+            end
+            if type(txn.amount) ~= "number" or txn.amount <= 0 then
+                return false, "amount must be a positive number of copper"
+            end
+            table.insert(sink, {
+                kind = txn.kind, item = txn.item,
+                amount = txn.amount, id = txn.itemId, key = txn.key,
+            })
+            return true
+        end,
+    }
+end
+
 print("== bridge: with Aegis present ==")
 local pushed = {}
-AegisExchange = {
-    INTEGRATION_VERSION = 1,
-    RecordExternalTxn = function(kind, item, amount, itemId)
-        table.insert(pushed, { kind = kind, item = item, amount = amount, id = itemId })
-    end,
-}
+AegisExchange = FakeAegis(pushed)
 check(A.bridge.Ready() == true, "bridge ready")
 check(A.bridge.Push("sale", "Silk Cloth", 9500, 4306) == true, "push succeeds")
 check(table.getn(pushed) == 1, "one entry pushed")
 check(pushed[1].kind == "sale" and pushed[1].item == "Silk Cloth"
       and pushed[1].amount == 9500 and pushed[1].id == 4306,
-      "argument order matches Aegis db.RecordTxn(kind,item,amount,itemId)")
+      "the payload reaches Aegis as a TABLE with the documented field names")
+
+-- No dedup key is sent, and that is deliberate. Aegis's MailTxnKey buckets
+-- subject+money+arrival-hour, which is exactly the fingerprint inbox.lua's
+-- Stage B note rejects: two identical stacks sold at one price in one hour
+-- collide, and a collision silently UNDER-counts. Courier books on
+-- COLLECTION, so an emptied mail cannot be booked twice and no key is
+-- needed. Sending one would trade a bounded, one-time handover overlap for
+-- a permanent undercount.
+check(pushed[1].key == nil, "no dedup key is sent (see inbox.lua Stage B note)")
+
 -- A future contract version we do not understand must stand us down.
 AegisExchange.INTEGRATION_VERSION = 99
 check(A.bridge.Ready() == false, "unsupported contract version stands down")
 AegisExchange.INTEGRATION_VERSION = 1
+
 -- An error on the far side must not propagate.
 AegisExchange.RecordExternalTxn = function() error("boom") end
 check(A.bridge.Push("sale", "x", 1) == false, "far-side error swallowed")
+
+-- ...and neither must a REFUSAL, which is the far more likely failure: Aegis
+-- returns false rather than erroring, so a bridge that only inspects pcall's
+-- ok flag reports success and loses the entry. That is precisely how the
+-- positional-call bug survived. Push must report what Aegis actually said.
+AegisExchange.RecordExternalTxn = function() return false, "payload must be a table" end
+check(A.bridge.Push("sale", "x", 1) == false, "a REFUSAL is reported as failure")
+AegisExchange.RecordExternalTxn = function() return true end
+check(A.bridge.Push("sale", "x", 1) == true, "and acceptance as success")
+
 -- The user's own setting wins.
-AegisExchange.RecordExternalTxn = function() end
 A.db.SetSetting("pushToAegis", false)
 check(A.bridge.Ready() == false, "push disabled by setting")
 A.db.SetSetting("pushToAegis", true)
@@ -717,12 +770,7 @@ check(INBOX[1].money == 100, "COD mail untouched")
 print("== take: pushes to Aegis when the seam is live ==")
 A.db.ClearLedger()
 local pushed2 = {}
-AegisExchange = {
-    INTEGRATION_VERSION = 1,
-    RecordExternalTxn = function(kind, item, amount, itemId)
-        table.insert(pushed2, { kind = kind, item = item, amount = amount })
-    end,
-}
+AegisExchange = FakeAegis(pushed2)
 INBOX = { mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 } }
 take.Start(take.MODE_OPEN)
 pump()
