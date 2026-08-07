@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.0.2)
+# Aegis: Courier (v1.0.3)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -136,6 +136,10 @@ Attached gold rides the **first** mail only, so a 10-item send does not send
 your gold ten times. If an item cannot be attached — moved, sold, soulbound —
 the batch stops before that mail goes out rather than posting an empty one.
 
+If the server refuses a mail, that one is retried a few times before the batch
+gives up, and anything unsent stays on the attachment list so you can just
+press Send again.
+
 Right-click in your bags only attaches while the Send tab is actually open at
 a mailbox; everywhere else it keeps its normal meaning.
 
@@ -247,7 +251,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 346 checks
+lua5.1 tests/harness.lua      # 367 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**

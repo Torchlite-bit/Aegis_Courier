@@ -171,6 +171,14 @@ section, which is Courier's equivalent hazard surface.
     not a bigger slot. Postage is charged **per mail**, so any cost preview
     must multiply; the stock UI never shows this because it cannot send a
     batch.
+    - **`MAIL_FAILED` must not abandon the batch.** It means that one mail did
+      not go out, so its attachment can be put back at the head of the queue
+      and retried — a retry cannot duplicate anything. Abandoning the run on
+      the first refusal loses every remaining item and makes the user rebuild
+      the list. Budget the retries **per mail** and reset on each success, or a
+      long batch is capped by unrelated earlier hiccups.
+    - Leave the next mail a moment after the server's acknowledgement rather
+      than firing on the very next OnUpdate frame (`send.SETTLE`).
 22. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
     *that* something is held, never *what*. The only way to identify a dragged
     item is to remember where it came from: save-and-replace
