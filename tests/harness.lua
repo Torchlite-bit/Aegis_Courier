@@ -200,6 +200,16 @@ GetSendMailPrice = function() return 30 end
 GetCVar = function(k) return k == "realmName" and "TestRealm" or "" end
 UnitFactionGroup = function() return "Alliance" end
 UnitName = function() return "Tester" end
+-- Cursor and attachment slot, modelled the way the real client behaves,
+-- because the retry path depends on it: picking an item up REMOVES it from the
+-- bag, ClearCursor puts it BACK where it came from, and clicking the
+-- attachment button with an empty cursor takes the attached item back off.
+-- The old stub modelled none of that, which is why nothing here could exercise
+-- a send that the server refuses.
+-- Picking an item up LEAVES it in the bag slot, flagged locked -- it only
+-- really moves once it is dropped somewhere. (That locked flag is why
+-- TurtleMail hooks GetContainerItemInfo.) So ClearCursor just drops the
+-- reference; the bag was never changed.
 ClearCursor = function() cursor = nil end
 CursorHasItem = function() return cursor ~= nil end
 
@@ -224,25 +234,44 @@ UseContainerItem = function() useContainerCalls = useContainerCalls + 1 end
 ClickSendMailItemButton = function()
     if cursor then
         if not failAttach then
-            attachSlot = cursor.item
+            attachSlot = cursor
+            -- NOW it leaves the bag: it is committed to the mail.
             BAGS[cursor.bag][cursor.slot] = nil
         end
         cursor = nil
-    else
-        attachSlot = nil        -- empty cursor picks the attachment back up
+    elseif attachSlot then
+        -- Empty cursor takes the attachment back off: it returns to the slot
+        -- it came from and ends up on the cursor. This is the path a retry
+        -- after a refused mail goes through.
+        BAGS[attachSlot.bag] = BAGS[attachSlot.bag] or {}
+        BAGS[attachSlot.bag][attachSlot.slot] = attachSlot.item
+        cursor = attachSlot
+        attachSlot = nil
     end
 end
 GetSendMailItem = function()
     if not attachSlot then return nil end
-    return attachSlot.name, attachSlot.texture, attachSlot.count
+    return attachSlot.item.name, attachSlot.item.texture, attachSlot.item.count
 end
-SetSendMailMoney = function(c) sendMoneyAmt = c or 0 end
-SetSendMailCOD   = function(c) sendCODAmt = c or 0 end
+moneyCalls, codCalls = 0, 0
+SetSendMailMoney = function(c) moneyCalls = moneyCalls + 1; sendMoneyAmt = c or 0 end
+SetSendMailCOD   = function(c) codCalls = codCalls + 1; sendCODAmt = c or 0 end
 
+-- Every SendMail gets exactly one of MAIL_SEND_SUCCESS / MAIL_FAILED back, as
+-- on the real client. `failSendCount` makes the server refuse the next N.
+sendAttempts, failSendCount, lastSendFailed = 0, 0, false
 SendMail = function(to, subject, body)
+    sendAttempts = sendAttempts + 1
+    if failSendCount > 0 then
+        failSendCount = failSendCount - 1
+        lastSendFailed = true
+        -- A refused mail keeps its attachment: nothing left the client.
+        return
+    end
+    lastSendFailed = false
     table.insert(SENT, { to = to, subject = subject, body = body,
-        item = attachSlot and attachSlot.name or nil,
-        count = attachSlot and attachSlot.count or nil,
+        item = attachSlot and attachSlot.item.name or nil,
+        count = attachSlot and attachSlot.item.count or nil,
         money = sendMoneyAmt, cod = sendCODAmt })
     attachSlot = nil
     sendMoneyAmt, sendCODAmt = 0, 0
@@ -813,13 +842,19 @@ check(sdriver ~= nil, "send driver frame exists")
 -- Our tick issues one mail; the server then confirms it. Sending a batch from
 -- inside the success handler is exactly what this deferral avoids.
 local function pumpSend(limit)
-    local n, seen = 0, table.getn(SENT)
+    local n, seenAttempts = 0, sendAttempts
     while send.sending and n < (limit or 60) do
+        -- A generous frame delta so any settle/retry wait elapses in one tick.
+        arg1 = 5
         sdriver.scripts.OnUpdate()
-        local now = table.getn(SENT)
-        if now > seen then
-            seen = now
-            fire("MAIL_SEND_SUCCESS")
+        arg1 = nil
+        if sendAttempts > seenAttempts then
+            seenAttempts = sendAttempts
+            if lastSendFailed then
+                fire("MAIL_FAILED")
+            else
+                fire("MAIL_SEND_SUCCESS")
+            end
         end
         n = n + 1
     end
@@ -972,11 +1007,122 @@ print("== send: MAIL_FAILED aborts the batch ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 send.Start("Ann", "x", "", 0, false, false)
+arg1 = 5
 sdriver.scripts.OnUpdate()          -- first mail issued
+arg1 = nil
 check(table.getn(SENT) == 1, "first mail out")
-fire("MAIL_FAILED")
-check(not send.sending, "run aborted on failure")
+-- One refusal no longer kills the batch; exhaust the budget to abort it.
+local guard = 0
+while send.sending and guard < 10 do
+    fire("MAIL_FAILED")
+    guard = guard + 1
+end
+check(not send.sending, "run aborted once the retry budget ran out")
 check(send.Count() == 2, "attachment list preserved")
+
+print("== send: a refused mail is retried, not thrown away ==")
+-- The reported symptom: "the server rejected that mail; 1 of 2 sent." One
+-- refusal on the second mail used to abandon the whole batch.
+stockBags()
+A.db.ClearLog()
+send.Attach(0, 1); send.Attach(0, 2)
+failSendCount = 0
+sendAttempts = 0
+send.Start("Ann", "batch", "", 0, false, false)
+-- Let the first mail go, then make the server refuse exactly once.
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+fire("MAIL_SEND_SUCCESS")
+check(table.getn(SENT) == 1, "first mail out")
+failSendCount = 1
+pumpSend()
+check(not send.sending, "run finished")
+check(table.getn(SENT) == 2, "BOTH mails were sent despite the refusal",
+      table.getn(SENT))
+check(SENT[2].item == "Copper Ore", "the retried mail kept its attachment",
+      tostring(SENT[2].item))
+check(SENT[2].subject == "batch [2/2]", "and its subject numbering",
+      SENT[2].subject)
+check(send.Count() == 0, "attachment list cleared on success")
+
+print("== send: a retry does not renumber or duplicate gold ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+sendAttempts = 0
+send.Start("Ann", "gold", "", 5000, false, false)
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+fire("MAIL_SEND_SUCCESS")
+check(SENT[1].money == 5000, "gold on the first mail")
+failSendCount = 1          -- refuse the second once
+pumpSend()
+check(table.getn(SENT) == 2, "second mail eventually sent")
+check(SENT[2].money == 0, "the retry did NOT resend the gold", SENT[2].money)
+
+print("== send: a persistently refused mail gives up cleanly ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+sendAttempts = 0
+failSendCount = 99         -- the server refuses everything
+send.Start("Ann", "doomed", "", 0, false, false)
+local spins = pumpSend(80)
+failSendCount = 0
+check(not send.sending, "gave up rather than spinning", spins)
+check(table.getn(SENT) == 0, "nothing was sent")
+check(send.Count() == 2, "and BOTH attachments are still on the list to retry",
+      send.Count())
+
+print("== send: the retry budget is per mail, not per batch ==")
+-- A long batch that hits a transient refusal on several different mails must
+-- still complete; only one mail failing repeatedly aborts.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+sendAttempts = 0
+send.Start("Ann", "long", "", 0, false, false)
+local sent, guard3 = 0, 0
+while send.sending and guard3 < 200 do
+    -- Refuse once before each mail, then let it through.
+    if sendAttempts == sent * 2 then failSendCount = 1 end
+    arg1 = 5
+    sdriver.scripts.OnUpdate()
+    arg1 = nil
+    if sendAttempts > 0 then
+        if lastSendFailed then fire("MAIL_FAILED") else
+            fire("MAIL_SEND_SUCCESS")
+            sent = table.getn(SENT)
+        end
+    end
+    guard3 = guard3 + 1
+end
+check(table.getn(SENT) == 3, "all three sent despite a refusal each",
+      table.getn(SENT))
+
+print("== send: gold mode never touches the COD channel ==")
+-- Zeroing BOTH channels on later mails poked a plain gold send into COD mode
+-- with a zero amount. Only the channel in use is ever set.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+sendAttempts = 0
+moneyCalls, codCalls = 0, 0
+send.Start("Ann", "g", "", 5000, false, false)
+pumpSend()
+check(table.getn(SENT) == 2, "two mails sent")
+check(codCalls == 0, "SetSendMailCOD was never called for a gold send",
+      codCalls)
+check(moneyCalls > 0, "SetSendMailMoney was", moneyCalls)
+
+-- ...and the mirror image: a COD send never touches the gold channel.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+sendAttempts = 0
+moneyCalls, codCalls = 0, 0
+send.Start("Ann", "c", "", 2500, true, false)
+pumpSend()
+check(moneyCalls == 0, "SetSendMailMoney was never called for a COD send",
+      moneyCalls)
+check(codCalls > 0, "SetSendMailCOD was", codCalls)
 
 print("== send: recipient autocomplete ==")
 A.db.ForgetContacts()
@@ -1304,9 +1450,15 @@ A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 send.Start("Ann", "x", "", 0, false, false)
+arg1 = 5
 sdriver.scripts.OnUpdate()      -- first mail issued, not yet confirmed
+arg1 = nil
 check(table.getn(A.db.Log("sent")) == 0, "nothing logged before confirmation")
-fire("MAIL_FAILED")
+local guard2 = 0
+while send.sending and guard2 < 10 do
+    fire("MAIL_FAILED")
+    guard2 = guard2 + 1
+end
 check(table.getn(A.db.Log("sent")) == 0, "and nothing after a failure",
       table.getn(A.db.Log("sent")))
 

@@ -9,6 +9,59 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.0.3]
+
+Fixes a reported failure to send multiple items: *"the server rejected that
+mail; 1 of 2 sent."* `/reload`.
+
+### Fixed
+- **A refused mail no longer throws the rest of the batch away.** `MAIL_FAILED`
+  aborted the whole run, so one hiccup on the second of twelve mails lost the
+  other ten and the attachment list had to be rebuilt. The mail is now put back
+  at the head of the queue and retried — safe by construction, because
+  `MAIL_FAILED` means that mail did *not* go out, so a retry cannot duplicate
+  it. The budget is **per mail** and resets on each success, so a long batch is
+  not capped by an earlier hiccup. When a mail is refused past its budget the
+  run stops with a message naming which mail failed and how many are still
+  attached, and **everything unsent stays on the list** so Send can just be
+  pressed again.
+- **A plain gold send no longer touches the C.O.D. channel.** Mails after the
+  first zeroed *both* money channels, so an ordinary gold send called
+  `SetSendMailCOD(0)` on every subsequent mail — poking the outgoing mail into
+  C.O.D. mode with a zero amount purely to clear something that was never set.
+  Only the channel actually in use is ever written now, which is what
+  TurtleMail does and it is the implementation known to work on this client.
+
+### Changed
+- Courier now lets the mail system settle briefly between a confirmed send and
+  the next one, instead of firing on the very next OnUpdate frame (~16ms after
+  the acknowledgement). **This is a mitigation, not a proven root cause** — see
+  below — and it costs a few seconds on a twelve-item batch.
+
+### On the root cause, honestly
+The underlying reason the server refused the second mail has **not** been
+identified. Ruled out by inspection: the Aegis bridge change in 1.0.2 (it does
+not touch sending), the subject and body length caps (64 and 500, matching
+`MailFrame.xml` exactly), and the call sequence itself — TurtleMail's is
+structurally identical, including the one-frame defer.
+
+What is fixed is Courier's *response* to a refusal, which was wrong regardless
+of what provokes it. If a batch still stalls, the new message reports which
+mail failed; that plus whether gold or C.O.D. was attached would narrow it
+further.
+
+### Tests
+- Harness grows to **367 checks**, and the send stub is now faithful enough to
+  refuse: every `SendMail` returns exactly one of `MAIL_SEND_SUCCESS` /
+  `MAIL_FAILED`, and the cursor is modelled properly — picking an item up
+  *leaves it in the bag* flagged locked, and taking an attachment back off
+  returns it to the slot it came from, which is the path a retry travels.
+- The previous stub kept an item in the bag while it was simultaneously on the
+  cursor, which is why nothing could exercise a refused send at all.
+- Both fixes were sabotage-checked: reverting the retry fails only *"BOTH mails
+  were sent despite the refusal"*, and restoring the two-channel zeroing fails
+  only the two channel-isolation assertions.
+
 ## [1.0.2]
 
 Fixes the Aegis: Exchange integration, which has never once worked. `/reload`.
@@ -376,6 +429,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[1.0.3]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.3
 [1.0.2]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.2
 [1.0.1]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.1
 [1.0.0]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.0

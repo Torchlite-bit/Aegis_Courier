@@ -33,6 +33,10 @@ local util = A.util
 -- a clean grid and is already more than a bag's worth of distinct stacks.
 send.MAX_ATTACHMENTS = 12
 
+-- Re-attempts allowed for a SINGLE mail before the batch gives up. Reset on
+-- every success, so this is a per-mail budget, not a per-batch one.
+send.MAX_RETRIES = 3
+
 send.attachments = {}   -- array of { bag, slot, name, texture, count }
 send.sending     = false
 send.queue       = nil  -- attachments remaining this run
@@ -243,6 +247,8 @@ function send.Start(to, subject, body, money, isCOD, codAll)
 
     send.total     = send.MailCount()
     send.sentCount = 0
+    send.retries   = 0
+    send.inFlight  = nil
     send.sending   = true
     send.Arm()
     if A.ui and A.ui.RefreshSend then A.ui.RefreshSend() end
@@ -280,6 +286,9 @@ function send.Step()
     if send.queue and table.getn(send.queue) > 0 then
         attachment = table.remove(send.queue, 1)
     end
+    -- Held until the server confirms, so a rejected mail can be put back at
+    -- the head of the queue and retried rather than losing the whole batch.
+    send.inFlight = attachment
 
     if attachment then
         -- Clear whatever may be in the slot, then place ours. ClearCursor
@@ -310,6 +319,13 @@ function send.Step()
     -- Money rides on the FIRST mail only, otherwise a 10-item batch would send
     -- the same gold ten times. COD is a charge to the recipient, so it can
     -- legitimately repeat -- but only when the user asked for that.
+    --
+    -- Only ever touch the channel we are actually using. The previous version
+    -- zeroed BOTH on every later mail, which meant a plain gold send called
+    -- SetSendMailCOD(0) on mails 2..n -- poking the outgoing mail into COD
+    -- mode with a zero amount purely to clear something that was never set.
+    -- TurtleMail never calls either setter unless an amount applies, and it is
+    -- the implementation known to work on this client.
     local n = send.sentCount + 1
     local appliedMoney = 0
     if send.money > 0 then
@@ -321,8 +337,11 @@ function send.Step()
             else
                 if SetSendMailMoney then SetSendMailMoney(send.money) end
             end
-        else
+        elseif send.isCOD then
+            -- COD, first-mail-only: clear the COD we set, nothing else.
             if SetSendMailCOD then SetSendMailCOD(0) end
+        else
+            -- Gold, first-mail-only: clear the gold we set, nothing else.
             if SetSendMailMoney then SetSendMailMoney(0) end
         end
     end
@@ -345,6 +364,12 @@ function send.Step()
 end
 
 function send.Abort()
+    -- Anything still in flight was never sent; put it back on the list so the
+    -- user can retry rather than discovering it silently vanished.
+    if send.inFlight and send.queue then
+        table.insert(send.queue, 1, send.inFlight)
+    end
+    send.inFlight = nil
     send.sending = false
     send.lastSent = nil
     send.queue = nil
@@ -380,16 +405,38 @@ end
 
 local driver = CreateFrame("Frame", "AegisCourierSender")
 driver:Hide()
+local waited = 0
+
+-- Seconds to let the mail system settle between a confirmed send and the next
+-- one. Courier used to issue the next mail on the very next OnUpdate frame,
+-- about 16ms after the server's acknowledgement, and batches were coming back
+-- with the second mail rejected. This is a mitigation rather than a proven
+-- root cause -- see the MAIL_FAILED handler, which is what actually makes a
+-- batch survive a rejection -- but it costs a few seconds on a 12-item send
+-- and removes a whole class of race.
+send.SETTLE = 0.3
+
+-- Longer pause before re-attempting a mail the server just refused.
+send.RETRY_WAIT = 1.0
+
 driver:SetScript("OnUpdate", function()
     if not send.armed then
         driver:Hide()
+        waited = 0
         return
     end
+    -- 1.12 passes the frame delta in the arg1 GLOBAL, not as a parameter.
+    waited = waited + (arg1 or 0)
+    if waited < (send.wait or 0) then return end
+    waited = 0
     send.armed = false
     send.Step()
 end)
 
-function send.Arm()
+-- `wait` is seconds to hold off before the next Step; nil means immediately.
+function send.Arm(wait)
+    send.wait = wait or 0
+    waited = 0
     send.armed = true
     driver:Show()
 end
@@ -401,6 +448,8 @@ end
 A.RegisterEvent("MAIL_SEND_SUCCESS", function()
     if not send.sending then return end
     send.sentCount = send.sentCount + 1
+    send.retries = 0            -- progress: the next mail gets a clean budget
+    send.inFlight = nil         -- this one is the server's problem now
     -- Logged on CONFIRMATION, matching the take engine: a mail the server
     -- never accepted is not a mail you sent.
     if send.lastSent then
@@ -408,16 +457,51 @@ A.RegisterEvent("MAIL_SEND_SUCCESS", function()
         send.lastSent = nil
     end
     if send.queue and table.getn(send.queue) > 0 then
-        send.Arm()                 -- more items: next mail on the next tick
+        send.Arm(send.SETTLE)   -- more items: next mail once things settle
     else
         send.Finish()
     end
 end)
 
+-- A rejected mail no longer throws the rest of the batch away.
+--
+-- MAIL_FAILED means the mail did NOT go out, so putting the attachment back
+-- and trying again cannot duplicate anything -- which is what makes a retry
+-- safe here. Courier previously abandoned the whole run on the first refusal,
+-- so a user mailing twelve items and hitting one transient rejection on the
+-- second lost the other ten and had to start over. That is the behaviour
+-- being reported, whatever is provoking the refusal underneath.
+--
+-- The budget is per-mail and resets on every success, so a long batch is not
+-- capped globally; only a mail that fails repeatedly gives up.
 A.RegisterEvent("MAIL_FAILED", function()
     if not send.sending then return end
-    A.Print("the server rejected that mail; " .. send.sentCount ..
-        " of " .. send.total .. " sent.")
+
+    send.retries = (send.retries or 0) + 1
+    if send.retries <= send.MAX_RETRIES then
+        -- Put the attachment back at the head of the queue. sentCount did not
+        -- move, so the retry re-derives the same mail number, the same subject
+        -- and the same money placement.
+        if send.inFlight then
+            table.insert(send.queue, 1, send.inFlight)
+            send.inFlight = nil
+        end
+        send.lastSent = nil
+        send.Arm(send.RETRY_WAIT)
+        return
+    end
+
+    -- Out of budget. Report what we know, and leave the unsent attachments in
+    -- the list so the user can hit Send again rather than rebuilding it.
+    local left = send.queue and table.getn(send.queue) or 0
+    if send.inFlight then
+        table.insert(send.queue, 1, send.inFlight)
+        send.inFlight = nil
+        left = left + 1
+    end
+    A.Print("the server kept rejecting mail " .. (send.sentCount + 1) ..
+        " of " .. send.total .. " (" .. send.sentCount .. " sent, " ..
+        left .. " still attached). Try again, or send them individually.")
     send.Abort()
 end)
 
