@@ -488,9 +488,26 @@ function ui.OnTakeStateChanged()
     ui.RefreshInbox()
 end
 
+-- REENTRANCY GUARD, and it is load-bearing. The chain in the 1.12 FrameXML:
+--
+--   RefreshInbox -> FauxScrollFrame_Update -> scrollBar:SetMinMaxValues /
+--   SetValue -> slider OnValueChanged -> GetParent():SetVerticalScroll ->
+--   scroll frame OnVerticalScroll -> our handler -> updateFunction() ->
+--   RefreshInbox -> ...
+--
+-- is MUTUAL RECURSION with no exit whenever the scrollbar is live, which is
+-- exactly when the inbox holds more than ROWS (10) mails -- at 10 or fewer,
+-- FauxScrollFrame_Update takes its Hide() branch and the slider never fires.
+-- That was the reported "freeze then crash with 11+ mails": the recursion
+-- spins until the stack blows. The guard bounces the re-entrant call; the
+-- outer pass reads the (already-clamped) offset immediately after
+-- FauxScrollFrame_Update, so the paint stays correct. RefreshLog and
+-- RefreshLedger carry the same guard for the same reason.
 function ui.RefreshInbox()
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.selectedSubTab ~= "Inbox" then return end
+    if ui.inboxRefreshing then return end
+    ui.inboxRefreshing = true
 
     local mails = inbox.All()
     local total = table.getn(mails)
@@ -563,6 +580,8 @@ function ui.RefreshInbox()
         end
         i = i + 1
     end
+
+    ui.inboxRefreshing = false
 end
 
 -- ---------------------------------------------------------------------------
@@ -1155,6 +1174,9 @@ end
 function ui.RefreshLog()
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.selectedSubTab ~= "Log" then return end
+    -- Reentrancy guard -- see RefreshInbox for the FrameXML recursion chain.
+    if ui.logRefreshing then return end
+    ui.logRefreshing = true
 
     -- Selected direction reads as pressed.
     if ui.logDir == "sent" then
@@ -1219,6 +1241,8 @@ function ui.RefreshLog()
         ui.logSummary:SetText(total .. " of " .. stored .. " " .. label ..
             " shown")
     end
+
+    ui.logRefreshing = false
 end
 
 -- Return one mail to its sender.
@@ -1303,6 +1327,9 @@ end
 function ui.RefreshLedger()
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.selectedSubTab ~= "Ledger" then return end
+    -- Reentrancy guard -- see RefreshInbox for the FrameXML recursion chain.
+    if ui.ledgerRefreshing then return end
+    ui.ledgerRefreshing = true
 
     local led = db.Ledger()
     local total = table.getn(led)
@@ -1338,6 +1365,8 @@ function ui.RefreshLedger()
         end
         i = i + 1
     end
+
+    ui.ledgerRefreshing = false
 end
 
 -- ---------------------------------------------------------------------------

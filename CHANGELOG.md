@@ -9,6 +9,46 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.0.4]
+
+Fixes the reported client freeze/crash with 11 or more mails in the inbox.
+`/reload`. Present since 0.1.0, so every prior version is affected.
+
+### Fixed
+- **The client froze and crashed once the inbox held more than 10 mails.**
+  Courier's list draws 10 rows; at 11+ the scrollbar comes alive, and the 1.12
+  FrameXML plumbing turns the refresh into mutual recursion with no exit:
+  `FauxScrollFrame_Update` → `SetMinMaxValues`/`SetValue` → slider
+  `OnValueChanged` → `SetVerticalScroll` → `OnVerticalScroll` → the update
+  function → `FauxScrollFrame_Update` again. The client hangs, then dies on
+  stack overflow. At 10 or fewer mails `FauxScrollFrame_Update` takes its
+  `Hide()` branch and the slider never fires — which is exactly why the crash
+  threshold sat at 11 and why small inboxes never showed it.
+- The trigger in practice: scrolling a big inbox, or **Open All** shrinking
+  the list under a live scrollbar (every delete clamps the scroll value and
+  re-enters the refresh). A freshly opened, unscrolled inbox could still paint
+  once, which is why screenshots of full inboxes exist.
+- All three scrolling lists — Inbox, Log, Ledger — now carry a reentrancy
+  guard that bounces the recursive call. The outer pass reads the clamped
+  offset immediately after `FauxScrollFrame_Update`, so the paint stays
+  correct, including the scrolled-to-bottom-while-deleting case.
+
+### Changed
+- `CLAUDE.md` rule 28 gains the reentrancy requirement: every FauxScrollFrame
+  update function must carry this guard.
+
+### Tests
+- Harness grows to **377 checks**. The FauxScrollFrame stubs were no-ops —
+  the recursion was unreachable by any test, and no test inbox ever held more
+  than 5 mails. They are now ported from the 1.12.1 `UIPanelTemplates.lua`/
+  `.xml`, including the synchronous re-fire on a live scrollbar. New coverage:
+  10 mails leave the scrollbar dormant, 11 scrolled mails terminate (the crash
+  case), a 54-mail box scrolled deep, Open All emptying 30 mails under a live
+  scrollbar, and the Log and Ledger equivalents.
+- Sabotage-checked: removing the guard makes the 11-mail and 54-mail checks
+  fail with a genuine Lua stack overflow — the same death the client was
+  reported to hit.
+
 ## [1.0.3]
 
 Fixes a reported failure to send multiple items: *"the server rejected that
@@ -429,6 +469,7 @@ logged yet — see `ROADMAP.md` for what Stage B adds.
 - Courier takes over the mailbox, so run it **instead of** TurtleMail, not
   alongside it.
 
+[1.0.4]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.4
 [1.0.3]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.3
 [1.0.2]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.2
 [1.0.1]: https://github.com/Torchlite-bit/Aegis_Courier/releases/tag/v1.0.1

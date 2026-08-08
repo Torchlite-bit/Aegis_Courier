@@ -222,6 +222,15 @@ section, which is Courier's equivalent hazard surface.
       `arg1`. The offset-first form belongs to later clients; using it here
       passes a number as the update function and FrameXML crashes with
       "attempt to call local 'updateFunction' (a number value)".
+    - **Every FauxScrollFrame update function MUST carry a reentrancy guard.**
+      `FauxScrollFrame_Update` → `SetMinMaxValues`/`SetValue` → slider
+      `OnValueChanged` → `SetVerticalScroll` → `OnVerticalScroll` →
+      `updateFn` is **mutual recursion with no exit** whenever the scrollbar
+      is live — i.e. the moment the list exceeds its visible rows. Unguarded,
+      the client hangs and dies on stack overflow at rows+1 items (the "11+
+      mails" crash). Guard with a boolean bounce (`if refreshing then return`);
+      the outer pass reads the clamped offset right after `Update`, so the
+      paint stays correct. See `ui.RefreshInbox`.
 
 ---
 
