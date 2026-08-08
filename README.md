@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.0.3)
+# Aegis: Courier (v1.0.4)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -251,7 +251,7 @@ the subject parsing, the money maths, the takeover and the whole take engine
 run without the game:
 
 ```sh
-lua5.1 tests/harness.lua      # 367 checks
+lua5.1 tests/harness.lua      # 377 checks
 ```
 
 Among other things it asserts that hiding the Blizzard mail frame does **not**

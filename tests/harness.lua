@@ -110,9 +110,57 @@ TURTLE_WOW_VERSION = "1.18.1"
 ShowUIPanel = function(f) if f then f:Show() end end
 HideUIPanel = function(f) if f then f:Hide() end end
 
-FauxScrollFrame_Update = function() end
-FauxScrollFrame_GetOffset = function() return 0 end
-FauxScrollFrame_OnVerticalScroll = function() end
+-- FauxScrollFrame, modelled faithfully from the 1.12.1 FrameXML
+-- (UIPanelTemplates.lua/.xml) -- the previous no-op stubs are why the 11+ mail
+-- freeze was unreachable by any test.
+--
+-- The load-bearing quirk: on a LIVE scrollbar (numItems > numToDisplay),
+-- SetMinMaxValues / a value clamp re-fires the slider's OnValueChanged, whose
+-- template body is GetParent():SetVerticalScroll(arg1), which fires the scroll
+-- frame's OnVerticalScroll SYNCHRONOUSLY -- re-entering whatever update
+-- function the addon wired in. At numToDisplay or fewer items the real code
+-- takes the frame:Hide() branch and the slider never fires, which is exactly
+-- why the crash threshold sat at ROWS + 1 = 11 mails. A quiet scrollbar at
+-- value 0 also does not fire, which is why a freshly opened, unscrolled
+-- 54-mail inbox could still paint once.
+scrollRefires = 0
+FauxScrollFrame_Update = function(frame, numItems, numToDisplay, itemHeight)
+    local value = rawget(frame, "value") or 0
+    if numItems <= numToDisplay then
+        -- scrollBar:SetValue(0); frame:Hide() -- dormant unless that clamped.
+        rawset(frame, "value", 0)
+        rawset(frame, "offset", 0)
+        return
+    end
+    local max = (numItems - numToDisplay) * itemHeight
+    local clamped = value
+    if clamped > max then clamped = max end
+    rawset(frame, "value", clamped)
+    -- Live scrollbar with a nonzero value (or a clamp): OnValueChanged ->
+    -- SetVerticalScroll -> OnVerticalScroll, synchronously, mid-Update.
+    if clamped > 0 or clamped ~= value then
+        scrollRefires = scrollRefires + 1
+        local script = frame.scripts and frame.scripts.OnVerticalScroll
+        if script then
+            local oldThis, oldArg1 = this, arg1
+            this, arg1 = frame, clamped
+            script()
+            this, arg1 = oldThis, oldArg1
+        end
+    end
+end
+FauxScrollFrame_GetOffset = function(frame)
+    return rawget(frame, "offset") or 0
+end
+FauxScrollFrame_SetOffset = function(frame, offset)
+    rawset(frame, "offset", offset)
+end
+-- The real 2-arg 1.12 signature: frame and value arrive as this/arg1 globals.
+FauxScrollFrame_OnVerticalScroll = function(itemHeight, updateFunction)
+    rawset(this, "value", arg1)
+    rawset(this, "offset", math.floor((arg1 / itemHeight) + 0.5))
+    updateFunction()
+end
 
 SlashCmdList = {}
 
@@ -1327,6 +1375,82 @@ fire("MAIL_INBOX_UPDATE")
 MiniMapMailFrame:Show()
 fire("MAIL_CLOSED")
 check(not MiniMapMailFrame:IsVisible(), "no mail means nothing unread")
+
+print("== big inbox: no freeze past ROWS mails ==")
+-- The reported crash: 11+ mails (list rows = 10) hang then kill the client.
+-- The FrameXML chain FauxScrollFrame_Update -> OnValueChanged ->
+-- SetVerticalScroll -> OnVerticalScroll -> updateFunction is mutual recursion
+-- unless the refresher bounces re-entry; the mock above reproduces it, so an
+-- unguarded RefreshInbox blows the Lua stack right here.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+
+local function bigInbox(n)
+    INBOX = {}
+    local i = 1
+    while i <= n do
+        table.insert(INBOX, mail{ sender = "Bob" .. i, subject = "mail " .. i,
+            money = 10 })
+        i = i + 1
+    end
+end
+
+-- 10 mails: scrollbar dormant, nothing refires.
+bigInbox(10)
+scrollRefires = 0
+check(pcall(A.ui.RefreshInbox) == true, "10 mails refresh cleanly")
+check(scrollRefires == 0, "scrollbar dormant at exactly ROWS mails",
+      scrollRefires)
+
+-- 11 mails, scrolled: the scrollbar is live and refires synchronously.
+bigInbox(11)
+rawset(A.ui.inboxScroll, "value", 28)      -- user has scrolled one row down
+scrollRefires = 0
+local okBig = pcall(A.ui.RefreshInbox)
+check(okBig == true, "11 mails, scrolled: refresh terminates (the crash case)")
+check(scrollRefires > 0, "and the re-entrant scroll path genuinely fired",
+      scrollRefires)
+
+-- A full 54-mail box, scrolled deep -- the reporter's screenshot.
+bigInbox(54)
+rawset(A.ui.inboxScroll, "value", 40 * 28)
+check(pcall(A.ui.RefreshInbox) == true, "54 mails, scrolled deep: no freeze")
+
+print("== big inbox: Open All completes while the list shrinks ==")
+-- The worst case in play: every delete shifts the list under a live, scrolled
+-- scrollbar, so every MAIL_INBOX_UPDATE clamps the value and re-enters.
+bigInbox(30)
+rawset(A.ui.inboxScroll, "value", 20 * 28)
+A.db.ClearLedger()
+take.Start(take.MODE_OPEN)
+local okRun, err = pcall(pump, 400)
+check(okRun == true, "run survived", err)
+check(not take.running, "and finished")
+check(table.getn(INBOX) == 0, "30-mail box fully emptied", table.getn(INBOX))
+
+print("== big lists: Log and Ledger carry the same guard ==")
+A.db.ClearLog()
+local i2 = 1
+while i2 <= 15 do
+    A.db.LogAdd("received", { who = "Bob" .. i2, subject = "x" })
+    i2 = i2 + 1
+end
+A.ui.SelectSubTab("Log")
+rawset(A.ui.logScroll, "value", 28)
+check(pcall(A.ui.RefreshLog) == true, "Log refresh terminates at 15 entries")
+A.db.ClearLedger()
+i2 = 1
+while i2 <= 15 do
+    A.db.RecordTxn("sale", "Item" .. i2, 100)
+    i2 = i2 + 1
+end
+A.ui.SelectSubTab("Ledger")
+rawset(A.ui.ledgerScroll, "value", 28)
+check(pcall(A.ui.RefreshLedger) == true,
+      "Ledger refresh terminates at 15 entries")
+A.db.ClearLedger()
+A.db.ClearLog()
 
 print("== inbox: return to sender ==")
 A.ui.mailOpen = true
