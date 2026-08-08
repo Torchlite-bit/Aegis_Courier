@@ -1386,6 +1386,56 @@ A.ui.Refresh()
 check(true, "log tab refreshes in both directions")
 
 -- =========================================================================
+-- Large-inbox stress: the reported "freezes with 11+ mails"
+-- =========================================================================
+-- The inbox list shows ROWS = 10, so 11 mails is exactly where the scroll
+-- path first engages -- the natural place for an unbounded repaint or a
+-- scroll/update recursion to hide. A field report said the client froze
+-- opening mail at 11+; the audit found no such loop, and this pins that:
+-- open a 15-mail box, absorb an update burst (the real client fires
+-- MAIL_INBOX_UPDATE repeatedly while headers resolve), idle a thousand
+-- ticks, then Open All the lot. Everything here must terminate in bounded
+-- steps or the suite itself hangs -- which is the point.
+
+print("== stress: 15-mail inbox opens, idles and Open-Alls ==")
+A.db.ClearLedger()
+INBOX = {}
+do
+    local i = 1
+    while i <= 15 do
+        if math.mod(i, 3) == 0 then
+            table.insert(INBOX, mail{ sender = AH,
+                subject = "Auction successful: Runecloth", money = 1000 + i })
+        elseif math.mod(i, 3) == 1 then
+            table.insert(INBOX, mail{ sender = "Bob",
+                subject = "stuff " .. i, item = "Copper Ore" })
+        else
+            table.insert(INBOX, mail{ sender = "Ann",
+                subject = "note " .. i, money = 50 })
+        end
+        i = i + 1
+    end
+end
+fire("MAIL_SHOW")
+A.ui.SelectSubTab("Inbox")
+do
+    local u = 1
+    while u <= 10 do fire("MAIL_INBOX_UPDATE"); u = u + 1 end
+    local t = 1
+    while t <= 1000 do driver.scripts.OnUpdate(); t = t + 1 end
+end
+check(true, "15-mail box: open + update burst + idle ticks all return")
+check(take.HasWork(take.MODE_OPEN), "work seen in the big inbox")
+take.Start(take.MODE_OPEN)
+do
+    local steps = pump(2000)
+    check(not take.running, "15-mail Open All terminates", steps)
+    check(steps < 200, "...in bounded steps, used " .. steps)
+end
+check(table.getn(INBOX) == 0, "the whole box was collectable and got emptied",
+    table.getn(INBOX))
+
+-- =========================================================================
 -- Stage C.3: the optional pfUI skin
 -- =========================================================================
 
