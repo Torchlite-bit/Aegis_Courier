@@ -31,6 +31,25 @@ at the first COD mail. `/reload`.
   short of the ten rows it draws, and 1.12 frames do not clip their children.
   The window height is now derived from the list instead of chosen by eye, so
   changing the row count resizes the window rather than overflowing it.
+- **You could not send a mail without attaching an item.** Courier refused any
+  mail carrying neither an item nor gold, on the theory that such a mail is
+  "almost always a mistake". That was simply wrong — writing to someone is the
+  most ordinary use of a mailbox there is. A subject or a body is now enough.
+  Only a mail with genuinely nothing in it is still refused.
+- **The little button beside the recipient box did nothing.** Two separate
+  faults. It filtered the contact list by whatever was already typed, so
+  clicking it with a complete name in the box matched exactly one contact —
+  itself — and the "don't suggest an exact match" rule then hid the list again.
+  And its icon came from a texture that does not render here, on top of which
+  the pfUI skin replaces a button's textures with a flat backdrop, wiping the
+  arrow off an icon button entirely. It now lists **every** recent recipient
+  regardless of what is typed, keeps its arrow, has a tooltip, and says "no
+  saved recipients yet" rather than staying silent when there are none.
+- **The window title reported the wrong version.** It was a hand-maintained
+  literal in the source, and two releases bumped the `.toc` and left it behind,
+  so the title bar kept claiming 1.0.4. It now reads the real version from the
+  `.toc` at load, and the test suite parses the `.toc` and fails if the two
+  ever disagree again.
 
 ### Added
 - **You can read your mail.** Left-click a message to open it: sender, subject,

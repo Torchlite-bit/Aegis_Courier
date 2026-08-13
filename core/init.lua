@@ -23,10 +23,20 @@ local A = AegisCourier
 
 A.name = "Aegis_Courier"   -- must match the folder / .toc / ADDON_LOADED
 
--- Shown in the window title bar and printed at load. Bump on EVERY push the
--- user will test -- it is the only reliable way to know which build produced
--- an in-game bug report.
-A.version = "1.0.4"
+-- Shown in the window title bar and printed at load. It is the only reliable
+-- way to know which build produced an in-game bug report, so it must never
+-- disagree with the .toc.
+--
+-- It did disagree: this was a hand-maintained literal, and two releases went
+-- out that bumped `## Version` in the .toc and left this behind, so the title
+-- bar kept claiming 1.0.4. Read the real thing instead. The literal below is
+-- only a fallback for a client without GetAddOnMetadata, and the test harness
+-- parses the .toc and asserts the two agree so it cannot drift again.
+A.version = "1.1.0"
+if GetAddOnMetadata then
+    local v = GetAddOnMetadata("Aegis_Courier", "Version")
+    if type(v) == "string" and v ~= "" then A.version = v end
+end
 
 -- Detect Turtle WoW. Turtle exposes a global TURTLE_WOW_VERSION.
 A.isTurtle = (TURTLE_WOW_VERSION ~= nil)

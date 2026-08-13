@@ -192,14 +192,23 @@ function send.TotalCost(money, isCOD)
 end
 
 -- Can this be sent? Returns (ok, reasonText).
-function send.Validate(to, money, isCOD)
+function send.Validate(to, money, isCOD, subject, body)
     if send.sending then return false, "already sending" end
     if type(to) ~= "string" or util.Trim(to) == "" then
         return false, "no recipient"
     end
-    if send.Count() == 0 and (not money or money <= 0) then
-        -- A bodiless, itemless, moneyless mail is legal but almost always a
-        -- mistake, and vanilla requires a subject anyway.
+    -- A LETTER IS A MAIL. This used to refuse anything carrying neither an
+    -- item nor gold, on the theory that such a mail is "almost always a
+    -- mistake" -- which is simply wrong. Writing to someone is the most
+    -- ordinary use of a mailbox there is, and refusing it made the Send tab
+    -- unusable for anything but parcels.
+    --
+    -- What is genuinely a mistake is a mail with NOTHING in it: no item, no
+    -- gold, no subject and no body. That is still refused, and it is the only
+    -- thing that is.
+    if send.Count() == 0 and (not money or money <= 0)
+        and util.Trim(subject or "") == ""
+        and util.Trim(body or "") == "" then
         return false, "nothing to send"
     end
     if isCOD and send.Count() == 0 then
@@ -222,7 +231,7 @@ end
 -- batch rather than only the first -- the distinction TurtleMail exposes,
 -- because "50g COD" on a 10-item batch means very different things.
 function send.Start(to, subject, body, money, isCOD, codAll)
-    local ok, why = send.Validate(to, money, isCOD)
+    local ok, why = send.Validate(to, money, isCOD, subject, body)
     if not ok then
         A.Print("cannot send: " .. (why or "?"))
         return false

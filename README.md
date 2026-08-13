@@ -135,6 +135,9 @@ too, but that is your own returned bid, so it is collected and deliberately
 
 ## Sending mail
 
+You can send a plain letter — a subject and a body, nothing attached — or a
+parcel, or both.
+
 Vanilla mail carries **one attachment per message**. Courier does not pretend
 otherwise — it queues up to 12 items and sends them as 12 mails, back to back,
 and the cost line shows the **real** total postage rather than a single mail's.
@@ -144,7 +147,7 @@ and the cost line shows the **real** total postage rather than a single mail's.
 | **attach** | right-click an item in your bags, or drag it onto a slot |
 | **remove** | click a filled slot |
 | **subject** | leave it blank and each mail is named after its item (`Silk Cloth (20)`); fill it in and a batch is numbered `subject [2/5]` |
-| **recipient** | starts suggesting names you have mailed or been mailed by, most recent first |
+| **recipient** | starts suggesting names you have mailed or been mailed by, most recent first — the arrow button beside the box lists them all |
 | **gold** | type `12g 30s`, or a bare number for gold |
 | **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
 

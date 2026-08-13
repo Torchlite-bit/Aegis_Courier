@@ -1075,9 +1075,26 @@ function ui.BuildSendPanel()
     acBtn:SetWidth(16)
     acBtn:SetHeight(16)
     acBtn:SetPoint("LEFT", toBox, "RIGHT", 4, 0)
-    acBtn:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
-    acBtn:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down")
-    acBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight")
+    -- Scrollbar art, deliberately: every FauxScrollFrame in FrameXML uses these
+    -- three files, so they are certain to exist on any 1.12 client. The
+    -- previous choice drew from Interface\ChatFrame and rendered as nothing.
+    acBtn:SetNormalTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Up")
+    acBtn:SetPushedTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Down")
+    acBtn:SetHighlightTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Highlight")
+    -- Opt out of the pfUI skin. SkinButton replaces a button's textures with a
+    -- flat backdrop and border, which on an ICON button erases the icon and
+    -- leaves a small empty box sitting next to the recipient field -- reported,
+    -- reasonably, as "a random box that does nothing".
+    acBtn.courierNoSkin = true
+    acBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(acBtn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Recent recipients")
+        GameTooltip:Show()
+    end)
+    acBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     ui.sendAutoButton = acBtn
 
     -- ---- subject --------------------------------------------------------
@@ -1286,13 +1303,42 @@ function ui.UpdateAutoComplete(showAll)
         return
     end
 
-    local names = db.MatchContacts(typed, AUTOCOMPLETE_ROWS)
+    -- THE BUTTON MEANS "SHOW ME EVERYONE", so it must not filter by whatever
+    -- is already in the box. It used to pass the typed text through here like
+    -- the typing path does, which meant clicking it with a complete name
+    -- already typed matched exactly one contact -- itself -- and then the
+    -- exact-match rule below hid the list again. The button appeared to do
+    -- nothing at all, which is exactly how it was reported.
+    local names = db.MatchContacts(showAll and "" or typed, AUTOCOMPLETE_ROWS)
     local n = table.getn(names)
 
-    -- An exact single match is not a suggestion worth showing.
-    if n == 0 or (n == 1 and names[1] == typed) then
-        ac:Hide()
-        return
+    if showAll then
+        -- The button must always visibly respond, so an empty contact list
+        -- says so rather than silently doing nothing -- the same complaint in
+        -- a different disguise.
+        if n == 0 then
+            local row = ui.sendAutoRows[1]
+            row.name = nil
+            row.label:SetText("|cff808080no saved recipients yet|r")
+            row:Show()
+            local j = 2
+            while j <= AUTOCOMPLETE_ROWS do
+                ui.sendAutoRows[j].name = nil
+                ui.sendAutoRows[j]:Hide()
+                j = j + 1
+            end
+            ac:SetHeight(24)
+            ac:Show()
+            return
+        end
+    else
+        -- An exact single match is not a suggestion worth showing. This is a
+        -- TYPING rule only: it must never apply to the button, or the button
+        -- goes dead the moment a full name is in the box.
+        if n == 0 or (n == 1 and names[1] == typed) then
+            ac:Hide()
+            return
+        end
     end
 
     local i = 1

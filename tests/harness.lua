@@ -1024,7 +1024,21 @@ check(not ok and why == "no recipient", "empty recipient rejected", why)
 ok, why = send.Validate("   ", 0, false)
 check(not ok, "whitespace recipient rejected")
 ok, why = send.Validate("Bob", 0, false)
-check(not ok and why == "nothing to send", "empty mail rejected", why)
+check(not ok and why == "nothing to send", "wholly empty mail rejected", why)
+
+-- A LETTER IS A MAIL. Courier used to refuse anything carrying neither an item
+-- nor gold, which made it impossible to write to anyone -- reported from live
+-- play as "can't send without an item attached".
+ok, why = send.Validate("Bob", 0, false, "How are you?", "")
+check(ok, "a subject alone is sendable", why)
+ok, why = send.Validate("Bob", 0, false, "", "just checking in")
+check(ok, "a body alone is sendable", why)
+ok, why = send.Validate("Bob", 0, false, "How are you?", "long time no see")
+check(ok, "subject and body are sendable", why)
+ok, why = send.Validate("Bob", 0, false, "   ", "  ")
+check(not ok and why == "nothing to send",
+      "but whitespace is not content", why)
+
 ok, why = send.Validate("Bob", 5000, true)
 check(not ok and why == "COD needs an item", "COD without an item rejected", why)
 send.Attach(0, 1)
@@ -1048,6 +1062,23 @@ check(SENT[1].subject == "hello", "subject verbatim for a single mail",
 check(SENT[1].body == "body text", "body")
 check(SENT[1].item == "Silk Cloth", "item attached", tostring(SENT[1].item))
 check(send.Count() == 0, "attachment list cleared after success")
+
+print("== send: a plain letter, no attachment and no gold ==")
+-- The reported bug, end to end rather than only through Validate: the whole
+-- point is that this reaches the server.
+stockBags()
+SENT = {}
+check(send.Count() == 0, "nothing attached")
+check(send.Start("Torchlyte", "How are you?", "long time no see", 0, false,
+      false), "a letter starts sending")
+pumpSend()
+check(not send.sending, "finished")
+check(table.getn(SENT) == 1, "one letter sent", table.getn(SENT))
+check(SENT[1].to == "Torchlyte", "recipient", SENT[1].to)
+check(SENT[1].subject == "How are you?", "subject", SENT[1].subject)
+check(SENT[1].body == "long time no see", "body", SENT[1].body)
+check(SENT[1].item == nil, "and no item rode along", tostring(SENT[1].item))
+check(send.MailCount() == 1, "a letter is one mail for postage", send.MailCount())
 
 print("== send: three items become three mails ==")
 stockBags()
@@ -1320,6 +1351,75 @@ A.ui.sendTo:SetText("Zebra")
 A.ui.UpdateAutoComplete()
 check(not A.ui.sendAuto:IsVisible(), "no matches means no list")
 A.ui.sendTo:SetText("")
+
+-- THE REPORTED BUG. The check above only ever clicked the button with an EMPTY
+-- box, which is the one case that worked -- so a dead button passed the suite.
+-- With a complete name typed, the button used to filter by that name, match
+-- exactly one contact (itself), hit the exact-match rule and hide the list
+-- again: it appeared to do nothing whatsoever.
+A.ui.sendTo:SetText("Torchlyte")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(),
+      "typing a complete name shows no suggestion, correctly")
+-- Clear every row first. The mock does not propagate a parent's Hide() to its
+-- children, so leftover rows from the previous show would otherwise still look
+-- "visible" and the count below would pass on stale state.
+local si = 1
+while si <= 5 do
+    A.ui.sendAutoRows[si].name = nil
+    A.ui.sendAutoRows[si].label:SetText("")
+    A.ui.sendAutoRows[si]:Hide()
+    si = si + 1
+end
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(),
+      "but the BUTTON still opens the list with that name in the box")
+-- It lists everyone, not just what matches the typed text.
+local shown = 0
+si = 1
+while si <= 5 do
+    if A.ui.sendAutoRows[si].visible then shown = shown + 1 end
+    si = si + 1
+end
+check(shown == 3, "all three contacts are listed, not just the typed one", shown)
+A.ui.sendAutoButton.scripts.OnClick()
+check(not A.ui.sendAuto:IsVisible(), "and it still toggles shut")
+
+-- With no contacts at all the button must still visibly answer, or it is the
+-- same "does nothing" complaint wearing a different hat.
+A.db.ForgetContacts()
+A.ui.sendTo:SetText("")
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(), "an empty contact list still opens the list")
+check(A.util.Contains(rawget(A.ui.sendAutoRows[1].label, "text") or "",
+      "no saved recipients"), "and says so",
+      rawget(A.ui.sendAutoRows[1].label, "text"))
+check(A.ui.sendAutoRows[1].name == nil, "the placeholder row is not clickable")
+A.ui.sendAutoButton.scripts.OnClick()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Torchlite")
+A.db.AddContact("Subtilizer")
+A.ui.sendTo:SetText("")
+
+print("== version: the title bar cannot drift from the .toc ==")
+-- Two releases shipped with the .toc bumped and this literal left behind, so
+-- the in-game title kept reporting an old build and bug reports came in
+-- against a version that was not running.
+local tocVersion
+local tf = io.open("Aegis_Courier.toc", "r")
+if tf then
+    local line = tf:read("*l")
+    while line do
+        local _, _, v = string.find(line, "^##%s*Version:%s*(.-)%s*$")
+        if v then tocVersion = v end
+        line = tf:read("*l")
+    end
+    tf:close()
+end
+check(tocVersion ~= nil, "found ## Version in the .toc", tostring(tocVersion))
+check(A.version == tocVersion,
+      "A.version agrees with the .toc",
+      tostring(A.version) .. " vs " .. tostring(tocVersion))
 
 print("== send UI: COD-all is greyed until COD is checked ==")
 A.ui.sendCOD:SetChecked(false)
