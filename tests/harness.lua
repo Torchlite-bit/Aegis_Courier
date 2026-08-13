@@ -178,7 +178,13 @@ CloseMail = function() closeMailCalls = closeMailCalls + 1 end
 CheckInbox = function() end
 
 GetInboxNumItems = function() return table.getn(INBOX) end
+-- Counts every raw header read. The storm test below asserts on this directly:
+-- a walk of the whole inbox is the unit of work that made a big mailbox freeze
+-- the client, so the only honest way to prove the coalescing works is to count
+-- the reads themselves rather than trust a paint counter.
+headerReads = 0
 GetInboxHeaderInfo = function(i)
+    headerReads = headerReads + 1
     local m = INBOX[i]
     if not m then return nil end
     -- The verified 13-value 1.12 signature.
@@ -202,22 +208,56 @@ readCalls = 0
 GetInboxText = function(i)
     readCalls = readCalls + 1
     local m = INBOX[i]
-    if m then m.wasRead = 1 end
+    if not m then return nil end
+    m.wasRead = 1
+    -- THE side effect the whole reader design is built around: reading mail
+    -- that still holds something drops its expiry to three days. Modelled here
+    -- so a test can prove the reader does not trigger it behind the player's
+    -- back -- an assertion about daysLeft is worth more than one about which
+    -- function got called.
+    if (m.money or 0) > 0 or m.hasItem or (m.cod or 0) > 0 then
+        if (m.daysLeft or 30) > 3 then m.daysLeft = 3 end
+    end
+    -- The body is not always there on the first call: the client asks the
+    -- server for it and fires MAIL_INBOX_UPDATE when it arrives. Mail flagged
+    -- bodyDelay withholds it once, so the "Loading..." path gets exercised.
+    if m.bodyDelay then
+        m.bodyDelay = nil
+        return nil, m.stationery
+    end
+    local takeable = ((m.money or 0) > 0 or m.hasItem) and true or false
+    return m.body, m.stationery, takeable
+end
+-- Auction invoices. Returns nil for ordinary mail, exactly as the real call
+-- does, which is what inbox.Body uses to decide whether a mail is an invoice.
+GetInboxInvoiceInfo = function(i)
+    local m = INBOX[i]
+    if not m or not m.invoice then return nil end
+    local v = m.invoice
+    return v.kind, v.item, v.who, v.bid, v.buyout, v.deposit, v.consignment
 end
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
 MiniMapMailFrame:Show()
+-- Counts operations the SERVER would have to perform. The pump below clocks
+-- the engine off this and nothing else, because on a real client
+-- MAIL_INBOX_UPDATE is the server acknowledging an operation it actually did
+-- -- it does not arrive because an addon felt like stepping.
+serverCalls = 0
 TakeInboxMoney = function(i)
+    serverCalls = serverCalls + 1
     local m = INBOX[i]
     if not m or failTakeMoney then return end
     m.money = 0
 end
 TakeInboxItem = function(i)
+    serverCalls = serverCalls + 1
     local m = INBOX[i]
     if not m or failTakeItem then return end
     m.itemName = nil
     m.hasItem = nil
 end
 DeleteInboxItem = function(i)
+    serverCalls = serverCalls + 1
     if INBOX[i] then table.remove(INBOX, i) end
 end
 returned = {}
@@ -638,11 +678,25 @@ check(driver ~= nil, "take driver frame exists")
 
 -- One tick of our OnUpdate, then the server's reply. That reply is the engine's
 -- clock -- the whole design rests on not driving this from a timer.
+--
+-- The reply is FAITHFUL: MAIL_INBOX_UPDATE is fired only when the step
+-- actually asked the server to do something. An earlier version of this pump
+-- fired it every iteration regardless, which hand-fed the engine a clock a
+-- real client would never provide -- and hid a bug where any step that skipped
+-- a mail (COD, GM, wedge guard, the terminal step of a "take") issued no call,
+-- got no acknowledgement, and hung the run for good. 388 checks passed over
+-- that stall. A mock more generous than the server cannot fail.
 local function pump(limit)
     local n = 0
     while take.running and n < (limit or 400) do
+        local before = serverCalls
         driver.scripts.OnUpdate()
-        if take.running then fire("MAIL_INBOX_UPDATE") end
+        -- No operation issued means no acknowledgement is coming; the engine
+        -- has to have armed itself or it is wedged. Keep pumping frames so a
+        -- self-armed step still runs, but never invent a server reply.
+        if serverCalls ~= before and take.running then
+            fire("MAIL_INBOX_UPDATE")
+        end
         n = n + 1
     end
     return n
@@ -654,8 +708,10 @@ local function mail(t)
              money = t.money or 0, cod = t.cod or 0,
              daysLeft = t.daysLeft or 20, hasItem = t.item and 1 or nil,
              itemName = t.item, wasRead = t.read and 1 or nil,
-             wasReturned = nil, textCreated = nil, canReply = 1,
-             isGM = t.gm and 1 or nil }
+             wasReturned = nil, textCreated = nil,
+             canReply = t.canReply == false and nil or 1,
+             isGM = t.gm and 1 or nil,
+             body = t.body, invoice = t.invoice, bodyDelay = t.bodyDelay }
 end
 
 local AH = "Stormwind Auction House"
@@ -968,7 +1024,21 @@ check(not ok and why == "no recipient", "empty recipient rejected", why)
 ok, why = send.Validate("   ", 0, false)
 check(not ok, "whitespace recipient rejected")
 ok, why = send.Validate("Bob", 0, false)
-check(not ok and why == "nothing to send", "empty mail rejected", why)
+check(not ok and why == "nothing to send", "wholly empty mail rejected", why)
+
+-- A LETTER IS A MAIL. Courier used to refuse anything carrying neither an item
+-- nor gold, which made it impossible to write to anyone -- reported from live
+-- play as "can't send without an item attached".
+ok, why = send.Validate("Bob", 0, false, "How are you?", "")
+check(ok, "a subject alone is sendable", why)
+ok, why = send.Validate("Bob", 0, false, "", "just checking in")
+check(ok, "a body alone is sendable", why)
+ok, why = send.Validate("Bob", 0, false, "How are you?", "long time no see")
+check(ok, "subject and body are sendable", why)
+ok, why = send.Validate("Bob", 0, false, "   ", "  ")
+check(not ok and why == "nothing to send",
+      "but whitespace is not content", why)
+
 ok, why = send.Validate("Bob", 5000, true)
 check(not ok and why == "COD needs an item", "COD without an item rejected", why)
 send.Attach(0, 1)
@@ -992,6 +1062,23 @@ check(SENT[1].subject == "hello", "subject verbatim for a single mail",
 check(SENT[1].body == "body text", "body")
 check(SENT[1].item == "Silk Cloth", "item attached", tostring(SENT[1].item))
 check(send.Count() == 0, "attachment list cleared after success")
+
+print("== send: a plain letter, no attachment and no gold ==")
+-- The reported bug, end to end rather than only through Validate: the whole
+-- point is that this reaches the server.
+stockBags()
+SENT = {}
+check(send.Count() == 0, "nothing attached")
+check(send.Start("Torchlyte", "How are you?", "long time no see", 0, false,
+      false), "a letter starts sending")
+pumpSend()
+check(not send.sending, "finished")
+check(table.getn(SENT) == 1, "one letter sent", table.getn(SENT))
+check(SENT[1].to == "Torchlyte", "recipient", SENT[1].to)
+check(SENT[1].subject == "How are you?", "subject", SENT[1].subject)
+check(SENT[1].body == "long time no see", "body", SENT[1].body)
+check(SENT[1].item == nil, "and no item rode along", tostring(SENT[1].item))
+check(send.MailCount() == 1, "a letter is one mail for postage", send.MailCount())
 
 print("== send: three items become three mails ==")
 stockBags()
@@ -1196,7 +1283,12 @@ INBOX = {
     mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 10 },
     mail{ sender = "GMBob", subject = "ticket", gm = true },
 }
+-- The harvest is deliberately NOT on MAIL_INBOX_UPDATE any more: that event
+-- storms while the client resolves uncached items, and this walks every header.
 fire("MAIL_INBOX_UPDATE")
+check(table.getn(A.db.MatchContacts("Wanda", 5)) == 0,
+      "the event alone does NOT walk the inbox for contacts")
+send.HarvestContacts()
 check(table.getn(A.db.MatchContacts("Wanda", 5)) == 1, "player sender kept")
 check(table.getn(A.db.MatchContacts("Stormwind", 5)) == 0,
       "auction house not offered as a contact")
@@ -1259,6 +1351,125 @@ A.ui.sendTo:SetText("Zebra")
 A.ui.UpdateAutoComplete()
 check(not A.ui.sendAuto:IsVisible(), "no matches means no list")
 A.ui.sendTo:SetText("")
+
+-- THE REPORTED BUG. The check above only ever clicked the button with an EMPTY
+-- box, which is the one case that worked -- so a dead button passed the suite.
+-- With a complete name typed, the button used to filter by that name, match
+-- exactly one contact (itself), hit the exact-match rule and hide the list
+-- again: it appeared to do nothing whatsoever.
+A.ui.sendTo:SetText("Torchlyte")
+A.ui.UpdateAutoComplete()
+check(not A.ui.sendAuto:IsVisible(),
+      "typing a complete name shows no suggestion, correctly")
+-- Clear every row first. The mock does not propagate a parent's Hide() to its
+-- children, so leftover rows from the previous show would otherwise still look
+-- "visible" and the count below would pass on stale state.
+local si = 1
+while si <= 5 do
+    A.ui.sendAutoRows[si].name = nil
+    A.ui.sendAutoRows[si].label:SetText("")
+    A.ui.sendAutoRows[si]:Hide()
+    si = si + 1
+end
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(),
+      "but the BUTTON still opens the list with that name in the box")
+-- It lists everyone, not just what matches the typed text.
+local shown = 0
+si = 1
+while si <= 5 do
+    if A.ui.sendAutoRows[si].visible then shown = shown + 1 end
+    si = si + 1
+end
+check(shown == 3, "all three contacts are listed, not just the typed one", shown)
+A.ui.sendAutoButton.scripts.OnClick()
+check(not A.ui.sendAuto:IsVisible(), "and it still toggles shut")
+
+-- With no contacts at all the button must still visibly answer, or it is the
+-- same "does nothing" complaint wearing a different hat.
+A.db.ForgetContacts()
+A.ui.sendTo:SetText("")
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(), "an empty contact list still opens the list")
+check(A.util.Contains(rawget(A.ui.sendAutoRows[1].label, "text") or "",
+      "no saved recipients"), "and says so",
+      rawget(A.ui.sendAutoRows[1].label, "text"))
+check(A.ui.sendAutoRows[1].name == nil, "the placeholder row is not clickable")
+A.ui.sendAutoButton.scripts.OnClick()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Torchlite")
+A.db.AddContact("Subtilizer")
+A.ui.sendTo:SetText("")
+
+print("== version: the title bar cannot drift from the .toc ==")
+-- Two releases shipped with the .toc bumped and this literal left behind, so
+-- the in-game title kept reporting an old build and bug reports came in
+-- against a version that was not running.
+local tocVersion
+local tf = io.open("Aegis_Courier.toc", "r")
+if tf then
+    local line = tf:read("*l")
+    while line do
+        local _, _, v = string.find(line, "^##%s*Version:%s*(.-)%s*$")
+        if v then tocVersion = v end
+        line = tf:read("*l")
+    end
+    tf:close()
+end
+check(tocVersion ~= nil, "found ## Version in the .toc", tostring(tocVersion))
+check(A.version == tocVersion,
+      "A.version agrees with the .toc",
+      tostring(A.version) .. " vs " .. tostring(tocVersion))
+
+print("== send UI: the Send BUTTON is clickable for a letter ==")
+-- The assertion that was missing when "cannot send without an item" was first
+-- fixed. send.Validate and send.Start were both corrected and tested, but
+-- ui.RefreshSend calls Validate a SECOND time to decide whether the button is
+-- clickable at all -- and it was still passing no subject and no body, so the
+-- button stayed greyed and the bug survived the fix untouched.
+--
+-- Testing the engine is not testing the button. This asserts the thing the
+-- player actually has to be able to press.
+A.ui.SelectSubTab("Send")
+A.send.ClearAttachments()
+A.ui.sendCOD:SetChecked(false)
+A.ui.sendCODAll:SetChecked(false)
+A.ui.sendMoney:SetText("")
+A.ui.sendTo:SetText("")
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == false, "an empty form cannot be sent")
+
+A.ui.sendTo:SetText("Subtilizer")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == false, "a recipient alone is not enough")
+
+A.ui.sendSubject:SetText("test")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == true,
+      "recipient + subject, no attachment: the button is LIVE")
+
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("hi")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == true,
+      "recipient + body, no attachment: also live")
+
+-- And pressing it actually sends, rather than merely being enabled.
+SENT = {}
+A.ui.sendSubject:SetText("test")
+A.ui.RefreshSend()
+A.ui.btnSend.scripts.OnClick()
+pumpSend()
+check(table.getn(SENT) == 1, "clicking Send posts the letter", table.getn(SENT))
+check(SENT[1].to == "Subtilizer", "to the right person", SENT[1].to)
+check(SENT[1].item == nil, "with nothing attached", tostring(SENT[1].item))
+
+A.ui.sendTo:SetText("")
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("")
+A.ui.RefreshSend()
 
 print("== send UI: COD-all is greyed until COD is checked ==")
 A.ui.sendCOD:SetChecked(false)
@@ -1351,6 +1562,7 @@ check(table.getn(INBOX) == 0, "and Delete Read clears them",
 print("== unread flag: the minimap icon is put out on close ==")
 INBOX = { mail{ sender = "Bob", subject = "x", money = 100 } }
 fire("MAIL_INBOX_UPDATE")
+driver.scripts.OnUpdate()       -- the count settles on the coalesced flush
 check(A.inbox.lastUnread == 1, "unread tracked while open", A.inbox.lastUnread)
 MiniMapMailFrame:Show()
 fire("MAIL_CLOSED")
@@ -1362,6 +1574,7 @@ A.ui.OpenWindow()
 take.Start(take.MODE_OPEN)
 pump()
 fire("MAIL_INBOX_UPDATE")
+driver.scripts.OnUpdate()
 check(A.inbox.lastUnread == 0, "nothing unread after the run")
 MiniMapMailFrame:Show()
 fire("MAIL_CLOSED")
@@ -1428,6 +1641,325 @@ local okRun, err = pcall(pump, 400)
 check(okRun == true, "run survived", err)
 check(not take.running, "and finished")
 check(table.getn(INBOX) == 0, "30-mail box fully emptied", table.getn(INBOX))
+
+print("== storm: MAIL_INBOX_UPDATE is coalesced to one flush per frame ==")
+-- A first mailbox open fires MAIL_INBOX_UPDATE once per mail whose item the
+-- client still has to resolve from the server, so a full box lands hundreds of
+-- events across a handful of frames. Each one used to walk every header about
+-- five times over (UnreadCount, HasWork x3, All, Summary) and repaint the list.
+-- At 70 mails that is ~350 header reads and a full paint PER EVENT -- the
+-- freeze the reporters hit. The events now only raise a flag; the driver does
+-- the work once per frame.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+bigInbox(70)
+rawset(A.ui.inboxScroll, "value", 30 * 28)   -- scrollbar live and scrolled
+
+-- Warm up first, then measure: the very first flush of a visit also seeds
+-- inbox.lastUnread, so measuring from a settled state keeps the comparison
+-- below honest rather than accidentally passing on a state difference.
+A.inbox.MarkDirty()
+driver.scripts.OnUpdate()
+
+A.inbox.MarkDirty()
+headerReads = 0
+driver.scripts.OnUpdate()
+local oneFlush = headerReads
+check(oneFlush > 0, "a flush does read the inbox", oneFlush)
+
+headerReads = 0
+local stormN = 1
+while stormN <= 200 do
+    fire("MAIL_INBOX_UPDATE")
+    stormN = stormN + 1
+end
+check(headerReads == 0, "200 events did NO inbox work of their own", headerReads)
+check(A.inbox.dirty == true, "they only raised the dirty flag")
+
+driver.scripts.OnUpdate()
+check(headerReads == oneFlush,
+      "200 events cost exactly one flush, not 200",
+      headerReads .. " reads vs one flush = " .. oneFlush)
+check(A.inbox.dirty == false, "and the frame cleared the flag")
+
+-- Nothing dirty means nothing to do: a quiet frame must not walk the inbox
+-- either, or the coalescing just moves the cost from the event to every frame.
+headerReads = 0
+driver.scripts.OnUpdate()
+check(headerReads == 0, "an idle frame does no inbox work at all", headerReads)
+
+print("== storm: the take engine still steps once per confirmation ==")
+-- Coalescing must not reach the take engine's clock. MAIL_INBOX_UPDATE is the
+-- server's acknowledgement that the last operation landed, and one Step per
+-- confirmation is what keeps the run in lockstep with the server instead of
+-- racing it. Arming has to stay per-event even though the repaint does not.
+bigInbox(3)
+A.db.ClearLedger()
+take.Start(take.MODE_OPEN)
+check(take.running, "run started")
+take.armed = false
+fire("MAIL_INBOX_UPDATE")
+check(take.armed == true, "a confirmation still arms the next step")
+local okStorm = pcall(pump, 400)
+check(okStorm == true, "and the run completes")
+check(table.getn(INBOX) == 0, "emptying the box", table.getn(INBOX))
+
+print("== reader: opening a mail ==")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+INBOX = {
+    mail{ sender = "Wanda", subject = "hello there", body = "see you at 8" },
+    mail{ sender = "Bob", subject = "supplies", money = 500,
+          item = "Copper Ore", body = "here you go" },
+}
+check(A.ui.ReaderOpen() == false, "the list is what shows first")
+check(A.ui.OpenReader(1) == true, "left-click opens mail 1")
+check(A.ui.ReaderOpen(), "the reader is open")
+check(A.ui.reader.visible == true, "and visible")
+check(rawget(A.ui.readerFrom, "text") == "Wanda", "sender shown",
+      rawget(A.ui.readerFrom, "text"))
+check(A.ui.inboxRows[1].visible == false, "the list rows gave up the well")
+A.ui.CloseReader()
+check(A.ui.ReaderOpen() == false, "Back returns to the list")
+check(A.ui.inboxRows[1].visible == true, "and the rows come back")
+
+print("== reader: an empty mail is read at once, a loaded one is not ==")
+-- CLAUDE.md rule 17: GetInboxText marks a mail read AND, on mail that still
+-- holds something, drops the expiry to three days. So opening a loaded mail
+-- must NOT fetch a body until the player asks for it. These assert on the
+-- mail's own daysLeft rather than on call counts -- the expiry IS the damage.
+INBOX = {
+    mail{ sender = "Wanda", subject = "just a note", body = "no strings" },
+    mail{ sender = "Bob", subject = "loot", money = 500, item = "Copper Ore",
+          body = "enjoy", daysLeft = 29 },
+}
+A.ui.OpenReader(1)
+check(rawget(A.ui.readerBody, "text") == "no strings",
+      "an empty mail renders its body immediately",
+      rawget(A.ui.readerBody, "text"))
+check(INBOX[1].wasRead == 1, "and is marked read, which is what clears the icon")
+check(A.ui.readerReveal.visible == false, "no reveal button needed")
+
+A.ui.CloseReader()
+local before = readCalls
+A.ui.OpenReader(2)
+check(readCalls == before, "opening a LOADED mail calls GetInboxText 0 times",
+      readCalls - before)
+check(INBOX[2].daysLeft == 29, "so its expiry is untouched", INBOX[2].daysLeft)
+check(INBOX[2].wasRead == nil, "and it is still unread")
+check(A.ui.readerReveal.visible == true, "the reveal button is offered instead")
+check(A.ui.readerWarn.visible == true, "with the three-day warning")
+check(rawget(A.ui.readerBody, "text") == "", "and no body is shown")
+-- Header detail is free: it all comes from GetInboxHeaderInfo.
+check(rawget(A.ui.readerFrom, "text") == "Bob", "sender still shown")
+check(rawget(A.ui.readerAttach, "text") == "Copper Ore", "attachment named",
+      rawget(A.ui.readerAttach, "text"))
+
+-- Now the player accepts the cost.
+A.ui.readerReveal.scripts.OnClick()
+check(rawget(A.ui.readerBody, "text") == "enjoy", "the body appears on request",
+      rawget(A.ui.readerBody, "text"))
+check(INBOX[2].daysLeft == 3, "and only NOW does the expiry drop to three days",
+      INBOX[2].daysLeft)
+check(A.ui.readerReveal.visible == false, "the reveal button steps aside")
+
+print("== reader: a body that has not arrived yet ==")
+-- GetInboxText returns nil while the client is still asking the server for the
+-- text. That is not an empty message and must not be rendered as one.
+INBOX = { mail{ sender = "Wanda", subject = "slow", body = "at last",
+                bodyDelay = true } }
+A.ui.CloseReader()
+A.ui.OpenReader(1)
+check(A.util.Contains(rawget(A.ui.readerBody, "text") or "", "Loading"),
+      "a nil body reads as loading, not as an empty message",
+      rawget(A.ui.readerBody, "text"))
+fire("MAIL_INBOX_UPDATE")
+driver.scripts.OnUpdate()
+check(rawget(A.ui.readerBody, "text") == "at last",
+      "and the text lands on the next refresh",
+      rawget(A.ui.readerBody, "text"))
+
+print("== reader: auction invoices ==")
+INBOX = { mail{ sender = AH, subject = "Auction successful: Silk Cloth",
+                money = 9500, body = "",
+                invoice = { kind = "seller", item = "Silk Cloth",
+                            bid = 10000, buyout = 10000, deposit = 60,
+                            consignment = 500 } } }
+A.ui.CloseReader()
+A.ui.OpenReader(1)
+A.ui.readerReveal.scripts.OnClick()
+local invText = rawget(A.ui.readerBody, "text") or ""
+check(A.util.Contains(invText, "Silk Cloth"), "the invoice names the item")
+check(A.util.Contains(invText, "house cut"), "and reports the consignment cut")
+
+print("== reader: it never outlives the mail it is showing ==")
+-- A held index is only meaningful while the inbox does not move under it.
+-- Three mails, reading the middle one. Deleting mail 1 shifts mail 3 into
+-- index 2, so the index STAYS VALID but now addresses a different mail --
+-- which is the case a nil-header check alone would sail straight past.
+INBOX = {
+    mail{ sender = "Wanda", subject = "one" },
+    mail{ sender = "Bob", subject = "two" },
+    mail{ sender = "Cass", subject = "three" },
+}
+A.ui.CloseReader()
+A.ui.OpenReader(2)
+check(A.ui.ReaderOpen(), "reading mail 2")
+check(rawget(A.ui.readerFrom, "text") == "Bob", "which is Bob's")
+table.remove(INBOX, 1)             -- Cass's mail slides into index 2
+check(A.inbox.Header(2) ~= nil, "index 2 is still a real mail")
+check(A.inbox.Header(2).sender == "Cass", "but a DIFFERENT one now")
+A.ui.RefreshInbox()
+check(A.ui.ReaderOpen() == false,
+      "a different mail sliding into the index closes the reader")
+check(A.ui.inboxRows[1].visible == true, "and the list is painted instead")
+
+INBOX = { mail{ sender = "Wanda", subject = "one" } }
+A.ui.OpenReader(1)
+check(A.ui.ReaderOpen(), "reading the only mail")
+INBOX = {}
+A.ui.RefreshInbox()
+check(A.ui.ReaderOpen() == false, "an emptied inbox closes the reader too")
+
+print("== reader: it stands aside for a take run ==")
+INBOX = {
+    mail{ sender = "Bob", subject = "gold", money = 100 },
+    mail{ sender = "Ann", subject = "more gold", money = 200 },
+}
+A.ui.CloseReader()
+A.ui.OpenReader(1)
+check(A.ui.ReaderOpen(), "reader open before the run")
+take.Start(take.MODE_OPEN)
+A.ui.RefreshInbox()
+check(A.ui.ReaderOpen() == false,
+      "a run closes it -- deletes shift every later index")
+check(A.ui.OpenReader(1) == false, "and it refuses to reopen mid-run")
+pump()
+check(not take.running, "run finished")
+check(A.ui.OpenReader ~= nil, "the reader is available again afterwards")
+
+print("== reader: leaving the Inbox tab drops it ==")
+INBOX = { mail{ sender = "Wanda", subject = "one" } }
+A.ui.SelectSubTab("Inbox")
+A.ui.OpenReader(1)
+check(A.ui.ReaderOpen(), "open on the Inbox tab")
+A.ui.SelectSubTab("Log")
+check(A.ui.ReaderOpen() == false, "switching tabs closes it")
+A.ui.SelectSubTab("Inbox")
+check(A.ui.ReaderOpen() == false, "and coming back lands on the list")
+
+print("== reader: COD and GM mail offer no Take button ==")
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
+    mail{ sender = "GM", subject = "ticket", money = 700, gm = true },
+}
+A.ui.OpenReader(1)
+check(A.ui.readerTake.visible == false, "no Take button on COD mail")
+check(A.util.Contains(rawget(A.ui.readerStatus, "text") or "", "COD"),
+      "and the reason is stated")
+A.ui.CloseReader()
+A.ui.OpenReader(2)
+check(A.ui.readerTake.visible == false, "no Take button on GM mail")
+A.ui.CloseReader()
+
+print("== ui: the Take All button is gone ==")
+check(A.ui.btnTakeAll == nil, "no Take All button is built")
+check(getglobal("AegisCourierBtnTakeAll") == nil, "and no global left behind")
+check(A.ui.btnOpenAll ~= nil and A.ui.btnDeleteRead ~= nil and
+      A.ui.btnStop ~= nil, "the other three action buttons survive")
+-- The mode stays reachable from Lua on purpose: it is how the tests below
+-- observe an emptied-but-still-present mail.
+check(take.MODE_TAKE == "take", "MODE_TAKE remains available to callers")
+
+print("== geometry: every list's rows fit inside its own well ==")
+-- The reported clipping bug: the window was a literal 440 tall, which left the
+-- Inbox well 264px while its own ten rows needed 288. 1.12 frames do not clip
+-- their children, so row 10 drew through the well border and over the hint
+-- line. The mock does not simulate layout, so this asserts the arithmetic the
+-- anchors themselves are built from -- change ROWS or an inset and it fires.
+local geom = A.ui.Geometry()
+check(geom.need == geom.rows * geom.rowH + 8,
+      "rows plus padding is what a well must hold", geom.need)
+check(geom.inbox >= geom.need,
+      "Inbox well holds its rows", geom.inbox .. " have vs " .. geom.need)
+check(geom.log >= geom.need,
+      "Log well holds its rows", geom.log .. " have vs " .. geom.need)
+check(geom.ledger >= geom.need,
+      "Ledger well holds its rows", geom.ledger .. " have vs " .. geom.need)
+-- The Inbox is the tightest panel, so it is the one that sets the window
+-- height. If it ever stops being the binding constraint the window is bigger
+-- than it needs to be, which is worth noticing.
+check(geom.inbox <= geom.log and geom.inbox <= geom.ledger,
+      "the Inbox is still the tightest list, so it sets the window height")
+check(geom.winH == geom.panelH + 68 + 28, "window height derives from the panel",
+      geom.winH)
+
+print("== clock: a step that skips a mail must re-arm itself ==")
+-- take.armed is set by nothing but MAIL_INBOX_UPDATE, and the server only
+-- sends that after an operation it actually performed. So a step that SKIPS a
+-- mail issues no call, gets no acknowledgement, and -- before the self-clock
+-- in take.Advance -- hung the run for good with take.running still true.
+--
+-- These assert on serverCalls directly rather than trusting the pump, because
+-- the pump firing an unconditional event is exactly what hid this for 388
+-- checks. The mail placed at index 1 is one the engine must step OVER, so the
+-- very first step is the silent one.
+
+-- COD at the head: Open All must skip it and still reach the mail behind it.
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
+    mail{ sender = "Bob", subject = "gold", money = 400 },
+}
+A.db.ClearLedger()
+take.Start(take.MODE_OPEN)
+local callsBefore = serverCalls
+driver.scripts.OnUpdate()          -- the skip step: issues nothing
+check(serverCalls == callsBefore, "skipping a COD mail calls the server 0 times")
+check(take.armed == true, "and the engine re-armed itself instead of hanging")
+check(pump() > 0 and not take.running, "the run then completes")
+check(table.getn(INBOX) == 1, "COD mail survives", table.getn(INBOX))
+check(INBOX[1].cod == 5000, "and it is the COD one that survived")
+
+-- GM mail at the head: same path.
+INBOX = {
+    mail{ sender = "GM", subject = "ticket", money = 700, gm = true },
+    mail{ sender = "Bob", subject = "gold", money = 400 },
+}
+take.Start(take.MODE_OPEN)
+pump()
+check(not take.running, "a GM mail at the head does not hang the run")
+check(table.getn(INBOX) == 1, "GM mail survives", table.getn(INBOX))
+
+-- Delete Read walking past mail it must not touch.
+INBOX = {
+    mail{ sender = "Bob", subject = "unread", money = 0 },
+    mail{ sender = "Ann", subject = "read+empty", money = 0, read = true },
+}
+take.Start(take.MODE_DELETE)
+pump()
+check(not take.running, "Delete Read does not hang on the first mail it skips")
+check(table.getn(INBOX) == 1, "it deleted only the read empty mail",
+      table.getn(INBOX))
+check(INBOX[1].subject == "unread", "and kept the unread one")
+
+-- The wedge guard's give-up path is a skip too.
+-- The second mail carries an ITEM rather than money, because failTakeMoney is
+-- a global switch on the stub: leaving it money would refuse that one too and
+-- the test would pass for the wrong reason.
+INBOX = {
+    mail{ sender = "Bob", subject = "stuck", money = 100 },
+    mail{ sender = "Ann", subject = "fine", item = "Copper Ore" },
+}
+failTakeMoney = true               -- the server refuses money forever
+take.Start(take.MODE_OPEN)
+pump()
+failTakeMoney = false
+check(not take.running, "the wedge guard giving up does not hang the run")
+check(table.getn(INBOX) == 1, "it moved on and cleared the mail it could",
+      table.getn(INBOX))
+check(INBOX[1].subject == "stuck", "leaving the refused mail alone")
 
 print("== big lists: Log and Ledger carry the same guard ==")
 A.db.ClearLog()

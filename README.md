@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.0.4)
+# Aegis: Courier (v1.1.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -83,10 +83,26 @@ enough for the 1.12 client to notice a new `.toc` entry.
 | Action | What it does |
 |---|---|
 | **Open All** | take gold and items, then delete the emptied mail |
-| **Take All** | take gold and items, **keep** the mail |
 | **Delete Read** | delete read mail that is already empty — never anything holding gold or an item |
+| **left-click a mail** | open and read it |
 | **right-click a mail** | take that one mail |
 | **Return** | send a mail back to its sender, unopened |
+
+## Reading mail
+
+Left-click any message to read it. You get the sender, subject, attachment,
+money and expiry, plus the body, and you can Take or Return from inside without
+going back to the list. Auction-house mail also shows its invoice: sale price,
+the house's cut, and the deposit you got back.
+
+One thing worth knowing, because it is the game's rule rather than Courier's:
+**the only way to fetch a message body also marks the mail read, and reading
+mail that still holds an attachment drops its expiry from 30 days to 3.** So
+Courier treats the two cases differently — an empty mail opens and reads
+straight away, since it has nothing left to lose, while a mail still holding
+gold or an item shows you everything else immediately and keeps the body behind
+one extra click that says so first. Clicking around your inbox can never
+shorten a mail's life without you choosing it.
 
 COD and GM mail are **always** skipped, in every mode and by right-click. That
 is not a setting: paying a COD by accident cannot be undone.
@@ -119,6 +135,9 @@ too, but that is your own returned bid, so it is collected and deliberately
 
 ## Sending mail
 
+You can send a plain letter — a subject and a body, nothing attached — or a
+parcel, or both.
+
 Vanilla mail carries **one attachment per message**. Courier does not pretend
 otherwise — it queues up to 12 items and sends them as 12 mails, back to back,
 and the cost line shows the **real** total postage rather than a single mail's.
@@ -128,7 +147,7 @@ and the cost line shows the **real** total postage rather than a single mail's.
 | **attach** | right-click an item in your bags, or drag it onto a slot |
 | **remove** | click a filled slot |
 | **subject** | leave it blank and each mail is named after its item (`Silk Cloth (20)`); fill it in and a batch is numbered `subject [2/5]` |
-| **recipient** | starts suggesting names you have mailed or been mailed by, most recent first |
+| **recipient** | starts suggesting names you have mailed or been mailed by, most recent first — the arrow button beside the box lists them all |
 | **gold** | type `12g 30s`, or a bare number for gold |
 | **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
 

@@ -9,6 +9,110 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.1.0]
+
+Adds a mail reader, and fixes a take-engine bug that stopped **Open All** dead
+at the first COD mail. `/reload`.
+
+### Fixed
+- **Open All stopped partway through the mailbox and never finished.** Any mail
+  the engine has to *skip* — COD, GM mail, mail the server refuses, or a
+  Delete Read pass over mail that is not already empty-and-read — was stepped
+  over without asking the server to do anything. But the engine's clock *is*
+  the server's acknowledgement (`MAIL_INBOX_UPDATE`), and no operation means no
+  acknowledgement, so the run simply stopped there with everything behind it
+  uncollected. Only the Stop button got you out. Every skip now re-arms itself.
+- The same bug is why **Take All** never worked: its last step on each mail is
+  a skip, so it stalled after the first mail, every time.
+- **Delete Read** was affected too — it stalled on the first mail that was not
+  already read and empty, which in a normal inbox is almost immediately.
+- **The last row of the inbox list drew over the list border and the hint text
+  underneath it.** The window was a fixed 440px tall, which left the list 20px
+  short of the ten rows it draws, and 1.12 frames do not clip their children.
+  The window height is now derived from the list instead of chosen by eye, so
+  changing the row count resizes the window rather than overflowing it.
+- **You could not send a mail without attaching an item.** Courier refused any
+  mail carrying neither an item nor gold, on the theory that such a mail is
+  "almost always a mistake". That was simply wrong — writing to someone is the
+  most ordinary use of a mailbox there is. A subject or a body is now enough.
+  Only a mail with genuinely nothing in it is still refused.
+  - The validation rule is asked twice: once when you press Send, and once to
+    decide whether the Send button is pressable at all. Only the first was
+    fixed to begin with, so the button stayed greyed out and the bug survived
+    its own fix. Both now agree, and the suite asserts on the **button**, not
+    just on the rule behind it.
+- **The little button beside the recipient box did nothing.** Two separate
+  faults. It filtered the contact list by whatever was already typed, so
+  clicking it with a complete name in the box matched exactly one contact —
+  itself — and the "don't suggest an exact match" rule then hid the list again.
+  And its icon came from a texture that does not render here, on top of which
+  the pfUI skin replaces a button's textures with a flat backdrop, wiping the
+  arrow off an icon button entirely. It now lists **every** recent recipient
+  regardless of what is typed, keeps its arrow, has a tooltip, and says "no
+  saved recipients yet" rather than staying silent when there are none.
+- **The window title reported the wrong version.** It was a hand-maintained
+  literal in the source, and two releases bumped the `.toc` and left it behind,
+  so the title bar kept claiming 1.0.4. It now reads the real version from the
+  `.toc` at load, and the test suite parses the `.toc` and fails if the two
+  ever disagree again.
+
+### Added
+- **You can read your mail.** Left-click a message to open it: sender, subject,
+  attachment, money, expiry and the body, with Take and Return available from
+  inside. Right-click still takes a mail without opening it, unchanged.
+  Auction-house mail also shows its invoice — sale price, house cut, and the
+  returned deposit.
+- Reading is careful with expiry, because the game is not. The only way to get
+  a message body also marks the mail read, and on mail that **still holds
+  attachments that drops its expiry from 30 days to 3**. So Courier splits the
+  two cases: a mail holding nothing opens and reads immediately, while a mail
+  still holding something shows all its detail at once but keeps the body
+  behind one explicit click that tells you the cost first. No click in the list
+  can ever shorten a mail's life without you choosing it.
+
+### Removed
+- **The Take All button.** It emptied every mail but kept it, and it never
+  worked properly — see the clock bug above. Open All does what people
+  actually wanted and now does it correctly.
+
+## [1.0.5]
+
+Fixes the multi-second freeze when first opening a large mailbox. `/reload`.
+This is a **different** bug from the 1.0.4 crash — that one was a stack
+overflow past 10 mails, this one is raw work per event — and 1.0.4's fix is
+still in place. If you were still seeing a long hang on 1.0.4, this is why.
+
+### Fixed
+- **Opening a full mailbox froze the client for seconds.** `MAIL_INBOX_UPDATE`
+  does not fire once per visit: on the first open of a session, while the
+  client is still resolving attached items it has not cached, it fires *again
+  and again* — one storm of events across a handful of frames. Courier did a
+  full repaint plus **five separate walks of every mail header** inside every
+  one of those events. Measured on a 70-mail inbox that is 352 header reads
+  and roughly 1,300 subject-pattern parses **per event**; a 200-event storm
+  ran 169,200 header reads before the frame could finish.
+- The events now only raise a flag. The work happens **at most once per
+  frame**, however many events landed in that frame — the same 200-event
+  storm now costs 282 header reads, a single pass. Nothing was made lazier or
+  less accurate: the list still repaints on every change, just once instead of
+  two hundred times.
+- The contact-name harvest for send autocomplete no longer runs on every
+  inbox update either — it was one of those five walks. It now runs when you
+  open the mailbox and when a take run finishes, which are the only moments
+  the set of senders can actually change.
+- The minimap's unread-mail count is no longer carried over between mailbox
+  visits. A count left from a mailbox you emptied last time could authorise
+  hiding a genuinely new unread-mail icon on a later visit.
+
+### Notes
+- Caching parsed headers within a single refresh was tried and deliberately
+  **not** shipped. The saving was small next to the coalescing above, and a
+  stale-header memo is the one thing this addon's correctness cannot afford —
+  the take engine re-reads after every action precisely because "I took it,
+  therefore it is empty" is false. The reasoning is recorded in
+  `core/inbox.lua` for whoever revisits it.
+- 1.0.4's re-entrancy guards are untouched; both fixes are needed.
+
 ## [1.0.4]
 
 Fixes the reported client freeze/crash with 11 or more mails in the inbox.

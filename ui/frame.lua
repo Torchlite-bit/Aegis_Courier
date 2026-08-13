@@ -45,9 +45,56 @@ local C = {
     border  = { 0.79, 0.64, 0.15 },
 }
 
-local WIN_W, WIN_H  = 660, 440
 local ROW_H         = 28
 local ROWS          = 10
+
+-- ---- window geometry -------------------------------------------------------
+-- The window height is DERIVED from the list, not picked by eye. It used to be
+-- a literal 440, which left the Inbox well 264px tall while its own ten rows
+-- needed 4 + 10*28 + 4 = 288. Twenty pixels short -- and 1.12 frames do not
+-- clip their children, so the last row simply drew straight through the well
+-- border and over the hint line underneath it.
+--
+-- Every inset below is also used by the anchors themselves, so the arithmetic
+-- and the layout cannot drift apart, and changing ROWS now resizes the window
+-- to match instead of silently overflowing it again. ui.Geometry() exposes the
+-- result and the harness asserts the rows fit.
+local LIST_PAD = 4                          -- well edge to first/last row
+
+local PANEL_TOP,  PANEL_BOTTOM  = 68, 28    -- panel inset within the window
+-- The Inbox is the tightest of the three panels: a summary line, an action bar
+-- and a column header sit above its well, and the hint line sits below it.
+local INBOX_TOP,  INBOX_BOTTOM  = 58, 22
+local LOG_TOP,    LOG_BOTTOM    = 28, 26
+local LEDGER_TOP, LEDGER_BOTTOM = 22, 22
+
+-- Height a list well must have to hold ROWS rows without overflowing.
+local LIST_NEED = LIST_PAD + ROWS * ROW_H + LIST_PAD
+
+local WIN_W = 660
+local WIN_H = PANEL_TOP + INBOX_TOP + LIST_NEED + INBOX_BOTTOM + PANEL_BOTTOM
+
+-- Well heights the layout above actually produces. Reported by ui.Geometry so
+-- the regression test reads the same numbers the anchors use.
+local PANEL_H     = WIN_H - PANEL_TOP - PANEL_BOTTOM
+local INBOX_WELL  = PANEL_H - INBOX_TOP  - INBOX_BOTTOM
+local LOG_WELL    = PANEL_H - LOG_TOP    - LOG_BOTTOM
+local LEDGER_WELL = PANEL_H - LEDGER_TOP - LEDGER_BOTTOM
+
+-- Rows required vs. well available, per list. A list whose `need` exceeds its
+-- `have` draws outside its well -- the bug above.
+function ui.Geometry()
+    return {
+        need   = LIST_NEED,
+        rows   = ROWS,
+        rowH   = ROW_H,
+        winH   = WIN_H,
+        panelH = PANEL_H,
+        inbox  = INBOX_WELL,
+        log    = LOG_WELL,
+        ledger = LEDGER_WELL,
+    }
+end
 
 local SUBTABS = { "Inbox", "Send", "Log", "Ledger", "Courier" }
 
@@ -121,6 +168,15 @@ local function MakeSubTab(parent, name)
 end
 
 function ui.SelectSubTab(name)
+    -- Leaving the Inbox drops the reader. Coming back should land on the list,
+    -- not on whatever mail happened to be open before -- and by then the inbox
+    -- may have been emptied under it anyway.
+    if name ~= "Inbox" and ui.readerIndex then
+        ui.readerIndex = nil
+        ui.readerSig = nil
+        ui.readerWantBody = nil
+        if ui.reader then ui.reader:Hide() end
+    end
     ui.selectedSubTab = name
     local n = table.getn(SUBTABS)
     local i = 1
@@ -257,8 +313,8 @@ function ui.BuildWindow()
         prev = b
 
         local panel = CreateFrame("Frame", "AegisCourierPanel" .. name, f)
-        panel:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -68)
-        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, 28)
+        panel:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -PANEL_TOP)
+        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, PANEL_BOTTOM)
         panel:Hide()
         ui.panels[name] = panel
 
@@ -313,23 +369,23 @@ function ui.BuildInboxPanel()
     end)
     openAll:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -16)
 
-    local takeAll = ActionButton("TakeAll", "Take All", 76, function()
-        take.Start(take.MODE_TAKE)
-    end)
-    takeAll:SetPoint("LEFT", openAll, "RIGHT", 4, 0)
-
+    -- No "Take All" button. It ran take.MODE_TAKE -- empty every mail but keep
+    -- it -- and it was the mode most exposed to the clock bug fixed alongside
+    -- this (see take.Advance): its final step per mail issues no server call,
+    -- so the run stalled after the first mail every single time. Open All does
+    -- the job users actually wanted and does it correctly. The engine mode
+    -- survives for tests; see the note on take.MODE_TAKE.
     local delRead = ActionButton("DeleteRead", "Delete Read", 90, function()
         take.Start(take.MODE_DELETE)
     end)
-    delRead:SetPoint("LEFT", takeAll, "RIGHT", 4, 0)
+    delRead:SetPoint("LEFT", openAll, "RIGHT", 4, 0)
 
     local stop = ActionButton("Stop", "Stop", 56, function()
         take.Stop()
     end)
     stop:SetPoint("LEFT", delRead, "RIGHT", 12, 0)
 
-    ui.btnOpenAll, ui.btnTakeAll, ui.btnDeleteRead, ui.btnStop =
-        openAll, takeAll, delRead, stop
+    ui.btnOpenAll, ui.btnDeleteRead, ui.btnStop = openAll, delRead, stop
 
     -- Running total for this mailbox visit, to the right of the buttons.
     local collected = Label(panel, "GameFontNormalSmall", C.green)
@@ -363,8 +419,8 @@ function ui.BuildInboxPanel()
 
     -- The list well.
     local well = CreateFrame("Frame", nil, panel)
-    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -58)
-    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 22)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -INBOX_TOP)
+    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, INBOX_BOTTOM)
     Backdrop(well, C.well, true)
     ui.inboxWell = well
 
@@ -385,20 +441,22 @@ function ui.BuildInboxPanel()
     while i <= ROWS do
         local row = CreateFrame("Button", "AegisCourierInboxRow" .. i, well)
         row:SetHeight(ROW_H)
-        row:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -4 - (i - 1) * ROW_H)
-        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
+        row:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -LIST_PAD - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -LIST_PAD - (i - 1) * ROW_H)
         row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         -- A pfUI border around every row would be noise: these are click
         -- targets, not buttons. See ui/skin.lua.
         row.courierNoSkin = true
         -- Right-click takes this one mail, matching TurtleMail's muscle
-        -- memory. Left-click is left free for a future preview.
+        -- memory. Left-click opens the reader.
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
         row:SetScript("OnClick", function()
             if not row.mailIndex then return end
             -- 1.12 delivers the clicked button in the arg1 GLOBAL.
             if arg1 == "RightButton" then
                 A.take.Single(row.mailIndex)
+            else
+                ui.OpenReader(row.mailIndex)
             end
         end)
 
@@ -447,9 +505,310 @@ function ui.BuildInboxPanel()
 
     local note = Label(panel, "GameFontNormalSmall", C.dim)
     note:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 4)
-    note:SetText("Right-click a mail to take it. Return sends it back unopened. " ..
-        "COD and GM mail are always skipped.")
+    note:SetText("Left-click to read, right-click to take. Return sends it " ..
+        "back unopened. COD and GM mail are always skipped.")
     ui.inboxNote = note
+
+    ui.BuildReader(well)
+end
+
+-- ---------------------------------------------------------------------------
+-- The reader
+-- ---------------------------------------------------------------------------
+-- Courier replaces the Blizzard mailbox outright, so until now there was no
+-- way to read a message at all -- the list showed a subject and nothing else.
+--
+-- The reader fills the same well as the list and swaps places with it, rather
+-- than opening a second window: one mailbox, one panel, and no second frame to
+-- keep positioned, skinned and stacked.
+--
+-- THE EXPIRY RULE. GetInboxText is the only way to obtain a body, and on mail
+-- that still holds attachments it drops the expiry to three days (CLAUDE.md
+-- rule 17). So the reader NEVER fetches a body just because a row was clicked:
+--   * empty mail  -- nothing left to expire, so it opens and reads at once
+--   * loaded mail -- header detail opens immediately, the body waits behind an
+--                    explicit button that states the cost
+-- The header detail (sender, subject, money, attachment, expiry) is free: it
+-- all comes from GetInboxHeaderInfo, which the list already read.
+function ui.BuildReader(well)
+    local r = CreateFrame("Frame", "AegisCourierReader", well)
+    r:SetPoint("TOPLEFT", well, "TOPLEFT", LIST_PAD, -LIST_PAD)
+    r:SetPoint("BOTTOMRIGHT", well, "BOTTOMRIGHT", -LIST_PAD, LIST_PAD)
+    r:Hide()
+    ui.reader = r
+
+    local back = CreateFrame("Button", "AegisCourierReaderBack", r,
+        "UIPanelButtonTemplate")
+    back:SetWidth(60)
+    back:SetHeight(19)
+    back:SetPoint("TOPLEFT", r, "TOPLEFT", 2, -2)
+    back:SetText("Back")
+    back:SetScript("OnClick", function() ui.CloseReader() end)
+    ui.readerBack = back
+
+    local from = Label(r, "GameFontNormal", C.gold)
+    from:SetPoint("LEFT", back, "RIGHT", 8, 0)
+    ui.readerFrom = from
+
+    local expire = Label(r, "GameFontNormalSmall", C.dim)
+    expire:SetPoint("TOPRIGHT", r, "TOPRIGHT", -4, -6)
+    ui.readerExpire = expire
+
+    local subject = Label(r, "GameFontNormal", C.text)
+    subject:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -26)
+    ui.readerSubject = subject
+
+    -- Attachment strip: icon, name, and the money the mail carries.
+    local icon = r:CreateTexture(nil, "ARTWORK")
+    icon:SetWidth(20)
+    icon:SetHeight(20)
+    icon:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -46)
+    ui.readerIcon = icon
+
+    local attach = Label(r, "GameFontNormalSmall", C.text)
+    attach:SetPoint("LEFT", icon, "RIGHT", 6, 0)
+    ui.readerAttach = attach
+
+    local money = Label(r, "GameFontNormalSmall", C.gold)
+    money:SetPoint("TOPRIGHT", r, "TOPRIGHT", -4, -48)
+    ui.readerMoney = money
+
+    -- Body. A real ScrollFrame, NOT a FauxScrollFrame: this scrolls one long
+    -- FontString rather than recycling rows, which is what FrameXML's own
+    -- OpenMailScrollFrame does -- and it sidesteps the mutual recursion that
+    -- FauxScrollFrame update functions have to be guarded against.
+    local bodyWell = CreateFrame("Frame", nil, r)
+    bodyWell:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -70)
+    bodyWell:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, 26)
+    Backdrop(bodyWell, C.well, true)
+    ui.readerBodyWell = bodyWell
+
+    local scroll = CreateFrame("ScrollFrame", "AegisCourierReaderScroll",
+        bodyWell, "UIPanelScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 6, -6)
+    scroll:SetPoint("BOTTOMRIGHT", bodyWell, "BOTTOMRIGHT", -26, 6)
+    ui.readerScroll = scroll
+
+    local child = CreateFrame("Frame", nil, scroll)
+    child:SetWidth(WIN_W - 90)
+    child:SetHeight(1)
+    scroll:SetScrollChild(child)
+    ui.readerBodyChild = child
+
+    local body = Label(child, "GameFontHighlightSmall", C.text)
+    body:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
+    body:SetWidth(WIN_W - 96)
+    body:SetJustifyH("LEFT")
+    body:SetJustifyV("TOP")
+    ui.readerBody = body
+
+    -- Shown instead of the body for loaded mail, until the player accepts the
+    -- three-day cost. The warning is on the button's own line so it cannot be
+    -- missed by someone who clicks first and reads second.
+    local reveal = CreateFrame("Button", "AegisCourierReaderReveal", r,
+        "UIPanelButtonTemplate")
+    reveal:SetWidth(110)
+    reveal:SetHeight(21)
+    reveal:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 8, -8)
+    reveal:SetText("Read message")
+    reveal:SetScript("OnClick", function()
+        ui.readerWantBody = true
+        ui.RefreshReader()
+    end)
+    ui.readerReveal = reveal
+
+    local warn = Label(r, "GameFontNormalSmall", C.amber)
+    warn:SetPoint("TOPLEFT", reveal, "BOTTOMLEFT", 0, -6)
+    warn:SetWidth(WIN_W - 110)
+    warn:SetJustifyH("LEFT")
+    warn:SetText("This mail still holds something. Opening it starts the " ..
+        "three-day expiry the game applies to read mail with attachments.")
+    ui.readerWarn = warn
+
+    local takeBtn = CreateFrame("Button", "AegisCourierReaderTake", r,
+        "UIPanelButtonTemplate")
+    takeBtn:SetWidth(70)
+    takeBtn:SetHeight(20)
+    takeBtn:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 2)
+    takeBtn:SetText("Take")
+    takeBtn:SetScript("OnClick", function()
+        if not ui.readerIndex then return end
+        A.take.Single(ui.readerIndex)
+    end)
+    ui.readerTake = takeBtn
+
+    local retBtn = CreateFrame("Button", "AegisCourierReaderReturn", r,
+        "UIPanelButtonTemplate")
+    retBtn:SetWidth(70)
+    retBtn:SetHeight(20)
+    retBtn:SetPoint("LEFT", takeBtn, "RIGHT", 6, 0)
+    retBtn:SetText("Return")
+    retBtn:SetScript("OnClick", function()
+        local idx = ui.readerIndex
+        -- Returning removes the mail, so there is nothing left to look at.
+        ui.CloseReader()
+        ui.ReturnMail(idx)
+    end)
+    ui.readerReturn = retBtn
+
+    local status = Label(r, "GameFontNormalSmall", C.dim)
+    status:SetPoint("LEFT", retBtn, "RIGHT", 10, 0)
+    ui.readerStatus = status
+end
+
+-- Open the reader on an ABSOLUTE inbox index.
+--
+-- Refused during a take run: the run deletes mail, and every delete shifts
+-- every later index down one, so a held index would quietly start pointing at
+-- a different mail.
+function ui.OpenReader(index)
+    if not index then return false end
+    if A.take.running then return false end
+    local h = inbox.Header(index)
+    if not h then return false end
+    ui.readerIndex = index
+    -- Remembered so a shifted or replaced mail can be detected rather than
+    -- silently rendered as though it were the one that was clicked.
+    ui.readerSig = h.sender .. "|" .. h.subject
+    ui.readerWantBody = inbox.ReadIsFree(h)
+    ui.RefreshInbox()
+    return true
+end
+
+function ui.CloseReader()
+    ui.readerIndex = nil
+    ui.readerSig = nil
+    ui.readerWantBody = nil
+    ui.RefreshInbox()
+end
+
+function ui.ReaderOpen()
+    return ui.readerIndex ~= nil
+end
+
+-- Paint the reader. Returns false if the mail it was showing is gone or has
+-- been replaced by a different one, in which case the caller drops back to the
+-- list rather than displaying the wrong mail.
+function ui.RefreshReader()
+    local idx = ui.readerIndex
+    if not idx then return false end
+
+    local h = inbox.Header(idx)
+    if not h then return false end
+    if ui.readerSig and (h.sender .. "|" .. h.subject) ~= ui.readerSig then
+        return false
+    end
+
+    ui.readerFrom:SetText(h.sender)
+    ui.readerExpire:SetText(util.FormatDaysLeft(h.daysLeft) .. " left")
+
+    local subject = h.subject
+    if h.auctionKind then
+        subject = "|cffffd700[" .. h.auctionKind .. "]|r " ..
+            (h.auctionItem or h.subject)
+    elseif h.fromAuctionHouse then
+        subject = "|cffb0904f[AH]|r " .. subject
+    end
+    if h.wasReturned then
+        subject = "|cffd08050[returned]|r " .. subject
+    end
+    ui.readerSubject:SetText(subject)
+
+    -- Attachment. There is no GetInboxItemLink on 1.12, so this is a name, a
+    -- count and a texture -- never a link, and never an itemID.
+    if h.hasItem then
+        local item = inbox.Item(idx)
+        ui.readerIcon:SetTexture(item and item.texture or inbox.Icon(h))
+        ui.readerIcon:Show()
+        local label = item and item.name or "attachment"
+        if item and item.count and item.count > 1 then
+            label = label .. " x" .. item.count
+        end
+        ui.readerAttach:SetText(label)
+    else
+        ui.readerIcon:Hide()
+        ui.readerAttach:SetText("")
+    end
+
+    if h.cod > 0 then
+        ui.readerMoney:SetText("|cffd05050COD " ..
+            util.FormatMoney(h.cod, false) .. "|r")
+    elseif h.money > 0 then
+        ui.readerMoney:SetText(util.FormatMoney(h.money, true))
+    else
+        ui.readerMoney:SetText("")
+    end
+
+    -- Body, under the expiry rule at the top of this section.
+    if ui.readerWantBody then
+        ui.readerReveal:Hide()
+        ui.readerWarn:Hide()
+        local b = inbox.Body(idx)
+        local text = b and b.text
+        if b and b.invoice then
+            text = ui.InvoiceText(b.invoice) .. (text and ("\n\n" .. text) or "")
+        end
+        -- A nil body is NOT "no message": on the first read the client has to
+        -- ask the server for it and fires MAIL_INBOX_UPDATE when it lands, so
+        -- the next refresh fills this in.
+        ui.readerBody:SetText(text or "|cff808080Loading...|r")
+        ui.readerBody:Show()
+        ui.readerScroll:Show()
+        if ui.readerBodyChild.SetHeight then
+            ui.readerBodyChild:SetHeight(200)
+        end
+    else
+        ui.readerReveal:Show()
+        ui.readerWarn:Show()
+        ui.readerBody:SetText("")
+        ui.readerBody:Hide()
+        ui.readerScroll:Hide()
+    end
+
+    -- Actions. Take is refused for COD and GM mail everywhere in this addon,
+    -- so the button is not offered rather than offered and rejected.
+    local canTake = (h.money > 0 or h.hasItem) and h.cod == 0 and not h.isGM
+        and not A.take.running
+    if canTake then ui.readerTake:Show() else ui.readerTake:Hide() end
+
+    if h.canReply and not h.isGM and not A.take.running then
+        ui.readerReturn:Show()
+    else
+        ui.readerReturn:Hide()
+    end
+
+    if h.cod > 0 then
+        ui.readerStatus:SetText("COD mail is never collected automatically.")
+    elseif h.isGM then
+        ui.readerStatus:SetText("GM mail is never collected automatically.")
+    else
+        ui.readerStatus:SetText("")
+    end
+
+    return true
+end
+
+-- Render an auction invoice as text. Turtle takes a 5% consignment cut, and
+-- the invoice reports it directly, so this shows the server's own numbers
+-- rather than deriving them.
+function ui.InvoiceText(inv)
+    local lines = "|cffffd700Auction invoice|r"
+    if inv.item then lines = lines .. "\n" .. inv.item end
+    if inv.who then lines = lines .. "\nwith: " .. inv.who end
+    if inv.kind == "seller" then
+        lines = lines .. "\nsale price: " .. util.FormatMoney(inv.bid, true)
+        if inv.consignment and inv.consignment > 0 then
+            lines = lines .. "\nhouse cut: " ..
+                util.FormatMoney(inv.consignment, true)
+        end
+        if inv.deposit and inv.deposit > 0 then
+            lines = lines .. "\ndeposit returned: " ..
+                util.FormatMoney(inv.deposit, true)
+        end
+    else
+        lines = lines .. "\nprice: " .. util.FormatMoney(inv.bid, true)
+    end
+    return lines
 end
 
 -- Enable/disable the action bar for the current state. Called by the take
@@ -466,8 +825,6 @@ function ui.OnTakeStateChanged()
 
     SetEnabled(ui.btnOpenAll,
         atMailbox and not running and take.HasWork(take.MODE_OPEN))
-    SetEnabled(ui.btnTakeAll,
-        atMailbox and not running and take.HasWork(take.MODE_TAKE))
     SetEnabled(ui.btnDeleteRead,
         atMailbox and not running and take.HasWork(take.MODE_DELETE))
     SetEnabled(ui.btnStop, running)
@@ -503,11 +860,47 @@ end
 -- outer pass reads the (already-clamped) offset immediately after
 -- FauxScrollFrame_Update, so the paint stays correct. RefreshLog and
 -- RefreshLedger carry the same guard for the same reason.
+-- Clear the list out of the way so the reader can have the well. The rows are
+-- reused rather than destroyed, so this is just visibility.
+function ui.HideInboxRows()
+    local i = 1
+    while i <= ROWS do
+        local row = ui.inboxRows[i]
+        if row then
+            row.ret:Hide()
+            row:Hide()
+        end
+        i = i + 1
+    end
+    if ui.inboxScroll then ui.inboxScroll:Hide() end
+end
+
 function ui.RefreshInbox()
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.selectedSubTab ~= "Inbox" then return end
     if ui.inboxRefreshing then return end
     ui.inboxRefreshing = true
+
+    -- The reader occupies the same well as the list, so exactly one of them is
+    -- painted. A take run closes it: the run deletes mail and every delete
+    -- shifts the later indices down, so a held index stops meaning what it
+    -- meant when it was clicked.
+    if ui.readerIndex and A.take.running then ui.CloseReader() end
+    if ui.readerIndex then
+        if ui.RefreshReader() then
+            ui.HideInboxRows()
+            ui.reader:Show()
+            ui.inboxRefreshing = false
+            return
+        end
+        -- The mail went away or a different one slid into its index; fall
+        -- through and repaint the list rather than show the wrong mail.
+        ui.readerIndex = nil
+        ui.readerSig = nil
+        ui.readerWantBody = nil
+    end
+    if ui.reader then ui.reader:Hide() end
+    if ui.inboxScroll then ui.inboxScroll:Show() end
 
     local mails = inbox.All()
     local total = table.getn(mails)
@@ -682,9 +1075,26 @@ function ui.BuildSendPanel()
     acBtn:SetWidth(16)
     acBtn:SetHeight(16)
     acBtn:SetPoint("LEFT", toBox, "RIGHT", 4, 0)
-    acBtn:SetNormalTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Up")
-    acBtn:SetPushedTexture("Interface\\ChatFrame\\UI-ChatIcon-ScrollDown-Down")
-    acBtn:SetHighlightTexture("Interface\\Buttons\\UI-Common-MouseHilight")
+    -- Scrollbar art, deliberately: every FauxScrollFrame in FrameXML uses these
+    -- three files, so they are certain to exist on any 1.12 client. The
+    -- previous choice drew from Interface\ChatFrame and rendered as nothing.
+    acBtn:SetNormalTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Up")
+    acBtn:SetPushedTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Down")
+    acBtn:SetHighlightTexture(
+        "Interface\\Buttons\\UI-ScrollBar-ScrollDownButton-Highlight")
+    -- Opt out of the pfUI skin. SkinButton replaces a button's textures with a
+    -- flat backdrop and border, which on an ICON button erases the icon and
+    -- leaves a small empty box sitting next to the recipient field -- reported,
+    -- reasonably, as "a random box that does nothing".
+    acBtn.courierNoSkin = true
+    acBtn:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(acBtn, "ANCHOR_RIGHT")
+        GameTooltip:SetText("Recent recipients")
+        GameTooltip:Show()
+    end)
+    acBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
     ui.sendAutoButton = acBtn
 
     -- ---- subject --------------------------------------------------------
@@ -893,13 +1303,42 @@ function ui.UpdateAutoComplete(showAll)
         return
     end
 
-    local names = db.MatchContacts(typed, AUTOCOMPLETE_ROWS)
+    -- THE BUTTON MEANS "SHOW ME EVERYONE", so it must not filter by whatever
+    -- is already in the box. It used to pass the typed text through here like
+    -- the typing path does, which meant clicking it with a complete name
+    -- already typed matched exactly one contact -- itself -- and then the
+    -- exact-match rule below hid the list again. The button appeared to do
+    -- nothing at all, which is exactly how it was reported.
+    local names = db.MatchContacts(showAll and "" or typed, AUTOCOMPLETE_ROWS)
     local n = table.getn(names)
 
-    -- An exact single match is not a suggestion worth showing.
-    if n == 0 or (n == 1 and names[1] == typed) then
-        ac:Hide()
-        return
+    if showAll then
+        -- The button must always visibly respond, so an empty contact list
+        -- says so rather than silently doing nothing -- the same complaint in
+        -- a different disguise.
+        if n == 0 then
+            local row = ui.sendAutoRows[1]
+            row.name = nil
+            row.label:SetText("|cff808080no saved recipients yet|r")
+            row:Show()
+            local j = 2
+            while j <= AUTOCOMPLETE_ROWS do
+                ui.sendAutoRows[j].name = nil
+                ui.sendAutoRows[j]:Hide()
+                j = j + 1
+            end
+            ac:SetHeight(24)
+            ac:Show()
+            return
+        end
+    else
+        -- An exact single match is not a suggestion worth showing. This is a
+        -- TYPING rule only: it must never apply to the button, or the button
+        -- goes dead the moment a full name is in the box.
+        if n == 0 or (n == 1 and names[1] == typed) then
+            ac:Hide()
+            return
+        end
     end
 
     local i = 1
@@ -977,7 +1416,13 @@ function ui.RefreshSend()
         end
     end
 
-    local ok, why = send.Validate(ui.sendTo:GetText(), money, isCOD)
+    -- Subject and body MUST be passed: they are half of what makes a mail
+    -- sendable, and this is the call that decides whether the Send button is
+    -- clickable at all. Omitting them greys the button out for every letter --
+    -- which is precisely the "cannot send without an item" bug, still live
+    -- after send.Start's own Validate call had been fixed.
+    local ok, why = send.Validate(ui.sendTo:GetText(), money, isCOD,
+        ui.sendSubject:GetText(), ui.sendBody:GetText())
     if send.sending then
         costText = "sending " .. (send.sentCount + 1) .. " of " ..
             send.total .. "..."
@@ -1083,8 +1528,8 @@ function ui.BuildLogPanel()
     ui.logMine = mine
 
     local well = CreateFrame("Frame", nil, panel)
-    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -28)
-    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 26)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -LOG_TOP)
+    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, LOG_BOTTOM)
     Backdrop(well, C.well, true)
     ui.logWell = well
 
@@ -1102,8 +1547,8 @@ function ui.BuildLogPanel()
     while i <= ROWS do
         local row = CreateFrame("Frame", nil, well)
         row:SetHeight(ROW_H)
-        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -4 - (i - 1) * ROW_H)
-        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
+        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -LIST_PAD - (i - 1) * ROW_H)
 
         local when = Label(row, "GameFontNormalSmall", C.dim)
         when:SetPoint("LEFT", row, "LEFT", 0, 0)
@@ -1280,8 +1725,8 @@ function ui.BuildLedgerPanel()
     ui.ledgerTotals = totals
 
     local well = CreateFrame("Frame", nil, panel)
-    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -22)
-    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, 22)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -LEDGER_TOP)
+    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, LEDGER_BOTTOM)
     Backdrop(well, C.well, true)
     ui.ledgerWell = well
 
@@ -1299,8 +1744,8 @@ function ui.BuildLedgerPanel()
     while i <= ROWS do
         local row = CreateFrame("Frame", nil, well)
         row:SetHeight(ROW_H)
-        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -4 - (i - 1) * ROW_H)
-        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -4 - (i - 1) * ROW_H)
+        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -LIST_PAD - (i - 1) * ROW_H)
 
         local when = Label(row, "GameFontNormalSmall", C.dim)
         when:SetPoint("LEFT", row, "LEFT", 0, 0)
@@ -1710,6 +2155,13 @@ A.RegisterEvent("MAIL_SHOW", function()
     -- Starts the take engine's driver: its step clock and the passive
     -- CheckInbox pacing only run while a mailbox is actually open.
     A.take.SetMailboxOpen(true)
+    -- Forget the previous visit's unread count. ui.SettleMailIcon reads it
+    -- after MAIL_CLOSED, when the inbox can no longer be queried; a value
+    -- carried over from a mailbox we emptied last time could otherwise
+    -- authorise hiding a genuine new-mail icon. nil means "do not touch it".
+    A.inbox.lastUnread = nil
+    -- Harvest contacts once per visit rather than per inbox update.
+    if A.send and A.send.HarvestContacts then A.send.HarvestContacts() end
     if not ui.TakeoverActive() then return end
     -- Queue rather than hide inline. Our own MAIL_SHOW handler runs after the
     -- client's IsVisible guard so a synchronous hide would in fact be safe
@@ -1718,7 +2170,10 @@ A.RegisterEvent("MAIL_SHOW", function()
     -- already the one the OnShow hook uses.
     ui.QueueHideBlizzard()
     ui.frame:Show()
-    ui.Refresh()
+    -- Flush rather than Refresh: it paints AND seeds inbox.lastUnread, which
+    -- the nil above just cleared. It also clears any dirty flag left set by an
+    -- update that landed while the driver was hidden.
+    A.inbox.Flush()
 end)
 
 A.RegisterEvent("MAIL_CLOSED", function()
@@ -1727,6 +2182,12 @@ A.RegisterEvent("MAIL_CLOSED", function()
     -- Stops the driver and quietly abandons any run in flight -- walking away
     -- from the mailbox ends the session, so there is nothing left to take.
     A.take.SetMailboxOpen(false)
+    -- The session is gone, so the index the reader was holding means nothing
+    -- now. Drop it here rather than leaving it to be re-read on the next open.
+    ui.readerIndex = nil
+    ui.readerSig = nil
+    ui.readerWantBody = nil
+    if ui.reader then ui.reader:Hide() end
     ui.SettleMailIcon()
     if ui.frame then ui.frame:Hide() end
 end)
@@ -1755,9 +2216,11 @@ function ui.SettleMailIcon()
     if icon and icon.Hide then icon:Hide() end
 end
 
-A.RegisterEvent("MAIL_INBOX_UPDATE", function()
-    ui.Refresh()
-end)
+-- MAIL_INBOX_UPDATE deliberately has NO handler here. The repaint is driven
+-- by inbox.Flush, which the take engine's OnUpdate driver runs at most once
+-- per frame -- see the "Coalesced refresh" note in core/inbox.lua. Repainting
+-- inside the event storms a first mailbox open produces was what froze the
+-- client on a large inbox.
 
 -- ---------------------------------------------------------------------------
 -- Slash command

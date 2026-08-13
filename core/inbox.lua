@@ -115,6 +115,17 @@ function inbox.NumItems()
     return GetInboxNumItems() or 0
 end
 
+-- NOTE ON CACHING. A single flush still reads every header about five times
+-- over (UnreadCount, HasWork x3, All, Summary). Memoising those within one
+-- flush was tried and DELIBERATELY NOT SHIPPED: the measured saving was small
+-- next to the coalescing below (which removes 99.8% of the work in the
+-- harness's 200-event storm -- 169,200 header reads down to 282), and
+-- a header memo is precisely the kind of stale mail state this addon's
+-- correctness depends on never trusting -- the take engine re-reads after
+-- every action because "I took it, therefore it is empty" is false. If it is
+-- revisited, it must be provably scoped to a read-only flush and never
+-- visible to a mutating path.
+
 -- Read one mail header into a named table.
 --
 -- `index` is ABSOLUTE, 1..inbox.NumItems() -- the 7-per-page layout is a
@@ -227,6 +238,40 @@ function inbox.Summary()
     return total, unread, money
 end
 
+-- ---------------------------------------------------------------------------
+-- Coalesced refresh
+-- ---------------------------------------------------------------------------
+-- MAIL_INBOX_UPDATE does not arrive once per mailbox visit. On a client that
+-- has not yet cached the attached items -- the first open of a session -- it
+-- arrives again and again as each item resolves. Courier used to do FIVE full
+-- inbox walks plus a ten-row repaint inside every one of those events:
+-- measured at 70 mails, that is 352 header reads and ~1,300 subject-pattern
+-- parses PER EVENT, and a 100-event storm ran 130,000 parses. On a 1.12
+-- client that is seconds of frozen frame.
+--
+-- So the events no longer do the work. They raise a flag, and the driver
+-- below flushes AT MOST ONCE PER FRAME, however many events landed in it.
+--
+-- What deliberately stays per-event is the take engine's arming: that is the
+-- server's acknowledgement clock, one Step per confirmation, and coalescing
+-- it would drop steps.
+inbox.dirty = false
+
+function inbox.MarkDirty()
+    inbox.dirty = true
+end
+
+-- Run the once-per-frame work: refresh the unread count and repaint the
+-- window. Reads only -- nothing here mutates mail. inbox.lastUnread is
+-- refreshed here because MAIL_CLOSED arrives after the session has gone and
+-- the inbox cannot be read from there; ui.SettleMailIcon needs the last value
+-- we were able to see.
+function inbox.Flush()
+    inbox.dirty = false
+    inbox.lastUnread = inbox.UnreadCount()
+    if A.ui and A.ui.Refresh then A.ui.Refresh() end
+end
+
 -- Mark a mail READ on the server.
 --
 -- There is no "mark read" call on 1.12: GetInboxText(index) is what does it,
@@ -240,6 +285,70 @@ end
 -- TurtleMail follows.
 function inbox.MarkRead(index)
     if GetInboxText then GetInboxText(index) end
+end
+
+-- Does reading this mail cost the player anything?
+--
+-- GetInboxText marks a mail read, and on mail that still holds money or an
+-- item it ALSO drops the expiry to three days. On a mail holding nothing there
+-- is nothing left to lose -- the three-day clock applies to the attachments,
+-- and clearing the unread flag is what the player wants anyway. So an empty
+-- mail can be opened freely and a loaded one only on request.
+--
+-- COD counts as loaded: the attachment is still there, it just has a price on
+-- it, and shortening the window to pay is a real cost.
+function inbox.ReadIsFree(h)
+    if not h then return false end
+    if h.money > 0 then return false end
+    if h.cod > 0 then return false end
+    if h.hasItem then return false end
+    return true
+end
+
+-- Fetch a mail's body.
+--
+-- THIS MARKS THE MAIL READ and, on mail that still holds attachments, drops
+-- its expiry to three days -- see inbox.ReadIsFree. Call it only when the
+-- player has asked for this specific mail. Never from a refresh, a list paint,
+-- or anything that runs on an event.
+--
+-- Returns nil for a bad index, otherwise a table:
+--   text     -- the body. NIL is normal on the first call: the client asks the
+--               server for it and fires MAIL_INBOX_UPDATE when it lands, so a
+--               caller should re-read rather than render "no message".
+--   texture  -- stationery
+--   takeable -- the client's own "there is something to take here" flag
+--   invoice  -- auction invoice detail when this mail is one, else nil
+function inbox.Body(index)
+    if not GetInboxText then return nil end
+    local text, texture, takeable = GetInboxText(index)
+    local out = {
+        text     = text,
+        texture  = texture,
+        takeable = takeable and true or false,
+    }
+    -- The 1.12 GetInboxText is documented with a fourth `isInvoice` return, but
+    -- builds disagree about it and Turtle is a custom build -- so do not gate
+    -- on it. Ask for the invoice outright and let a nil answer settle the
+    -- question. Ordering matters: FrameXML only reads invoice data after the
+    -- body, and so do we.
+    if GetInboxInvoiceInfo then
+        local kind, item, who, bid, buyout, deposit, consignment =
+            GetInboxInvoiceInfo(index)
+        if kind then
+            out.invoice = {
+                kind        = kind,          -- "buyer" / "seller" / ...
+                item        = item,
+                -- nil when several players were involved, per the API.
+                who         = who,
+                bid         = bid or 0,
+                buyout      = buyout or 0,
+                deposit     = deposit or 0,
+                consignment = consignment or 0,
+            }
+        end
+    end
+    return out
 end
 
 -- How many mails are still unread. Tracked while the mailbox is open so the
@@ -289,8 +398,21 @@ local take = A.take
 --   "take"   -- take money + item, KEEP the mail. TurtleMail has no equivalent.
 --   "delete" -- delete read mail that is already empty. Takes nothing.
 take.MODE_OPEN   = "open"
-take.MODE_TAKE   = "take"
 take.MODE_DELETE = "delete"
+
+-- NOT DEAD CODE, but NO LONGER REACHABLE FROM THE UI.
+--
+-- MODE_TAKE had a "Take All" button until it was removed: emptying every mail
+-- while keeping it is a thing almost nobody wanted, and it was the mode worst
+-- hit by the clock bug (see take.Advance) -- its final step per mail issues no
+-- server call, so the run stalled after the first mail, every time.
+--
+-- The mode itself stays because it is the only way to observe an EMPTIED mail
+-- that is still in the inbox, which is how a large part of tests/harness.lua
+-- inspects what a run actually did -- "open" deletes the evidence. Removing it
+-- would mean rewriting those assertions to be weaker. If a caller is ever
+-- added back, note it inherits the same self-clocking requirement.
+take.MODE_TAKE   = "take"
 
 -- Give up on an index after this many steps with no observable progress, so a
 -- mail the server will not hand over can never wedge the run in a tight loop.
@@ -532,6 +654,21 @@ function take.LogSnapshot()
     return A.db.LogAdd("received", snap)
 end
 
+-- Move to the next mail WITHOUT touching the server.
+--
+-- THE RUN'S CLOCK INVARIANT: every take.Step must either issue exactly one
+-- server call -- and then wait for MAIL_INBOX_UPDATE to arm the next step --
+-- or arm itself. There is no third option. take.armed is set by nothing but
+-- that event, and the server only sends it after an operation it actually
+-- performed, so a step that skips a mail produces no acknowledgement and
+-- nothing would ever wake the engine again.
+--
+-- Every skip funnels through here (COD/GM mail, the wedge guard giving up, a
+-- delete-read pass over mail that is not empty-and-read, and the terminal step
+-- of a "take" that keeps the mail), so this is the one place that has to
+-- re-arm. Leaving it out hung the run mid-inbox with take.running still true:
+-- Open All stopped dead at the first COD mail and left everything after it
+-- uncollected, and only the Stop button got the user out.
 function take.Advance()
     take.index = take.index + 1
     take.attempts = 0
@@ -540,6 +677,10 @@ function take.Advance()
     -- Moving on without emptying the mail: drop the snapshot rather than log
     -- a collection that did not happen.
     take.logSnap = nil
+    -- Self-clock: no server call was made, so no confirmation is coming.
+    -- Advance always increases the index, so this cannot spin -- it walks to
+    -- index > NumItems() and Finish() ends the run.
+    if take.running then take.armed = true end
 end
 
 -- ---------------------------------------------------------------------------
@@ -569,6 +710,7 @@ function take.Stop(quiet)
     take.Confirm()
     take.running = false
     take.pending = nil
+    inbox.Flush()
     if not quiet then take.Report() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
 end
@@ -576,7 +718,12 @@ end
 function take.Finish()
     take.running = false
     take.pending = nil
+    -- The inbox just changed shape for the last time; refresh now so
+    -- inbox.lastUnread is current if the user closes the mailbox immediately
+    -- (ui.SettleMailIcon reads it after the session is already gone).
+    inbox.Flush()
     take.Report()
+    if A.send and A.send.HarvestContacts then A.send.HarvestContacts() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
 end
 
@@ -653,6 +800,13 @@ driver:SetScript("OnUpdate", function()
         end
     end
 
+    -- Coalesced refresh: one flush per frame at most, no matter how many
+    -- MAIL_INBOX_UPDATE events landed in it. Runs during a take run too --
+    -- the list has to repaint as mail disappears.
+    if inbox.dirty then
+        inbox.Flush()
+    end
+
     if take.running then return end
 
     ticks = ticks + 1
@@ -679,10 +833,11 @@ end
 -- The server finished a mailbox operation: arm the next step. This is the
 -- clock -- not a timer.
 A.RegisterEvent("MAIL_INBOX_UPDATE", function()
+    -- Per-event, deliberately: this is the server's acknowledgement clock for
+    -- the take engine and must stay one Step per confirmation.
     if take.running then take.armed = true end
-    -- Remember this while we still can: MAIL_CLOSED arrives after the session
-    -- has gone, and the inbox cannot be read from there.
-    inbox.lastUnread = inbox.UnreadCount()
+    -- Everything else waits for the driver's once-per-frame flush.
+    inbox.MarkDirty()
 end)
 
 -- Error handling, following TurtleMail's split: a full bag is fatal to the
@@ -694,8 +849,10 @@ A.RegisterEvent("UI_ERROR_MESSAGE", function(evt, message)
         take.Stop()
     elseif message == ERR_ITEM_MAX_COUNT then
         -- Cannot carry more of this ONE item; step over it and continue.
+        -- Advance re-arms (see the clock invariant on take.Advance) -- this
+        -- path is where that requirement was originally spotted, and it was
+        -- the only place that honoured it.
         take.pending = nil
         take.Advance()
-        take.armed = true
     end
 end)
