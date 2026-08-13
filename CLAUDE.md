@@ -406,6 +406,10 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       harness; 1.12 does not clip children, it just draws over the border.
 - [ ] Batch sends verify `GetSendMailItem()` before `SendMail`; postage
       multiplied per mail; gold only on the first mail.
+- [ ] A rule the UI *gates a button on* is asserted against the **button**, not
+      only against the function. `send.Validate` is called twice — once by
+      `send.Start` and once by `ui.RefreshSend` to enable the Send button — and
+      fixing only the first left the button greyed and the bug alive.
 - [ ] `lua5.1 tests/harness.lua` passes.
 - [ ] DB touched only after `ADDON_LOADED` for `"Aegis_Courier"`.
 - [ ] No read or write of `AegisExchangeDB`; integration goes through

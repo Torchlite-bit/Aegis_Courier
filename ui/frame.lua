@@ -1416,7 +1416,13 @@ function ui.RefreshSend()
         end
     end
 
-    local ok, why = send.Validate(ui.sendTo:GetText(), money, isCOD)
+    -- Subject and body MUST be passed: they are half of what makes a mail
+    -- sendable, and this is the call that decides whether the Send button is
+    -- clickable at all. Omitting them greys the button out for every letter --
+    -- which is precisely the "cannot send without an item" bug, still live
+    -- after send.Start's own Validate call had been fixed.
+    local ok, why = send.Validate(ui.sendTo:GetText(), money, isCOD,
+        ui.sendSubject:GetText(), ui.sendBody:GetText())
     if send.sending then
         costText = "sending " .. (send.sentCount + 1) .. " of " ..
             send.total .. "..."

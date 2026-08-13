@@ -1421,6 +1421,56 @@ check(A.version == tocVersion,
       "A.version agrees with the .toc",
       tostring(A.version) .. " vs " .. tostring(tocVersion))
 
+print("== send UI: the Send BUTTON is clickable for a letter ==")
+-- The assertion that was missing when "cannot send without an item" was first
+-- fixed. send.Validate and send.Start were both corrected and tested, but
+-- ui.RefreshSend calls Validate a SECOND time to decide whether the button is
+-- clickable at all -- and it was still passing no subject and no body, so the
+-- button stayed greyed and the bug survived the fix untouched.
+--
+-- Testing the engine is not testing the button. This asserts the thing the
+-- player actually has to be able to press.
+A.ui.SelectSubTab("Send")
+A.send.ClearAttachments()
+A.ui.sendCOD:SetChecked(false)
+A.ui.sendCODAll:SetChecked(false)
+A.ui.sendMoney:SetText("")
+A.ui.sendTo:SetText("")
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == false, "an empty form cannot be sent")
+
+A.ui.sendTo:SetText("Subtilizer")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == false, "a recipient alone is not enough")
+
+A.ui.sendSubject:SetText("test")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == true,
+      "recipient + subject, no attachment: the button is LIVE")
+
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("hi")
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled() == true,
+      "recipient + body, no attachment: also live")
+
+-- And pressing it actually sends, rather than merely being enabled.
+SENT = {}
+A.ui.sendSubject:SetText("test")
+A.ui.RefreshSend()
+A.ui.btnSend.scripts.OnClick()
+pumpSend()
+check(table.getn(SENT) == 1, "clicking Send posts the letter", table.getn(SENT))
+check(SENT[1].to == "Subtilizer", "to the right person", SENT[1].to)
+check(SENT[1].item == nil, "with nothing attached", tostring(SENT[1].item))
+
+A.ui.sendTo:SetText("")
+A.ui.sendSubject:SetText("")
+A.ui.sendBody:SetText("")
+A.ui.RefreshSend()
+
 print("== send UI: COD-all is greyed until COD is checked ==")
 A.ui.sendCOD:SetChecked(false)
 A.ui.sendCODAll:SetChecked(true)     -- stale state from a previous send

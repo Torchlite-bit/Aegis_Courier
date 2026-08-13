@@ -36,6 +36,11 @@ at the first COD mail. `/reload`.
   "almost always a mistake". That was simply wrong — writing to someone is the
   most ordinary use of a mailbox there is. A subject or a body is now enough.
   Only a mail with genuinely nothing in it is still refused.
+  - The validation rule is asked twice: once when you press Send, and once to
+    decide whether the Send button is pressable at all. Only the first was
+    fixed to begin with, so the button stayed greyed out and the bug survived
+    its own fix. Both now agree, and the suite asserts on the **button**, not
+    just on the rule behind it.
 - **The little button beside the recipient box did nothing.** Two separate
   faults. It filtered the contact list by whatever was already typed, so
   clicking it with a complete name in the box matched exactly one contact —
