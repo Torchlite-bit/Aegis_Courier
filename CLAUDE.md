@@ -150,37 +150,64 @@ section, which is Courier's equivalent hazard surface.
     - Return is gated on **`canReply`** (header field 12) — the same flag
       FrameXML uses to enable its own Reply button. Auction-house and system
       mail have it unset and genuinely cannot be returned.
-16. **A progress guard must measure CHANGE, not attempts.** Because the delete
+16. **EVERY `take.Step` must either issue exactly ONE server call or re-arm
+    itself.** There is no third option. `take.armed` is set by nothing but
+    `MAIL_INBOX_UPDATE`, and the server only sends that after an operation it
+    actually performed — so a step that *skips* a mail produces no
+    acknowledgement and nothing ever wakes the engine again. The run hangs
+    mid-inbox with `take.running` still true and only the Stop button gets the
+    user out.
+    - Every skip funnels through `take.Advance`, which is therefore the one
+      place that re-arms. Skips are: COD/GM mail, the wedge guard giving up,
+      a delete-read pass over mail that is not empty-and-read, and the terminal
+      step of a "take" that keeps the mail.
+    - This shipped broken: **Open All stopped dead at the first COD mail** and
+      left everything behind it uncollected.
+    - **A test pump that fires `MAIL_INBOX_UPDATE` unconditionally cannot see
+      this.** The harness pump must fire it only after a real mutation call
+      (`serverCalls`), or it hand-feeds the engine a clock the client would
+      never provide. 388 checks passed over this stall.
+17. **A progress guard must measure CHANGE, not attempts.** Because the delete
     path deliberately does not advance, a raw per-index action counter climbs
     straight through healthy mail and eventually skips a live one. Compare a
     signature of what is at the index (`index|subject|money|hasItem`) and reset
     the counter whenever it moves. See `take.Step`.
-17. **`GetInboxText(index)` is the ONLY way to mark a mail read.** There is no
+18. **`GetInboxText(index)` is the ONLY way to mark a mail read.** There is no
     separate call; reading the body is what clears the server's unread state.
     Skip it and mail stays unread forever, which leaves the minimap's unread
     icon lit and makes "Delete Read" permanently find nothing.
     - **Side effect:** reading a mail that still holds attachments drops its
       expiry to three days. So call it only on mail being actively emptied,
       never on mail merely displayed. See `inbox.MarkRead`.
+    - **The reader obeys the same rule**, which is why it does not simply fetch
+      a body when a row is clicked. `inbox.ReadIsFree` splits the two cases:
+      mail holding nothing has no expiry left to lose, so it opens and reads at
+      once; mail still holding money, an item or a COD shows its header detail
+      (all free, from `GetInboxHeaderInfo`) and puts the body behind an
+      explicit button that states the three-day cost. Never "improve" this by
+      auto-fetching — it silently burns the player's expiry window.
+    - `inbox.Body` returning a **nil `text` is normal**, not an empty message:
+      the client asks the server for it and fires `MAIL_INBOX_UPDATE` when it
+      lands. Render a loading state and let the next refresh fill it in.
     - The icon itself tracks `HasNewMail()`, which the client does **not**
       re-evaluate just because the inbox was emptied. Take it down explicitly
       when the mailbox closes with nothing unread (`ui.SettleMailIcon`), the
       same workaround Postal uses.
-18. **Ledger entries are finalized on COLLECTION, never on arrival**, and the
+19. **Ledger entries are finalized on COLLECTION, never on arrival**, and the
     check fails **closed**: credit money only when it has verifiably left the
     mail. This also *is* the dedupe — an emptied mail has nothing left to book,
     so Courier needs no mail fingerprint. Do not add one; see
     `docs/turtlemail-audit.md`, "Note on mail identity".
-19. **Only `sold` mail books income.** `Outbid on %s` mail carries money too —
+20. **Only `sold` mail books income.** `Outbid on %s` mail carries money too —
     the player's own returned bid — and booking it as a sale inflates every
     total the addon reports. `won` / `expired` / `cancelled` carry no price at
     all.
-20. **COD and GM mail are never taken automatically**, in any mode, and this is
+21. **COD and GM mail are never taken automatically**, in any mode, and this is
     not a user setting. Paying a COD by accident is unrecoverable.
 
 ### Sending mail (1.12)
 
-21. **Vanilla mail carries exactly ONE attachment.** There is a single slot and
+22. **Vanilla mail carries exactly ONE attachment.** There is a single slot and
     a single `GetSendMailItem()`. "Mail 12 items at once" is therefore **12
     separate mails**, sent back to back and clocked by `MAIL_SEND_SUCCESS` —
     not a bigger slot. Postage is charged **per mail**, so any cost preview
@@ -194,16 +221,16 @@ section, which is Courier's equivalent hazard surface.
       long batch is capped by unrelated earlier hiccups.
     - Leave the next mail a moment after the server's acknowledgement rather
       than firing on the very next OnUpdate frame (`send.SETTLE`).
-22. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
+23. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
     *that* something is held, never *what*. The only way to identify a dragged
     item is to remember where it came from: save-and-replace
     `PickupContainerItem` / `SplitContainerItem` and record the bag+slot. See
     `send.InstallHooks`.
-23. **Verify the attach landed before calling `SendMail`.** `GetSendMailItem()`
+24. **Verify the attach landed before calling `SendMail`.** `GetSendMailItem()`
     must be non-nil after `ClickSendMailItemButton()`. If the stack moved, sold
     or is soulbound, the attach silently no-ops and `SendMail` posts an **empty
     mail** while the item stays in the bag.
-24. **The send API is C, not FrameXML**, so it works with `MailFrame` hidden —
+25. **The send API is C, not FrameXML**, so it works with `MailFrame` hidden —
     which is the state the takeover keeps it in. `SendMail`,
     `ClickSendMailItemButton`, `GetSendMailItem`, `SetSendMailMoney`,
     `SetSendMailCOD` and `GetSendMailPrice` are engine-level; only wrappers
@@ -213,14 +240,14 @@ section, which is Courier's equivalent hazard surface.
       `MAIL_SEND_SUCCESS` still runs Blizzard's `SendMailFrame_Reset()`, which
       calls `SetFocus()` on *its* recipient box. Take the keyboard back
       afterwards or the user's next keystroke vanishes into an invisible frame.
-25. **Money rides the FIRST mail of a batch only.** Attaching gold to every
+26. **Money rides the FIRST mail of a batch only.** Attaching gold to every
     mail of a 10-item send would send the gold ten times. COD is a charge to
     the recipient rather than a transfer, so it may legitimately repeat — but
     only when the user asked for that.
 
 ### SavedVariables
 
-26. **SavedVariables are `nil` until `ADDON_LOADED` fires for
+27. **SavedVariables are `nil` until `ADDON_LOADED` fires for
     `"Aegis_Courier"`.** Do all DB setup from the ADDON_LOADED path (queue via
     `AegisCourier.OnLoad(fn)`), never at file scope.
     - `CourierDB` — account-wide (declared `## SavedVariables`).
@@ -228,9 +255,9 @@ section, which is Courier's equivalent hazard surface.
 
 ### Frames & globals
 
-27. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
+28. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
     building `"MailItem" .. n .. "Button"`).
-28. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
+29. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
     `UIPanelButtonTemplate`, `FauxScrollFrameTemplate`, `GameTooltipTemplate`.
     - **`FauxScrollFrame_OnVerticalScroll(itemHeight, updateFn)` — 2 args on
       1.12.** The frame and scroll offset are the implicit globals `this` /
@@ -371,6 +398,12 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       displayed is not.
 - [ ] Nothing walks the inbox or repaints from `MAIL_INBOX_UPDATE` directly —
       it storms; work is coalesced behind `inbox.dirty` / `inbox.Flush`.
+- [ ] Every `take.Step` path issues exactly one server call **or** re-arms via
+      `take.Advance`; the harness pump still clocks off `serverCalls`.
+- [ ] No body is fetched for mail that still holds something without the
+      player asking (`inbox.ReadIsFree`).
+- [ ] List rows still fit their well — `ui.Geometry()` is asserted by the
+      harness; 1.12 does not clip children, it just draws over the border.
 - [ ] Batch sends verify `GetSendMailItem()` before `SendMail`; postage
       multiplied per mail; gold only on the first mail.
 - [ ] `lua5.1 tests/harness.lua` passes.

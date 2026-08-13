@@ -9,6 +9,48 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.1.0]
+
+Adds a mail reader, and fixes a take-engine bug that stopped **Open All** dead
+at the first COD mail. `/reload`.
+
+### Fixed
+- **Open All stopped partway through the mailbox and never finished.** Any mail
+  the engine has to *skip* — COD, GM mail, mail the server refuses, or a
+  Delete Read pass over mail that is not already empty-and-read — was stepped
+  over without asking the server to do anything. But the engine's clock *is*
+  the server's acknowledgement (`MAIL_INBOX_UPDATE`), and no operation means no
+  acknowledgement, so the run simply stopped there with everything behind it
+  uncollected. Only the Stop button got you out. Every skip now re-arms itself.
+- The same bug is why **Take All** never worked: its last step on each mail is
+  a skip, so it stalled after the first mail, every time.
+- **Delete Read** was affected too — it stalled on the first mail that was not
+  already read and empty, which in a normal inbox is almost immediately.
+- **The last row of the inbox list drew over the list border and the hint text
+  underneath it.** The window was a fixed 440px tall, which left the list 20px
+  short of the ten rows it draws, and 1.12 frames do not clip their children.
+  The window height is now derived from the list instead of chosen by eye, so
+  changing the row count resizes the window rather than overflowing it.
+
+### Added
+- **You can read your mail.** Left-click a message to open it: sender, subject,
+  attachment, money, expiry and the body, with Take and Return available from
+  inside. Right-click still takes a mail without opening it, unchanged.
+  Auction-house mail also shows its invoice — sale price, house cut, and the
+  returned deposit.
+- Reading is careful with expiry, because the game is not. The only way to get
+  a message body also marks the mail read, and on mail that **still holds
+  attachments that drops its expiry from 30 days to 3**. So Courier splits the
+  two cases: a mail holding nothing opens and reads immediately, while a mail
+  still holding something shows all its detail at once but keeps the body
+  behind one explicit click that tells you the cost first. No click in the list
+  can ever shorten a mail's life without you choosing it.
+
+### Removed
+- **The Take All button.** It emptied every mail but kept it, and it never
+  worked properly — see the clock bug above. Open All does what people
+  actually wanted and now does it correctly.
+
 ## [1.0.5]
 
 Fixes the multi-second freeze when first opening a large mailbox. `/reload`.

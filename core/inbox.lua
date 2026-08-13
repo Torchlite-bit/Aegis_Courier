@@ -287,6 +287,70 @@ function inbox.MarkRead(index)
     if GetInboxText then GetInboxText(index) end
 end
 
+-- Does reading this mail cost the player anything?
+--
+-- GetInboxText marks a mail read, and on mail that still holds money or an
+-- item it ALSO drops the expiry to three days. On a mail holding nothing there
+-- is nothing left to lose -- the three-day clock applies to the attachments,
+-- and clearing the unread flag is what the player wants anyway. So an empty
+-- mail can be opened freely and a loaded one only on request.
+--
+-- COD counts as loaded: the attachment is still there, it just has a price on
+-- it, and shortening the window to pay is a real cost.
+function inbox.ReadIsFree(h)
+    if not h then return false end
+    if h.money > 0 then return false end
+    if h.cod > 0 then return false end
+    if h.hasItem then return false end
+    return true
+end
+
+-- Fetch a mail's body.
+--
+-- THIS MARKS THE MAIL READ and, on mail that still holds attachments, drops
+-- its expiry to three days -- see inbox.ReadIsFree. Call it only when the
+-- player has asked for this specific mail. Never from a refresh, a list paint,
+-- or anything that runs on an event.
+--
+-- Returns nil for a bad index, otherwise a table:
+--   text     -- the body. NIL is normal on the first call: the client asks the
+--               server for it and fires MAIL_INBOX_UPDATE when it lands, so a
+--               caller should re-read rather than render "no message".
+--   texture  -- stationery
+--   takeable -- the client's own "there is something to take here" flag
+--   invoice  -- auction invoice detail when this mail is one, else nil
+function inbox.Body(index)
+    if not GetInboxText then return nil end
+    local text, texture, takeable = GetInboxText(index)
+    local out = {
+        text     = text,
+        texture  = texture,
+        takeable = takeable and true or false,
+    }
+    -- The 1.12 GetInboxText is documented with a fourth `isInvoice` return, but
+    -- builds disagree about it and Turtle is a custom build -- so do not gate
+    -- on it. Ask for the invoice outright and let a nil answer settle the
+    -- question. Ordering matters: FrameXML only reads invoice data after the
+    -- body, and so do we.
+    if GetInboxInvoiceInfo then
+        local kind, item, who, bid, buyout, deposit, consignment =
+            GetInboxInvoiceInfo(index)
+        if kind then
+            out.invoice = {
+                kind        = kind,          -- "buyer" / "seller" / ...
+                item        = item,
+                -- nil when several players were involved, per the API.
+                who         = who,
+                bid         = bid or 0,
+                buyout      = buyout or 0,
+                deposit     = deposit or 0,
+                consignment = consignment or 0,
+            }
+        end
+    end
+    return out
+end
+
 -- How many mails are still unread. Tracked while the mailbox is open so the
 -- minimap icon can be settled on close, when the inbox is no longer readable.
 inbox.lastUnread = nil
@@ -334,8 +398,21 @@ local take = A.take
 --   "take"   -- take money + item, KEEP the mail. TurtleMail has no equivalent.
 --   "delete" -- delete read mail that is already empty. Takes nothing.
 take.MODE_OPEN   = "open"
-take.MODE_TAKE   = "take"
 take.MODE_DELETE = "delete"
+
+-- NOT DEAD CODE, but NO LONGER REACHABLE FROM THE UI.
+--
+-- MODE_TAKE had a "Take All" button until it was removed: emptying every mail
+-- while keeping it is a thing almost nobody wanted, and it was the mode worst
+-- hit by the clock bug (see take.Advance) -- its final step per mail issues no
+-- server call, so the run stalled after the first mail, every time.
+--
+-- The mode itself stays because it is the only way to observe an EMPTIED mail
+-- that is still in the inbox, which is how a large part of tests/harness.lua
+-- inspects what a run actually did -- "open" deletes the evidence. Removing it
+-- would mean rewriting those assertions to be weaker. If a caller is ever
+-- added back, note it inherits the same self-clocking requirement.
+take.MODE_TAKE   = "take"
 
 -- Give up on an index after this many steps with no observable progress, so a
 -- mail the server will not hand over can never wedge the run in a tight loop.
@@ -577,6 +654,21 @@ function take.LogSnapshot()
     return A.db.LogAdd("received", snap)
 end
 
+-- Move to the next mail WITHOUT touching the server.
+--
+-- THE RUN'S CLOCK INVARIANT: every take.Step must either issue exactly one
+-- server call -- and then wait for MAIL_INBOX_UPDATE to arm the next step --
+-- or arm itself. There is no third option. take.armed is set by nothing but
+-- that event, and the server only sends it after an operation it actually
+-- performed, so a step that skips a mail produces no acknowledgement and
+-- nothing would ever wake the engine again.
+--
+-- Every skip funnels through here (COD/GM mail, the wedge guard giving up, a
+-- delete-read pass over mail that is not empty-and-read, and the terminal step
+-- of a "take" that keeps the mail), so this is the one place that has to
+-- re-arm. Leaving it out hung the run mid-inbox with take.running still true:
+-- Open All stopped dead at the first COD mail and left everything after it
+-- uncollected, and only the Stop button got the user out.
 function take.Advance()
     take.index = take.index + 1
     take.attempts = 0
@@ -585,6 +677,10 @@ function take.Advance()
     -- Moving on without emptying the mail: drop the snapshot rather than log
     -- a collection that did not happen.
     take.logSnap = nil
+    -- Self-clock: no server call was made, so no confirmation is coming.
+    -- Advance always increases the index, so this cannot spin -- it walks to
+    -- index > NumItems() and Finish() ends the run.
+    if take.running then take.armed = true end
 end
 
 -- ---------------------------------------------------------------------------
@@ -753,8 +849,10 @@ A.RegisterEvent("UI_ERROR_MESSAGE", function(evt, message)
         take.Stop()
     elseif message == ERR_ITEM_MAX_COUNT then
         -- Cannot carry more of this ONE item; step over it and continue.
+        -- Advance re-arms (see the clock invariant on take.Advance) -- this
+        -- path is where that requirement was originally spotted, and it was
+        -- the only place that honoured it.
         take.pending = nil
         take.Advance()
-        take.armed = true
     end
 end)
