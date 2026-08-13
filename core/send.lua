@@ -508,8 +508,16 @@ end)
 -- Anyone who mails us is by definition reachable, so harvest the name. This
 -- is the same source TurtleMail uses, minus its hook on GetInboxHeaderInfo --
 -- we already read every header in inbox.All().
-A.RegisterEvent("MAIL_INBOX_UPDATE", function()
-    if not A.inbox then return end
+--
+-- NOT on MAIL_INBOX_UPDATE. That event storms on a first mailbox open while
+-- the client resolves uncached items, and this walks every header -- one of
+-- the five full inbox walks per event that made a big mailbox freeze the
+-- client. Contact names do not need per-event freshness: the set can only
+-- change when the inbox itself changes, so opening the mailbox and finishing
+-- a take run are the only moments worth harvesting at.
+function send.HarvestContacts()
+    if not A.inbox then return 0 end
+    local added = 0
     local n = A.inbox.NumItems()
     local i = 1
     while i <= n do
@@ -517,10 +525,12 @@ A.RegisterEvent("MAIL_INBOX_UPDATE", function()
         -- canReply excludes the auction house and other system senders.
         if h and h.canReply and not h.isGM and not h.fromAuctionHouse then
             A.db.AddContact(h.sender)
+            added = added + 1
         end
         i = i + 1
     end
-end)
+    return added
+end
 
 A.OnLoad(function()
     send.InstallHooks()

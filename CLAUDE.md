@@ -114,6 +114,21 @@ section, which is Courier's equivalent hazard surface.
 13. **`CheckInbox()` is throttled server-side.** The client's own `MAIL_SHOW`
     path calls it once. Do not poll it on a tight timer; TurtleMail waits ~200
     OnUpdate ticks between refreshes and that is the pacing to match.
+    - **`MAIL_INBOX_UPDATE` is NOT one-per-visit — it STORMS.** On the first
+      open of a session the client re-fires it as each attached item resolves,
+      so a full mailbox delivers hundreds of events across a handful of
+      frames. **Never walk the inbox or repaint from that event directly.**
+      Raise `inbox.dirty` and let the OnUpdate driver call `inbox.Flush()`
+      **at most once per frame**. Measured at 70 mails, a per-event refresh
+      cost 352 header reads and ~1,300 pattern parses *per event*; the
+      coalesced path costs 282 for the whole storm.
+    - The one thing that stays **per-event** is arming the take engine
+      (`take.armed`). That event is the server's acknowledgement clock and the
+      run must remain one `Step` per confirmation — coalescing it drops steps.
+    - Anything that merely *derives* from the inbox (the send-autocomplete
+      contact harvest) belongs on mailbox-open and run-finish, not on the
+      update event. Each such consumer is another full walk multiplied by the
+      storm.
 
 ### Mail mutation — the take engine
 
@@ -354,6 +369,8 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       advance after a delete; only `sold` mail books income; COD/GM skipped.
 - [ ] Mail being emptied is marked read via `GetInboxText`; mail merely
       displayed is not.
+- [ ] Nothing walks the inbox or repaints from `MAIL_INBOX_UPDATE` directly —
+      it storms; work is coalesced behind `inbox.dirty` / `inbox.Flush`.
 - [ ] Batch sends verify `GetSendMailItem()` before `SendMail`; postage
       multiplied per mail; gold only on the first mail.
 - [ ] `lua5.1 tests/harness.lua` passes.

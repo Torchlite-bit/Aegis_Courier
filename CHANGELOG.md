@@ -9,6 +9,44 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.0.5]
+
+Fixes the multi-second freeze when first opening a large mailbox. `/reload`.
+This is a **different** bug from the 1.0.4 crash — that one was a stack
+overflow past 10 mails, this one is raw work per event — and 1.0.4's fix is
+still in place. If you were still seeing a long hang on 1.0.4, this is why.
+
+### Fixed
+- **Opening a full mailbox froze the client for seconds.** `MAIL_INBOX_UPDATE`
+  does not fire once per visit: on the first open of a session, while the
+  client is still resolving attached items it has not cached, it fires *again
+  and again* — one storm of events across a handful of frames. Courier did a
+  full repaint plus **five separate walks of every mail header** inside every
+  one of those events. Measured on a 70-mail inbox that is 352 header reads
+  and roughly 1,300 subject-pattern parses **per event**; a 200-event storm
+  ran 169,200 header reads before the frame could finish.
+- The events now only raise a flag. The work happens **at most once per
+  frame**, however many events landed in that frame — the same 200-event
+  storm now costs 282 header reads, a single pass. Nothing was made lazier or
+  less accurate: the list still repaints on every change, just once instead of
+  two hundred times.
+- The contact-name harvest for send autocomplete no longer runs on every
+  inbox update either — it was one of those five walks. It now runs when you
+  open the mailbox and when a take run finishes, which are the only moments
+  the set of senders can actually change.
+- The minimap's unread-mail count is no longer carried over between mailbox
+  visits. A count left from a mailbox you emptied last time could authorise
+  hiding a genuinely new unread-mail icon on a later visit.
+
+### Notes
+- Caching parsed headers within a single refresh was tried and deliberately
+  **not** shipped. The saving was small next to the coalescing above, and a
+  stale-header memo is the one thing this addon's correctness cannot afford —
+  the take engine re-reads after every action precisely because "I took it,
+  therefore it is empty" is false. The reasoning is recorded in
+  `core/inbox.lua` for whoever revisits it.
+- 1.0.4's re-entrancy guards are untouched; both fixes are needed.
+
 ## [1.0.4]
 
 Fixes the reported client freeze/crash with 11 or more mails in the inbox.

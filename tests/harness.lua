@@ -178,7 +178,13 @@ CloseMail = function() closeMailCalls = closeMailCalls + 1 end
 CheckInbox = function() end
 
 GetInboxNumItems = function() return table.getn(INBOX) end
+-- Counts every raw header read. The storm test below asserts on this directly:
+-- a walk of the whole inbox is the unit of work that made a big mailbox freeze
+-- the client, so the only honest way to prove the coalescing works is to count
+-- the reads themselves rather than trust a paint counter.
+headerReads = 0
 GetInboxHeaderInfo = function(i)
+    headerReads = headerReads + 1
     local m = INBOX[i]
     if not m then return nil end
     -- The verified 13-value 1.12 signature.
@@ -1196,7 +1202,12 @@ INBOX = {
     mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 10 },
     mail{ sender = "GMBob", subject = "ticket", gm = true },
 }
+-- The harvest is deliberately NOT on MAIL_INBOX_UPDATE any more: that event
+-- storms while the client resolves uncached items, and this walks every header.
 fire("MAIL_INBOX_UPDATE")
+check(table.getn(A.db.MatchContacts("Wanda", 5)) == 0,
+      "the event alone does NOT walk the inbox for contacts")
+send.HarvestContacts()
 check(table.getn(A.db.MatchContacts("Wanda", 5)) == 1, "player sender kept")
 check(table.getn(A.db.MatchContacts("Stormwind", 5)) == 0,
       "auction house not offered as a contact")
@@ -1351,6 +1362,7 @@ check(table.getn(INBOX) == 0, "and Delete Read clears them",
 print("== unread flag: the minimap icon is put out on close ==")
 INBOX = { mail{ sender = "Bob", subject = "x", money = 100 } }
 fire("MAIL_INBOX_UPDATE")
+driver.scripts.OnUpdate()       -- the count settles on the coalesced flush
 check(A.inbox.lastUnread == 1, "unread tracked while open", A.inbox.lastUnread)
 MiniMapMailFrame:Show()
 fire("MAIL_CLOSED")
@@ -1362,6 +1374,7 @@ A.ui.OpenWindow()
 take.Start(take.MODE_OPEN)
 pump()
 fire("MAIL_INBOX_UPDATE")
+driver.scripts.OnUpdate()
 check(A.inbox.lastUnread == 0, "nothing unread after the run")
 MiniMapMailFrame:Show()
 fire("MAIL_CLOSED")
@@ -1428,6 +1441,69 @@ local okRun, err = pcall(pump, 400)
 check(okRun == true, "run survived", err)
 check(not take.running, "and finished")
 check(table.getn(INBOX) == 0, "30-mail box fully emptied", table.getn(INBOX))
+
+print("== storm: MAIL_INBOX_UPDATE is coalesced to one flush per frame ==")
+-- A first mailbox open fires MAIL_INBOX_UPDATE once per mail whose item the
+-- client still has to resolve from the server, so a full box lands hundreds of
+-- events across a handful of frames. Each one used to walk every header about
+-- five times over (UnreadCount, HasWork x3, All, Summary) and repaint the list.
+-- At 70 mails that is ~350 header reads and a full paint PER EVENT -- the
+-- freeze the reporters hit. The events now only raise a flag; the driver does
+-- the work once per frame.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Inbox")
+bigInbox(70)
+rawset(A.ui.inboxScroll, "value", 30 * 28)   -- scrollbar live and scrolled
+
+-- Warm up first, then measure: the very first flush of a visit also seeds
+-- inbox.lastUnread, so measuring from a settled state keeps the comparison
+-- below honest rather than accidentally passing on a state difference.
+A.inbox.MarkDirty()
+driver.scripts.OnUpdate()
+
+A.inbox.MarkDirty()
+headerReads = 0
+driver.scripts.OnUpdate()
+local oneFlush = headerReads
+check(oneFlush > 0, "a flush does read the inbox", oneFlush)
+
+headerReads = 0
+local stormN = 1
+while stormN <= 200 do
+    fire("MAIL_INBOX_UPDATE")
+    stormN = stormN + 1
+end
+check(headerReads == 0, "200 events did NO inbox work of their own", headerReads)
+check(A.inbox.dirty == true, "they only raised the dirty flag")
+
+driver.scripts.OnUpdate()
+check(headerReads == oneFlush,
+      "200 events cost exactly one flush, not 200",
+      headerReads .. " reads vs one flush = " .. oneFlush)
+check(A.inbox.dirty == false, "and the frame cleared the flag")
+
+-- Nothing dirty means nothing to do: a quiet frame must not walk the inbox
+-- either, or the coalescing just moves the cost from the event to every frame.
+headerReads = 0
+driver.scripts.OnUpdate()
+check(headerReads == 0, "an idle frame does no inbox work at all", headerReads)
+
+print("== storm: the take engine still steps once per confirmation ==")
+-- Coalescing must not reach the take engine's clock. MAIL_INBOX_UPDATE is the
+-- server's acknowledgement that the last operation landed, and one Step per
+-- confirmation is what keeps the run in lockstep with the server instead of
+-- racing it. Arming has to stay per-event even though the repaint does not.
+bigInbox(3)
+A.db.ClearLedger()
+take.Start(take.MODE_OPEN)
+check(take.running, "run started")
+take.armed = false
+fire("MAIL_INBOX_UPDATE")
+check(take.armed == true, "a confirmation still arms the next step")
+local okStorm = pcall(pump, 400)
+check(okStorm == true, "and the run completes")
+check(table.getn(INBOX) == 0, "emptying the box", table.getn(INBOX))
 
 print("== big lists: Log and Ledger carry the same guard ==")
 A.db.ClearLog()

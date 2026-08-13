@@ -1710,6 +1710,13 @@ A.RegisterEvent("MAIL_SHOW", function()
     -- Starts the take engine's driver: its step clock and the passive
     -- CheckInbox pacing only run while a mailbox is actually open.
     A.take.SetMailboxOpen(true)
+    -- Forget the previous visit's unread count. ui.SettleMailIcon reads it
+    -- after MAIL_CLOSED, when the inbox can no longer be queried; a value
+    -- carried over from a mailbox we emptied last time could otherwise
+    -- authorise hiding a genuine new-mail icon. nil means "do not touch it".
+    A.inbox.lastUnread = nil
+    -- Harvest contacts once per visit rather than per inbox update.
+    if A.send and A.send.HarvestContacts then A.send.HarvestContacts() end
     if not ui.TakeoverActive() then return end
     -- Queue rather than hide inline. Our own MAIL_SHOW handler runs after the
     -- client's IsVisible guard so a synchronous hide would in fact be safe
@@ -1718,7 +1725,10 @@ A.RegisterEvent("MAIL_SHOW", function()
     -- already the one the OnShow hook uses.
     ui.QueueHideBlizzard()
     ui.frame:Show()
-    ui.Refresh()
+    -- Flush rather than Refresh: it paints AND seeds inbox.lastUnread, which
+    -- the nil above just cleared. It also clears any dirty flag left set by an
+    -- update that landed while the driver was hidden.
+    A.inbox.Flush()
 end)
 
 A.RegisterEvent("MAIL_CLOSED", function()
@@ -1755,9 +1765,11 @@ function ui.SettleMailIcon()
     if icon and icon.Hide then icon:Hide() end
 end
 
-A.RegisterEvent("MAIL_INBOX_UPDATE", function()
-    ui.Refresh()
-end)
+-- MAIL_INBOX_UPDATE deliberately has NO handler here. The repaint is driven
+-- by inbox.Flush, which the take engine's OnUpdate driver runs at most once
+-- per frame -- see the "Coalesced refresh" note in core/inbox.lua. Repainting
+-- inside the event storms a first mailbox open produces was what froze the
+-- client on a large inbox.
 
 -- ---------------------------------------------------------------------------
 -- Slash command

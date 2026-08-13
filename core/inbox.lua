@@ -115,6 +115,17 @@ function inbox.NumItems()
     return GetInboxNumItems() or 0
 end
 
+-- NOTE ON CACHING. A single flush still reads every header about five times
+-- over (UnreadCount, HasWork x3, All, Summary). Memoising those within one
+-- flush was tried and DELIBERATELY NOT SHIPPED: the measured saving was small
+-- next to the coalescing below (which removes 99.8% of the work in the
+-- harness's 200-event storm -- 169,200 header reads down to 282), and
+-- a header memo is precisely the kind of stale mail state this addon's
+-- correctness depends on never trusting -- the take engine re-reads after
+-- every action because "I took it, therefore it is empty" is false. If it is
+-- revisited, it must be provably scoped to a read-only flush and never
+-- visible to a mutating path.
+
 -- Read one mail header into a named table.
 --
 -- `index` is ABSOLUTE, 1..inbox.NumItems() -- the 7-per-page layout is a
@@ -225,6 +236,40 @@ function inbox.Summary()
         i = i + 1
     end
     return total, unread, money
+end
+
+-- ---------------------------------------------------------------------------
+-- Coalesced refresh
+-- ---------------------------------------------------------------------------
+-- MAIL_INBOX_UPDATE does not arrive once per mailbox visit. On a client that
+-- has not yet cached the attached items -- the first open of a session -- it
+-- arrives again and again as each item resolves. Courier used to do FIVE full
+-- inbox walks plus a ten-row repaint inside every one of those events:
+-- measured at 70 mails, that is 352 header reads and ~1,300 subject-pattern
+-- parses PER EVENT, and a 100-event storm ran 130,000 parses. On a 1.12
+-- client that is seconds of frozen frame.
+--
+-- So the events no longer do the work. They raise a flag, and the driver
+-- below flushes AT MOST ONCE PER FRAME, however many events landed in it.
+--
+-- What deliberately stays per-event is the take engine's arming: that is the
+-- server's acknowledgement clock, one Step per confirmation, and coalescing
+-- it would drop steps.
+inbox.dirty = false
+
+function inbox.MarkDirty()
+    inbox.dirty = true
+end
+
+-- Run the once-per-frame work: refresh the unread count and repaint the
+-- window. Reads only -- nothing here mutates mail. inbox.lastUnread is
+-- refreshed here because MAIL_CLOSED arrives after the session has gone and
+-- the inbox cannot be read from there; ui.SettleMailIcon needs the last value
+-- we were able to see.
+function inbox.Flush()
+    inbox.dirty = false
+    inbox.lastUnread = inbox.UnreadCount()
+    if A.ui and A.ui.Refresh then A.ui.Refresh() end
 end
 
 -- Mark a mail READ on the server.
@@ -569,6 +614,7 @@ function take.Stop(quiet)
     take.Confirm()
     take.running = false
     take.pending = nil
+    inbox.Flush()
     if not quiet then take.Report() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
 end
@@ -576,7 +622,12 @@ end
 function take.Finish()
     take.running = false
     take.pending = nil
+    -- The inbox just changed shape for the last time; refresh now so
+    -- inbox.lastUnread is current if the user closes the mailbox immediately
+    -- (ui.SettleMailIcon reads it after the session is already gone).
+    inbox.Flush()
     take.Report()
+    if A.send and A.send.HarvestContacts then A.send.HarvestContacts() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
 end
 
@@ -653,6 +704,13 @@ driver:SetScript("OnUpdate", function()
         end
     end
 
+    -- Coalesced refresh: one flush per frame at most, no matter how many
+    -- MAIL_INBOX_UPDATE events landed in it. Runs during a take run too --
+    -- the list has to repaint as mail disappears.
+    if inbox.dirty then
+        inbox.Flush()
+    end
+
     if take.running then return end
 
     ticks = ticks + 1
@@ -679,10 +737,11 @@ end
 -- The server finished a mailbox operation: arm the next step. This is the
 -- clock -- not a timer.
 A.RegisterEvent("MAIL_INBOX_UPDATE", function()
+    -- Per-event, deliberately: this is the server's acknowledgement clock for
+    -- the take engine and must stay one Step per confirmation.
     if take.running then take.armed = true end
-    -- Remember this while we still can: MAIL_CLOSED arrives after the session
-    -- has gone, and the inbox cannot be read from there.
-    inbox.lastUnread = inbox.UnreadCount()
+    -- Everything else waits for the driver's once-per-frame flush.
+    inbox.MarkDirty()
 end)
 
 -- Error handling, following TurtleMail's split: a full bag is fatal to the
