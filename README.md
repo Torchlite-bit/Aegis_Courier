@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.1.0)
+# Aegis: Courier (v1.2.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -152,12 +152,20 @@ and the cost line shows the **real** total postage rather than a single mail's.
 | **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
 
 Attached gold rides the **first** mail only, so a 10-item send does not send
-your gold ten times. If an item cannot be attached — moved, sold, soulbound —
-the batch stops before that mail goes out rather than posting an empty one.
+your gold ten times.
+
+A mass send does not give up on the whole queue because one item went wrong.
+If a stack is **busy** — the server is still moving it after the previous mail
+— Courier waits for it. If it has **moved** in your bags since you queued it,
+Courier finds it again by name. Only an item that has genuinely left your bags
+is skipped, and then just that one: the rest of the batch goes out and you are
+told what was left behind. Courier also checks that the item which actually
+landed on the mail is the one you queued, so a stack shifting underneath a send
+can never post the wrong thing to the recipient.
 
 If the server refuses a mail, that one is retried a few times before the batch
-gives up, and anything unsent stays on the attachment list so you can just
-press Send again.
+gives up. If a run gets nothing out at all, your attachment list is left exactly
+as it was so you can just press Send again.
 
 Right-click in your bags only attaches while the Send tab is actually open at
 a mailbox; everywhere else it keeps its normal meaning.

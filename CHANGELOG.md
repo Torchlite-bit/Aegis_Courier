@@ -9,6 +9,38 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.2.0]
+
+Fixes mass sends halting partway with "could not attach". `/reload`.
+
+### Fixed
+- **A mass send stopped dead at the first item it could not attach**, printing
+  `could not attach [item] -- send stopped` and abandoning everything still
+  queued. Three separate faults were behind it.
+  - **We never read the slot's lock flag.** `GetContainerItemInfo` returns
+    `texture, itemCount, locked, …`, and Courier read only the first two.
+    `PickupContainerItem` on a slot the server has locked does *nothing at
+    all* — no error, no event — so the attach silently posted nothing and the
+    run gave up. The lock is normal: the previous mail's bag update simply had
+    not landed yet, which is why this hit long sends and bad connections
+    hardest. Courier now waits for the lock to clear instead of failing.
+  - **The bag coordinates were a snapshot.** An attachment remembers where it
+    was when you queued it, and on a twelve-item send that can be a minute and
+    eleven mails out of date. Anything that reshuffles your bags in between
+    invalidated it. Courier now re-finds a moved stack by name.
+  - **One bad item cost the whole queue.** Now it costs one item: the rest of
+    the batch goes out and you are told what was skipped, rather than the run
+    stopping and leaving you to rebuild a twelve-item list by hand.
+- **A mass send could post the WRONG item.** The old check asked only whether
+  *something* was attached, never whether it was the thing you queued. If a
+  different stack had moved into the remembered slot, that check passed and the
+  replacement went to the recipient silently — a worse outcome than the visible
+  failure that was actually being reported. Courier now compares the item on
+  the mail against the one you queued and refuses to send a mismatch.
+- A run that sends **nothing** no longer clears your attachment list. Every
+  item is still in your bags in that case, and wiping the list meant rebuilding
+  the whole selection to try again.
+
 ## [1.1.0]
 
 Adds a mail reader, and fixes a take-engine bug that stopped **Open All** dead

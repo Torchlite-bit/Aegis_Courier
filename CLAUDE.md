@@ -226,10 +226,35 @@ section, which is Courier's equivalent hazard surface.
     item is to remember where it came from: save-and-replace
     `PickupContainerItem` / `SplitContainerItem` and record the bag+slot. See
     `send.InstallHooks`.
-24. **Verify the attach landed before calling `SendMail`.** `GetSendMailItem()`
-    must be non-nil after `ClickSendMailItemButton()`. If the stack moved, sold
-    or is soulbound, the attach silently no-ops and `SendMail` posts an **empty
-    mail** while the item stays in the bag.
+24. **Verify the attach landed before calling `SendMail`, and verify it is the
+    RIGHT item.** `GetSendMailItem()` must be non-nil after
+    `ClickSendMailItemButton()`, **and its name must match the queued
+    attachment**. "Is something attached?" is not the same question as "is the
+    thing I queued attached?" — a stack that moved out and was replaced passes
+    the first and mails the wrong item to the recipient, silently. That is
+    worse than any visible failure.
+    - **A queued attachment is a bag COORDINATE, and coordinates go stale.**
+      1.12 gives no handle on a stack, so `{bag, slot}` is the only address
+      there is, and on a 12-item batch it can be a minute and eleven mails old
+      by the time it is used. Re-resolve at the moment of use
+      (`send.ResolveSlot`), relocating by name via `send.FindItemSlot`.
+    - **`GetContainerItemInfo` returns `texture, itemCount, locked, quality,
+      readable` — READ THE THIRD VALUE.** `PickupContainerItem` on a locked
+      slot is a **silent no-op**: no error, no event, nothing on the cursor. A
+      run that ignores `locked` attaches nothing, fails its own verification,
+      and blames the item. Locks are routine — the previous mail's `BAG_UPDATE`
+      simply has not landed. **Wait** for it (`send.LOCK_WAIT`, bounded by
+      `send.MAX_LOCK_WAITS`); never treat it as failure.
+    - **Empty the mail's attachment slot BEFORE resolving anything.** A mail the
+      server refused leaves its item in that slot rather than in the bags, so
+      resolving first concludes the stack vanished and skips every
+      `MAIL_FAILED` retry.
+    - **One bad item must never cost the batch.** Skip it, count it, report it
+      at the end (`send.skipped`), and carry on — the same rule as
+      `MAIL_FAILED`. And a run that sent **nothing** must leave the attachment
+      list alone; every item is still in the player's bags.
+    - `ITEM_LOCK_CHANGED` may be used to *accelerate* a waiting step, never as
+      the thing that wakes it — it is not a promise on every server build.
 25. **The send API is C, not FrameXML**, so it works with `MailFrame` hidden —
     which is the state the takeover keeps it in. `SendMail`,
     `ClickSendMailItemButton`, `GetSendMailItem`, `SetSendMailMoney`,
@@ -404,8 +429,10 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       player asking (`inbox.ReadIsFree`).
 - [ ] List rows still fit their well — `ui.Geometry()` is asserted by the
       harness; 1.12 does not clip children, it just draws over the border.
-- [ ] Batch sends verify `GetSendMailItem()` before `SendMail`; postage
-      multiplied per mail; gold only on the first mail.
+- [ ] Batch sends verify `GetSendMailItem()` before `SendMail` **and compare
+      its name to the queued item**; bag coordinates are re-resolved at use;
+      `locked` (3rd return of `GetContainerItemInfo`) is read and waited on;
+      postage multiplied per mail; gold only on the first mail.
 - [ ] A rule the UI *gates a button on* is asserted against the **button**, not
       only against the function. `send.Validate` is called twice — once by
       `send.Start` and once by `ui.RefreshSend` to enable the Send button — and

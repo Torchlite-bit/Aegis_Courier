@@ -62,6 +62,99 @@ local function RememberCursor(bag, slot)
     send.cursorItem = { bag = bag, slot = slot }
 end
 
+-- ---------------------------------------------------------------------------
+-- Locating an attachment at send time
+-- ---------------------------------------------------------------------------
+-- A queued attachment is a bag COORDINATE, and 1.12 gives us nothing better:
+-- there is no handle on a stack, so {bag, slot} is the only address available.
+-- It is also not stable. Between queueing an item and actually mailing it --
+-- which on a 12-item batch can be a minute and eleven mails later -- the stack
+-- can be locked by the server, can move, or can leave the bags entirely.
+--
+-- Trusting the coordinate produced the reported "could not attach X -- send
+-- stopped": the run walked into a locked or moved slot, PickupContainerItem
+-- silently did nothing, and the whole remaining queue was thrown away.
+--
+-- Worse, the old verification only asked whether SOMETHING was attached. If a
+-- different item had moved into the remembered slot, that check passed and the
+-- wrong item was mailed. Everything below exists to make the address good
+-- again at the moment of use, and to fail one ITEM rather than the batch.
+
+send.SLOT_OK     = "ok"      -- coordinate is good (possibly after relocating)
+send.SLOT_LOCKED = "locked"  -- the server holds it; wait, do not touch
+send.SLOT_GONE   = "gone"    -- not in the bags at all
+
+-- Find an UNLOCKED stack called `name`.
+--
+-- Returns bag, slot, false when one is found. When none is usable, returns
+-- nil, nil, sawLocked -- the flag distinguishing "it is here but the server has
+-- it" from "it is not here", which is the difference between waiting and
+-- giving up. 1.12 has containers 0 (backpack) through 4.
+function send.FindItemSlot(name)
+    if not GetContainerNumSlots or not GetContainerItemLink then
+        return nil, nil, false
+    end
+    if type(name) ~= "string" or name == "" or name == "?" then
+        return nil, nil, false
+    end
+    local sawLocked = false
+    local bag = 0
+    while bag <= 4 do
+        local slots = GetContainerNumSlots(bag) or 0
+        local slot = 1
+        while slot <= slots do
+            local link = GetContainerItemLink(bag, slot)
+            if link and util.ItemNameFromLink(link) == name then
+                -- THIRD return. GetContainerItemInfo gives
+                -- texture, itemCount, locked, quality, readable -- and
+                -- PickupContainerItem on a locked slot is a silent no-op, so
+                -- reading past the second value is not optional.
+                local _, _, locked = GetContainerItemInfo(bag, slot)
+                if locked then
+                    sawLocked = true
+                else
+                    return bag, slot, false
+                end
+            end
+            slot = slot + 1
+        end
+        bag = bag + 1
+    end
+    return nil, nil, sawLocked
+end
+
+-- Re-validate a queued attachment against the bags RIGHT NOW, rewriting its
+-- coordinate in place if the stack moved. Never called from a paint or an
+-- event -- only from the step that is about to pick the item up.
+function send.ResolveSlot(att)
+    if not att then return send.SLOT_GONE end
+    -- A client without the container API is not one we can second-guess; the
+    -- old blind behaviour is the only option there.
+    if not GetContainerItemInfo then return send.SLOT_OK end
+
+    local texture, _, locked = GetContainerItemInfo(att.bag, att.slot)
+    if texture then
+        if locked then return send.SLOT_LOCKED end
+        local link = GetContainerItemLink and GetContainerItemLink(att.bag, att.slot)
+        local here = link and util.ItemNameFromLink(link)
+        -- `here` nil means the link could not be read; there is nothing to
+        -- compare against, so trust the coordinate rather than invent a fault.
+        if not att.name or att.name == "?" or not here or here == att.name then
+            return send.SLOT_OK
+        end
+    end
+
+    -- The slot is empty, or something else is sitting in it. Names are all we
+    -- have to go on -- there is no itemID from a bag slot worth trusting here.
+    local bag, slot, sawLocked = send.FindItemSlot(att.name)
+    if bag then
+        att.bag, att.slot = bag, slot
+        return send.SLOT_OK
+    end
+    if sawLocked then return send.SLOT_LOCKED end
+    return send.SLOT_GONE
+end
+
 -- Read what is in a bag slot. GetContainerItemLink is present on 1.12, so the
 -- NAME is obtainable here -- unlike the inbox, which has no link at all.
 function send.SlotInfo(bag, slot)
@@ -256,6 +349,7 @@ function send.Start(to, subject, body, money, isCOD, codAll)
 
     send.total     = send.MailCount()
     send.sentCount = 0
+    send.skipped   = 0
     send.retries   = 0
     send.inFlight  = nil
     send.sending   = true
@@ -288,6 +382,32 @@ function send.SubjectFor(n, attachment)
 end
 
 -- Send ONE mail. Called once per step, then we wait for MAIL_SEND_SUCCESS.
+-- How often to re-check a slot the server has locked, and how many times
+-- before we conclude it is never coming back. ~2s, which is far longer than a
+-- normal lock and still short enough not to look like a hang.
+send.LOCK_WAIT      = 0.1
+send.MAX_LOCK_WAITS = 20
+
+-- Give up on ONE attachment and carry on with the rest of the batch.
+--
+-- This is the whole point of the change. Failing an item costs the user that
+-- item; failing the batch costs them everything still queued and makes them
+-- rebuild the list by hand -- which is what "send stopped" used to do, and the
+-- same mistake MAIL_FAILED was already fixed for.
+local function SkipAttachment(att, why)
+    A.Print("skipped " .. ((att and att.name) or "an item") .. " -- " .. why)
+    send.skipped = (send.skipped or 0) + 1
+    -- Keep the "sending 3 of 10" counter honest about what is left to do.
+    if send.total and send.total > 1 then send.total = send.total - 1 end
+    send.inFlight = nil
+    send.lastSent = nil
+    if send.queue and table.getn(send.queue) > 0 then
+        send.Arm(0)
+    else
+        send.Finish()
+    end
+end
+
 function send.Step()
     if not send.sending then return end
 
@@ -300,11 +420,44 @@ function send.Step()
     send.inFlight = attachment
 
     if attachment then
-        -- Clear whatever may be in the slot, then place ours. ClearCursor
-        -- between the two so a stray cursor item cannot be posted by mistake.
+        -- EMPTY THE MAIL'S ATTACHMENT SLOT FIRST, before judging where
+        -- anything is. A mail the server refused leaves its item sitting in
+        -- that slot rather than back in the bags, and resolving the coordinate
+        -- while it is parked there concludes the stack has vanished -- which
+        -- would skip every MAIL_FAILED retry instead of performing it.
+        --
+        -- ClearCursor on either side so a stray cursor item cannot be posted
+        -- by mistake, and so the item this click lifts off goes home.
         if ClearCursor then ClearCursor() end
         ClickSendMailItemButton()
         if ClearCursor then ClearCursor() end
+
+        -- Only now is the coordinate meaningful. See the "Locating an
+        -- attachment at send time" note above.
+        local status = send.ResolveSlot(attachment)
+
+        if status == send.SLOT_LOCKED then
+            -- The server has this stack. Do NOT pick it up: on a locked slot
+            -- PickupContainerItem does nothing at all, no error and no event,
+            -- and the attach that follows would silently post nothing. Put it
+            -- back at the head and look again in a moment.
+            attachment.lockWaits = (attachment.lockWaits or 0) + 1
+            if attachment.lockWaits <= send.MAX_LOCK_WAITS then
+                table.insert(send.queue, 1, attachment)
+                send.inFlight = nil
+                send.Arm(send.LOCK_WAIT)
+                return
+            end
+            -- Locked for two solid seconds. Treat it as unreachable rather
+            -- than hold the rest of the batch hostage to one stack.
+            SkipAttachment(attachment, "your bags are busy with it.")
+            return
+        end
+
+        if status == send.SLOT_GONE then
+            SkipAttachment(attachment, "it is no longer in your bags.")
+            return
+        end
 
         if orig_PickupContainerItem then
             orig_PickupContainerItem(attachment.bag, attachment.slot)
@@ -313,15 +466,31 @@ function send.Step()
         end
         ClickSendMailItemButton()
 
-        -- Verify the attach actually landed. The stack may have moved, been
-        -- sold, or be soulbound -- in which case SendMail would post an EMPTY
-        -- mail and the item would silently stay behind.
-        if GetSendMailItem and not GetSendMailItem() then
-            if ClearCursor then ClearCursor() end
-            A.Print("could not attach " .. (attachment.name or "item") ..
-                " -- send stopped.")
-            send.Abort()
-            return
+        -- Verify the attach landed AND that it landed with the RIGHT item.
+        --
+        -- The old check asked only whether something was attached, which is
+        -- not the same question: if a different stack had moved into the
+        -- remembered slot, the check passed and that item went to the
+        -- recipient instead. Resolve above makes this rare; the compare makes
+        -- it impossible.
+        if GetSendMailItem then
+            local onSlot = GetSendMailItem()
+            local wrong = onSlot and attachment.name and attachment.name ~= "?"
+                and onSlot ~= attachment.name
+            if not onSlot or wrong then
+                if onSlot then
+                    -- Take the wrong item straight back off before it can be
+                    -- posted, and put it back where it came from.
+                    ClickSendMailItemButton()
+                end
+                if ClearCursor then ClearCursor() end
+                if wrong then
+                    SkipAttachment(attachment, "it moved in your bags mid-send.")
+                else
+                    SkipAttachment(attachment, "the game would not attach it.")
+                end
+                return
+            end
         end
     end
 
@@ -392,14 +561,29 @@ function send.Finish()
     send.armed = false
     A.db.AddContact(send.to)
     if send.sentCount > 0 then
-        A.Print("sent " .. send.sentCount .. " mail" ..
-            (send.sentCount == 1 and "" or "s") .. " to " .. send.to .. ".")
+        local line = "sent " .. send.sentCount .. " mail" ..
+            (send.sentCount == 1 and "" or "s") .. " to " .. send.to
+        -- Say what was left behind. A partial run that reports only its
+        -- successes reads as a complete one, and the user never goes looking
+        -- for the item still sitting in their bags.
+        if (send.skipped or 0) > 0 then
+            line = line .. " (" .. send.skipped .. " skipped)"
+        end
+        A.Print(line .. ".")
+    elseif (send.skipped or 0) > 0 then
+        A.Print("nothing was sent: all " .. send.skipped ..
+            " attachments were unavailable.")
     end
-    -- The batch succeeded, so the composed mail is done with.
-    send.attachments = {}
-    send.subject = ""
-    send.body = ""
-    send.money = 0
+    -- A run that got NOTHING out leaves the compose form alone. Every item is
+    -- still in the player's bags in that case -- the game refused to attach
+    -- them, or they were busy -- and wiping the list would make them rebuild a
+    -- twelve-item selection by hand to try again.
+    if send.sentCount > 0 then
+        send.attachments = {}
+        send.subject = ""
+        send.body = ""
+        send.money = 0
+    end
     if A.ui and A.ui.OnSendComplete then A.ui.OnSendComplete() end
 end
 
@@ -453,6 +637,21 @@ end
 -- ---------------------------------------------------------------------------
 -- Events
 -- ---------------------------------------------------------------------------
+
+-- Purely an ACCELERATOR for a step waiting on a locked slot: when the lock
+-- clears, go now instead of burning the rest of the 100ms re-check.
+--
+-- It must never be the only thing that wakes the run. This event is not a
+-- promise -- it does not reliably fire for every lock transition on every
+-- server build, and a run that depended on it would hang exactly the way the
+-- take engine did before its clock invariant was fixed. The timed re-check in
+-- send.Step is the real mechanism; this only makes it feel quicker.
+A.RegisterEvent("ITEM_LOCK_CHANGED", function()
+    if not send.sending then return end
+    if send.armed and (send.wait or 0) > 0 then
+        send.Arm(0)
+    end
+end)
 
 A.RegisterEvent("MAIL_SEND_SUCCESS", function()
     if not send.sending then return end

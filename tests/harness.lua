@@ -301,19 +301,46 @@ UnitName = function() return "Tester" end
 ClearCursor = function() cursor = nil end
 CursorHasItem = function() return cursor ~= nil end
 
+-- texture, itemCount, locked, quality, readable -- the 1.12 signature. The
+-- THIRD value is the one that matters: the addon has to read it, because
+-- PickupContainerItem on a locked slot is a silent no-op on the real client.
+-- A slot is locked while its item is on the cursor, or while a test pins it.
 GetContainerItemInfo = function(bag, slot)
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
-    return it.texture, it.count
+    local locked = it.locked
+    if cursor and cursor.bag == bag and cursor.slot == slot then locked = 1 end
+    return it.texture, it.count, locked, 1, nil
+end
+-- The backpack is bag 0 and always has 16 slots; a nil BAGS entry is a bag the
+-- character does not have equipped.
+GetContainerNumSlots = function(bag)
+    if type(bag) ~= "number" or bag < 0 or bag > 4 then return 0 end
+    if bag == 0 or BAGS[bag] then return 16 end
+    return 0
 end
 GetContainerItemLink = function(bag, slot)
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
     return "|cff1eff00|Hitem:1:0:0:0|h[" .. it.name .. "]|h|r"
 end
+-- Test hook for the race the post-attach name check exists to catch: the slot
+-- verified a moment ago, but the server hands us a different stack when the
+-- pickup actually lands. Nothing but a name comparison after the fact can see
+-- this, so the mock has to be able to produce it.
+swapPickupWith = nil
 PickupContainerItem = function(bag, slot)
+    if swapPickupWith then
+        bag, slot = swapPickupWith.bag, swapPickupWith.slot
+        swapPickupWith = nil
+    end
     local it = BAGS[bag] and BAGS[bag][slot]
-    if it then cursor = { bag = bag, slot = slot, item = it } end
+    if not it then return end
+    -- A LOCKED SLOT DOES NOT RESPOND. No error, no event, nothing on the
+    -- cursor -- this silent no-op is what produced "could not attach" in the
+    -- field, and a mock that ignored the flag could never reproduce it.
+    if it.locked then return end
+    cursor = { bag = bag, slot = slot, item = it }
 end
 SplitContainerItem = function() end
 useContainerCalls = 0
@@ -1126,16 +1153,129 @@ pumpSend()
 check(SENT[1].cod == 5000 and SENT[2].cod == 5000, "codAll charges every mail",
       tostring(SENT[1].cod) .. "/" .. tostring(SENT[2].cod))
 
-print("== send: an item that will not attach stops the batch ==")
+print("== send: a stack the server has LOCKED is waited for, not abandoned ==")
+-- The reported "could not attach X -- send stopped". GetContainerItemInfo's
+-- third return is `locked`, and PickupContainerItem on a locked slot does
+-- nothing at all -- so a run that ignores the flag attaches nothing, fails its
+-- own verification, and used to throw the rest of the queue away.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+BAGS[0][2].locked = 1                 -- the server is holding Copper Ore
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(8)
+check(send.sending, "the run is still alive, waiting on the lock")
+check(table.getn(SENT) == 1, "the unlocked item went out", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "and it was the right one", SENT[1].item)
+check((send.skipped or 0) == 0, "nothing has been skipped yet", send.skipped)
+BAGS[0][2].locked = nil               -- server releases it
+pumpSend()
+check(not send.sending, "run completes once the lock clears")
+check(table.getn(SENT) == 2, "both items sent", table.getn(SENT))
+check(SENT[2].item == "Copper Ore", "including the one that was locked",
+      SENT[2].item)
+check((send.skipped or 0) == 0, "and nothing was skipped", send.skipped)
+
+print("== send: a lock that never clears costs one item, not the batch ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+BAGS[0][1].locked = 1                 -- stuck forever
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(200)
+BAGS[0][1].locked = nil
+check(not send.sending, "the run finished rather than hanging")
+check(send.skipped == 1, "the stuck item was skipped", send.skipped)
+check(table.getn(SENT) == 2, "the other two still went out", table.getn(SENT))
+check(BAGS[0][1] ~= nil, "and the stuck item is still in the bag")
+
+print("== send: a stack that MOVED is found again, not lost ==")
+-- Bag coordinates are the only address 1.12 gives us and they are not stable:
+-- a snapshot taken at queue time can be wrong by the time the batch reaches it.
+stockBags()
+send.Attach(0, 1)                     -- Silk Cloth at slot 1
+send.Attach(0, 2)
+BAGS[0][7] = BAGS[0][1]               -- player reshuffles: Silk Cloth -> slot 7
+BAGS[0][1] = nil
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "run finished")
+check((send.skipped or 0) == 0, "nothing was skipped", send.skipped)
+check(table.getn(SENT) == 2, "both mails sent", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "the moved stack was relocated by name",
+      SENT[1].item)
+
+print("== send: a DIFFERENT item in the remembered slot is never mailed ==")
+-- First line of defence: ResolveSlot compares names before touching anything.
+-- The dangerous case. The old verification asked only "is something
+-- attached?", so a stack that had moved out and been replaced sent the
+-- REPLACEMENT to the recipient silently. Worse than the visible abort.
+stockBags()
+send.Attach(0, 1)                     -- queue Silk Cloth
+send.Attach(0, 2)                     -- and Copper Ore
+-- Silk Cloth leaves the bags entirely; Black Lotus takes its slot.
+BAGS[0][1] = { name = "Black Lotus", texture = "t9", count = 1 }
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "run finished")
+check(send.skipped == 1, "the vanished item was skipped", send.skipped)
+local mailedLotus = false
+local mi = 1
+while mi <= table.getn(SENT) do
+    if SENT[mi].item == "Black Lotus" then mailedLotus = true end
+    mi = mi + 1
+end
+check(mailedLotus == false, "the WRONG item was never mailed")
+check(BAGS[0][1] ~= nil and BAGS[0][1].name == "Black Lotus",
+      "and it is still safely in the bag")
+check(table.getn(SENT) == 1, "the other item still went out", table.getn(SENT))
+check(SENT[1].item == "Copper Ore", "and it was the right one", SENT[1].item)
+
+print("== send: a last-instant swap is caught AFTER the attach ==")
+-- Second line of defence, and the one the first cannot cover. ResolveSlot
+-- verified the slot, but the server can still move the stack in the instant
+-- between that check and the pickup landing. Only comparing what actually
+-- ended up on the mail against what we queued catches that -- which is why
+-- "is something attached?" was never a sufficient question.
+stockBags()
+send.Attach(0, 1)                      -- queue Silk Cloth, slot verified fine
+swapPickupWith = { bag = 0, slot = 3 } -- server hands over Black Lotus instead
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+swapPickupWith = nil
+check(send.skipped == 1, "the mismatch was caught", send.skipped)
+check(table.getn(SENT) == 0, "and NOTHING was mailed", table.getn(SENT))
+check(BAGS[0][3] ~= nil and BAGS[0][3].name == "Black Lotus",
+      "the wrong item was put back in the bag, not posted")
+
+print("== send: a partial run reports what it left behind ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+BAGS[0][2] = nil                      -- Copper Ore is gone
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(send.skipped == 1, "one skipped", send.skipped)
+check(send.sentCount == 2, "two sent", send.sentCount)
+local msgs = DEFAULT_CHAT_FRAME.messages
+local saidSkipped = false
+local pi = 1
+while pi <= table.getn(msgs) do
+    if A.util.Contains(msgs[pi], "skipped") then saidSkipped = true end
+    pi = pi + 1
+end
+check(saidSkipped, "the user is told, rather than the run looking complete")
+
+print("== send: an item the game refuses to attach costs only that item ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 failAttach = true
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 failAttach = false
-check(not send.sending, "aborted")
+check(not send.sending, "run ended")
 check(table.getn(SENT) == 0, "NOTHING was sent -- no empty mail went out",
       table.getn(SENT))
+check(send.skipped == 2, "both were skipped rather than aborting the batch",
+      send.skipped)
 check(send.Count() == 2, "attachments kept so the user can retry", send.Count())
 
 print("== send: MAIL_FAILED aborts the batch ==")
