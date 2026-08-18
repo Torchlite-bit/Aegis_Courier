@@ -415,11 +415,23 @@ end
 --
 -- Honours the same logEnabled setting as the correspondence log -- a user who
 -- turned logging off did not mean "except this".
-function db.SentBegin(to, subject, money, cod)
+-- The message body is the one unbounded field in a record -- everything else
+-- is a name, a number or a short string. Capped so a single long letter cannot
+-- dominate a file that is re-parsed as Lua source at every login.
+db.SENT_BODY_MAX = 500
+
+function db.SentBegin(to, subject, money, cod, body)
     if not db.account then return nil end
     if not db.Setting("logEnabled") then return nil end
     if not db.account.sent then db.account.sent = {} end
+    -- A monotonic id, because `t` is NOT an identity. time() has one-second
+    -- resolution, so two sends a moment apart share a timestamp -- and the
+    -- reader uses this to notice a record shifting under its index. A
+    -- timestamp-based check would silently pass for exactly the sends most
+    -- likely to be confused with each other.
+    db.account.sentSeq = (db.account.sentSeq or 0) + 1
     local rec = {
+        id    = db.account.sentSeq,
         t     = time(),
         to    = to or "?",
         s     = subject or "",
@@ -429,6 +441,15 @@ function db.SentBegin(to, subject, money, cod)
         cod   = cod or 0,
         items = {},
     }
+    -- Stored only if there is one. An empty body should not cost a key in
+    -- every record of a parcel-only sender's history.
+    if type(body) == "string" and body ~= "" then
+        if string.len(body) > db.SENT_BODY_MAX then
+            rec.body = string.sub(body, 1, db.SENT_BODY_MAX) .. "..."
+        else
+            rec.body = body
+        end
+    end
     table.insert(db.account.sent, rec)
     db.SentPrune()
     return rec
@@ -437,11 +458,14 @@ end
 -- Append one CONFIRMED mail to an open record. A batch abandoned halfway keeps
 -- whatever actually went out, rather than being recorded as complete or lost
 -- entirely.
-function db.SentAdd(rec, itemName, count)
+-- `texture` is the item's icon path, captured at attach time. Records written
+-- before it existed simply have no `x` field, and the reader falls back rather
+-- than showing a hole -- a sent mail cannot be re-read to fill it in.
+function db.SentAdd(rec, itemName, count, texture)
     if not rec then return nil end
     rec.mails = rec.mails + 1
     if itemName then
-        table.insert(rec.items, { n = itemName, c = count or 1 })
+        table.insert(rec.items, { n = itemName, c = count or 1, x = texture })
     end
     return rec
 end

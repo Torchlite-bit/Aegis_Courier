@@ -9,14 +9,47 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.4.0]
+
+Sent mail gets its own tab with a reader, the Send tab is now **Compose**, and
+every batch reports how long it took. `/reload`.
+
+### Added
+- **A Sent tab.** Sent mail moves out of the Log tab into its own, and works
+  like the Inbox: a list of sends, click one to read it. The reader shows the
+  recipient, your subject, when it went, which character sent it, every item
+  with its icon and stack size, the gold or COD attached, the message body,
+  and how many mails the send actually cost you in postage.
+- **Compose to ‹recipient›** from inside a sent record, which switches to the
+  Compose tab with the name already filled in.
+- Every batch now reports its own elapsed time — `sent 12 mails to Torchbank
+  in 4.2s` — so "did that get faster?" has an answer instead of an impression.
+
+### Changed
+- **The Send tab is now called Compose.** "Send" and "Sent" side by side read
+  as two views of one thing, which they are not: one is the form you write in,
+  the other is what already went. Only the label changed — the tab you had
+  selected is still remembered correctly across the update.
+- **The Log tab is received-only.** It no longer carries a Sent/Received
+  toggle, so each kind of mail lives in exactly one place.
+
+### Notes
+- A sent mail is **gone from the client** — vanilla has no sent-items store and
+  no way to read back a mail you sent. So the Sent tab replays what Courier
+  recorded as you sent, and there is deliberately no Take or Return: there is
+  nothing left to act on.
+- For the same reason, sends recorded before this update have **no message
+  body and no item icons** — nothing can recover them. Those records still
+  open and read correctly, just without those two things.
+
 ## [1.3.0]
 
 Mass sends are faster, and the Log tab's **Sent** side is now a proper sent
 box: one row per send, with the items it carried, kept for 30 days. `/reload`.
 
 ### Changed
-- **Mass sending is roughly three times faster.** Courier paused a fixed 0.3
-  seconds between every mail, which on a 12-item send is 3.6 seconds of pure
+- **Mass sending no longer pauses between mails.** Courier waited a fixed 0.3
+  seconds after every mail, which on a 12-item send is 3.6 seconds of pure
   waiting. That pause was added when a single refusal threw the whole batch
   away, so over-paying to avoid a race made sense. It no longer does: refusals
   are retried per mail, and the attach path now waits for busy stacks and
@@ -24,6 +57,13 @@ box: one row per send, with the items it carried, kept for 30 days. `/reload`.
   starts at full speed and only slows down if the server actually refuses
   something — and each send starts optimistic again rather than inheriting the
   last one's caution.
+  - **How much faster in practice is not yet known.** An earlier draft of this
+    entry claimed "roughly three times faster"; that was arithmetic, not a
+    measurement, and it assumed a server round-trip we do not control. The
+    3.6 seconds is real and is gone, but each mail still costs a round-trip,
+    so on a short send the difference may be hard to notice at all. v1.4.0
+    makes every batch report its own elapsed time so this stops being a matter
+    of impression.
 
 ### Added
 - **A sent box.** The Log tab's **Sent** side now shows one row per *send*

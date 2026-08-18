@@ -429,6 +429,13 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       player asking (`inbox.ReadIsFree`).
 - [ ] List rows still fit their well — `ui.Geometry()` is asserted by the
       harness; 1.12 does not clip children, it just draws over the border.
+- [ ] A tab's KEY was not changed to relabel it. `SUBTABS` entries name the
+      panel frame global, the `ui.panels` / `ui.subTabs` keys, the
+      `SendAttachActive` comparison and the remembered tab in
+      `db.char.ui.tab` — relabel via `SUBTAB_LABELS` instead.
+- [ ] Anything the Sent reader will want was captured AT SEND TIME. A sent mail
+      is gone from the client; there is no API to read one back, so nothing can
+      be backfilled and old records must still render.
 - [ ] Batch sends verify `GetSendMailItem()` before `SendMail` **and compare
       its name to the queued item**; bag coordinates are re-resolved at use;
       `locked` (3rd return of `GetContainerItemInfo`) is read and waited on;

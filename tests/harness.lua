@@ -236,6 +236,10 @@ GetInboxInvoiceInfo = function(i)
     local v = m.invoice
     return v.kind, v.item, v.who, v.bid, v.buyout, v.deposit, v.consignment
 end
+-- The client's high-resolution timer. Advanced by the send pump so an elapsed
+-- time can be asserted rather than eyeballed.
+fakeClock = 0
+GetTime = function() return fakeClock end
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
 MiniMapMailFrame:Show()
 -- Counts operations the SERVER would have to perform. The pump below clocks
@@ -976,6 +980,8 @@ local function pumpSend(limit)
     local n, seenAttempts = 0, sendAttempts
     while send.sending and n < (limit or 60) do
         -- A generous frame delta so any settle/retry wait elapses in one tick.
+        -- The fake clock advances with it, so elapsed time is measurable.
+        fakeClock = fakeClock + 5
         arg1 = 5
         sdriver.scripts.OnUpdate()
         arg1 = nil
@@ -2231,6 +2237,48 @@ pumpSend()
 check(send.settle == send.SETTLE_MIN,
       "a clean run never slows itself down", send.settle)
 
+print("== pacing: a batch reports its own elapsed time ==")
+-- "Did the speed change?" was not answerable by feel. A batch that measures
+-- itself turns it into a number.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "timed", "", 0, false, false)
+pumpSend()
+check(send.lastElapsed ~= nil, "the batch measured itself",
+      tostring(send.lastElapsed))
+check(send.lastElapsed > 0, "and the clock moved", send.lastElapsed)
+local saidTime = false
+local ti = 1
+while ti <= table.getn(DEFAULT_CHAT_FRAME.messages) do
+    if A.util.Contains(DEFAULT_CHAT_FRAME.messages[ti], " in ") then
+        saidTime = true
+    end
+    ti = ti + 1
+end
+check(saidTime, "and it told the user how long it took")
+check(A.util.FormatSeconds(4.24) == "4.2s", "seconds format to one decimal",
+      A.util.FormatSeconds(4.24))
+check(A.util.FormatSeconds(4.26) == "4.3s", "rounding to nearest",
+      A.util.FormatSeconds(4.26))
+check(A.util.FormatSeconds(0) == "0.0s", "zero is fine")
+
+print("== pacing: SETTLE_MIN really does mean the very next frame ==")
+-- Arm(0) sets wait = 0; the driver's guard is `waited < wait`, so with a wait
+-- of zero the first tick after arming steps immediately. If this ever became
+-- `<=` the batch would silently cost an extra frame per mail.
+send.Arm(0)
+check(send.armed == true, "armed")
+local steppedOn = nil
+local origStep = send.Step
+send.Step = function() steppedOn = "yes" end
+arg1 = 0.016            -- one 60fps frame
+sdriver.scripts.OnUpdate()
+arg1 = nil
+send.Step = origStep
+check(steppedOn == "yes", "one frame later, it stepped")
+send.armed = false
+
 print("== pacing: a refusal backs off, and the backoff sticks ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
@@ -2386,42 +2434,157 @@ check(table.getn(A.db.SentBox()) == A.db.SENT_MAX,
 check(A.db.SentBox()[1].to == "R26", "oldest go first", A.db.SentBox()[1].to)
 A.db.ClearLog()
 
-print("== sent view: the Log tab's Sent side shows BATCHES ==")
+print("== tabs: Send is labelled Compose, but its KEY is unchanged ==")
+-- The key names the panel frame, the ui.panels entry, the comparison in
+-- SendAttachActive, and the remembered tab in db.char.ui.tab. Renaming it to
+-- relabel the tab would drop every player onto a different tab after updating.
+check(A.ui.subTabs["Send"] ~= nil, "the tab is still keyed Send")
+check(rawget(A.ui.subTabs["Send"].label, "text") == "Compose",
+      "but reads Compose", rawget(A.ui.subTabs["Send"].label, "text"))
+check(getglobal("AegisCourierPanelSend") ~= nil,
+      "the panel frame global is unchanged")
+check(A.ui.panels["Send"] ~= nil, "and so is the panels entry")
+A.ui.SelectSubTab("Send")
+check(A.ui.selectedSubTab == "Send", "selection still uses the key")
+check(A.ui.SendAttachActive() == true,
+      "and the bag hook still recognises the compose tab")
+
+check(A.ui.subTabs["Sent"] ~= nil, "Sent is a tab of its own")
+check(rawget(A.ui.subTabs["Sent"].label, "text") == "Sent",
+      "labelled plainly", rawget(A.ui.subTabs["Sent"].label, "text"))
+check(A.ui.panels["Sent"] ~= nil, "with its own panel")
+
+print("== tabs: the Log tab is received-only now ==")
+check(A.ui.logSentBtn == nil, "the Sent/Received toggle is gone")
+check(A.ui.logDir == "received", "and the log is fixed to received",
+      A.ui.logDir)
+
+print("== Sent tab: a batch is ONE row you can click ==")
 A.db.ClearLog()
 A.ui.mailOpen = true
 A.ui.OpenWindow()
-A.ui.SelectSubTab("Log")
+A.ui.SelectSubTab("Sent")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
-send.Start("Torchbank", "supplies", "", 0, false, false)
+send.Start("Torchbank", "supplies", "letters and parcels", 0, false, false)
 pumpSend()
-A.ui.logDir = "sent"
-A.ui.logFind:SetText("")
-A.ui.logMine:SetChecked(false)
-local srows = A.ui.LogRows()
+A.ui.sentFind:SetText("")
+A.ui.sentMine:SetChecked(false)
+local srows = A.ui.SentRows()
 check(table.getn(srows) == 1, "three mails render as ONE row",
       table.getn(srows))
-check(srows[1].who == "Torchbank", "recipient", srows[1].who)
-check(srows[1].subject == "supplies", "subject as typed", srows[1].subject)
-check(srows[1].mails == 3, "and it says how many mails it cost", srows[1].mails)
-check(A.util.Contains(srows[1].item or "", "Silk Cloth"),
-      "the items are named, not just counted", srows[1].item)
-check(A.util.Contains(srows[1].item or "", "Copper Ore"),
-      "all of them while they fit", srows[1].item)
-check(pcall(A.ui.RefreshLog) == true, "and the Sent view paints clean")
+check(srows[1].rec.to == "Torchbank", "recipient", srows[1].rec.to)
+check(srows[1].rec.s == "supplies", "subject as typed", srows[1].rec.s)
+check(srows[1].rec.mails == 3, "and it cost three mails", srows[1].rec.mails)
+check(pcall(A.ui.RefreshSent) == true, "the list paints clean")
 
 -- The find box has to search the item list, or a sent box you cannot search
 -- is just a list you scroll.
-A.ui.logFind:SetText("copper")
-check(table.getn(A.ui.LogRows()) == 1, "found by an item inside the batch")
-A.ui.logFind:SetText("torchbank")
-check(table.getn(A.ui.LogRows()) == 1, "found by recipient")
-A.ui.logFind:SetText("nonesuch")
-check(table.getn(A.ui.LogRows()) == 0, "and a miss is a miss")
-A.ui.logFind:SetText("")
+A.ui.sentFind:SetText("copper")
+check(table.getn(A.ui.SentRows()) == 1, "found by an item inside the batch")
+A.ui.sentFind:SetText("torchbank")
+check(table.getn(A.ui.SentRows()) == 1, "found by recipient")
+A.ui.sentFind:SetText("parcels")
+check(table.getn(A.ui.SentRows()) == 1, "found by body text")
+A.ui.sentFind:SetText("nonesuch")
+check(table.getn(A.ui.SentRows()) == 0, "and a miss is a miss")
+A.ui.sentFind:SetText("")
 
--- Long batches summarise rather than running off the row.
-A.db.ClearLog()
+print("== Sent tab: the reader replays what was recorded ==")
+check(A.ui.SentReaderOpen() == false, "the list shows first")
+check(A.ui.OpenSentRecord(1) == true, "clicking a send opens it")
+check(A.ui.SentReaderOpen(), "the reader is open")
+check(A.ui.sentReader.visible == true, "and visible")
+check(A.ui.sentRows[1].visible == false, "the list gave up the well")
+check(rawget(A.ui.sentTo, "text") == "Torchbank", "recipient shown",
+      rawget(A.ui.sentTo, "text"))
+check(rawget(A.ui.sentBody, "text") == "letters and parcels",
+      "the body was captured at send time and replays here",
+      rawget(A.ui.sentBody, "text"))
+check(A.util.Contains(rawget(A.ui.sentMeta, "text") or "", "3 mails"),
+      "the meta line says what the send actually cost",
+      rawget(A.ui.sentMeta, "text"))
+check(A.util.Contains(rawget(A.ui.sentItemsHead, "text") or "", "3 item"),
+      "and how many items went", rawget(A.ui.sentItemsHead, "text"))
+check(A.util.Contains(rawget(A.ui.sentItemRows[1].label, "text") or "",
+      "Silk Cloth"), "the first item is named",
+      rawget(A.ui.sentItemRows[1].label, "text"))
+check(A.ui.sentItemRows[3].visible == true, "all three item rows shown")
+check(A.ui.sentItemRows[4].visible == false, "and no more than that")
+-- The icon path is captured at attach time; nothing can recover it later.
+check(A.ui.sentItemRows[1].icon.visible == true, "the item icon is shown")
+check(rawget(A.ui.sentItemRows[1].icon, "texture") ~= nil,
+      "and it has a real texture",
+      tostring(rawget(A.ui.sentItemRows[1].icon, "texture")))
+check(A.util.Contains(rawget(A.ui.sentCompose, "text") or "", "Torchbank"),
+      "the compose action names the recipient",
+      rawget(A.ui.sentCompose, "text"))
+-- The one action that makes sense here: write to the same person again.
+A.ui.sentCompose.scripts.OnClick()
+check(A.ui.selectedSubTab == "Send", "it switches to the compose tab",
+      A.ui.selectedSubTab)
+check(A.ui.sendTo:GetText() == "Torchbank", "with the recipient filled in",
+      A.ui.sendTo:GetText())
+A.ui.SelectSubTab("Sent")
+A.ui.OpenSentRecord(1)
+A.ui.CloseSentRecord()
+check(A.ui.SentReaderOpen() == false, "Back returns to the list")
+check(A.ui.sentRows[1].visible == true, "and the rows come back")
+
+print("== Sent tab: there is nothing to Take or Return ==")
+-- A sent mail is GONE from the client -- vanilla has no API to read one back,
+-- so this reader replays Courier's own record and has nothing to act on.
+check(A.ui.sentTake == nil, "no Take button exists")
+check(A.ui.sentReturn == nil, "and no Return button")
+
+print("== Sent tab: old records without body or icons still render ==")
+-- Nothing captured before this release can be backfilled: the mail is gone.
+A.db.ClearSentBox()
+local legacy = A.db.SentBegin("Oldfriend", "legacy", 0, 0)   -- no body passed
+A.db.SentAdd(legacy, "Linen Cloth", 5)                       -- no texture
+check(A.ui.OpenSentRecord(1) == true, "a legacy record opens")
+check(pcall(A.ui.RefreshSent) == true, "and paints without erroring")
+check(A.util.Contains(rawget(A.ui.sentBody, "text") or "", "no message"),
+      "a missing body says so rather than showing an empty well",
+      rawget(A.ui.sentBody, "text"))
+check(A.ui.sentItemRows[1].visible == true, "the item still lists")
+check(A.ui.sentItemRows[1].icon.visible == false,
+      "with its icon simply absent")
+A.ui.CloseSentRecord()
+
+print("== Sent tab: the reader never outlives its record ==")
+A.db.ClearSentBox()
+local r1 = A.db.SentBegin("First", "one", 0, 0)
+A.db.SentAdd(r1, "Thing", 1)
+local r2 = A.db.SentBegin("Second", "two", 0, 0)
+A.db.SentAdd(r2, "Thing", 1)
+A.ui.OpenSentRecord(1)
+check(rawget(A.ui.sentTo, "text") == "First", "reading the first send")
+-- Remove the record being read. Index 1 STAYS VALID -- the second send slides
+-- into it -- so a nil check alone sails straight past this and the reader
+-- would quietly show a different send under the first one's heading.
+table.remove(A.db.SentBox(), 1)
+check(A.db.SentBox()[1] ~= nil, "index 1 is still a real record")
+check(A.db.SentBox()[1].to == "Second", "but a DIFFERENT one now",
+      A.db.SentBox()[1].to)
+A.ui.RefreshSent()
+check(A.ui.SentReaderOpen() == false,
+      "a record shifting under the index closes the reader")
+check(A.ui.sentRows[1].visible == true, "and the list is painted instead")
+
+-- And the simpler case: the box emptied entirely.
+A.db.ClearSentBox()
+local r3 = A.db.SentBegin("Third", "three", 0, 0)
+A.db.SentAdd(r3, "Thing", 1)
+A.ui.OpenSentRecord(1)
+check(A.ui.SentReaderOpen(), "reading again")
+A.db.ClearSentBox()
+A.ui.RefreshSent()
+check(A.ui.SentReaderOpen() == false,
+      "clearing the box drops the reader back to the list")
+
+print("== Sent tab: long batches summarise but stay searchable ==")
+A.db.ClearSentBox()
 local many = A.db.SentBegin("Torchbank", "big", 0, 0)
 local mi2 = 1
 while mi2 <= 9 do
@@ -2436,17 +2599,18 @@ check(A.util.Contains(bigRow.item, "+6 more"), "and the rest are counted",
 -- The label is truncated for width; SEARCH must not be. A bank-alt send is
 -- exactly where an item sits ninth in the list, and "I know I mailed it" is
 -- the whole reason to open a sent box.
-A.ui.logFind:SetText("thing 9")
-check(table.getn(A.ui.LogRows()) == 1,
+A.ui.sentFind:SetText("thing 9")
+check(table.getn(A.ui.SentRows()) == 1,
       "an item past the visible ones is still findable",
-      table.getn(A.ui.LogRows()))
-A.ui.logFind:SetText("")
+      table.getn(A.ui.SentRows()))
+A.ui.sentFind:SetText("")
 
-print("== sent view: Clear empties the sent box ==")
-A.db.ClearLog("sent")
+print("== Sent tab: Clear empties the box ==")
+A.db.ClearSentBox()
 check(table.getn(A.db.SentBox()) == 0, "the box is empty",
       table.getn(A.db.SentBox()))
-check(table.getn(A.ui.LogRows()) == 0, "and so is the view")
+check(table.getn(A.ui.SentRows()) == 0, "and so is the view")
+A.ui.SelectSubTab("Log")
 A.ui.logDir = "received"
 
 print("== log: filtering ==")

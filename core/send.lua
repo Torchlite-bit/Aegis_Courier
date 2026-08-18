@@ -352,6 +352,11 @@ function send.Start(to, subject, body, money, isCOD, codAll)
     send.skipped   = 0
     send.settle    = send.SETTLE_MIN
     send.sentRec   = nil    -- opened by the first confirmed mail, not here
+    -- Wall clock for the batch. GetTime is the client's high-resolution timer;
+    -- time() is whole seconds and would round a fast batch to nothing. This
+    -- exists because "is it faster now?" was not answerable by feel -- a batch
+    -- that reports its own cost turns that into a number.
+    send.startedAt = (GetTime and GetTime()) or nil
     send.retries   = 0
     send.inFlight  = nil
     send.sending   = true
@@ -536,6 +541,10 @@ function send.Step()
         subject = subject,
         item    = attachment and attachment.name or nil,
         count   = attachment and attachment.count or nil,
+        -- Carried for the sent box's reader. A sent mail leaves the client
+        -- entirely -- there is no API to read one back -- so anything the
+        -- reader will want has to be captured here or it is gone for good.
+        texture = attachment and attachment.texture or nil,
         money   = (not send.isCOD) and appliedMoney or 0,
         cod     = send.isCOD and appliedMoney or 0,
     }
@@ -562,9 +571,19 @@ function send.Finish()
     send.queue = nil
     send.armed = false
     A.db.AddContact(send.to)
+    -- Measured, not estimated. Kept on send.lastElapsed so it can be asserted
+    -- rather than eyeballed.
+    send.lastElapsed = nil
+    if send.startedAt and GetTime then
+        send.lastElapsed = GetTime() - send.startedAt
+    end
+
     if send.sentCount > 0 then
         local line = "sent " .. send.sentCount .. " mail" ..
             (send.sentCount == 1 and "" or "s") .. " to " .. send.to
+        if send.lastElapsed then
+            line = line .. " in " .. util.FormatSeconds(send.lastElapsed)
+        end
         -- Say what was left behind. A partial run that reports only its
         -- successes reads as a complete one, and the user never goes looking
         -- for the item still sitting in their bags.
@@ -690,9 +709,11 @@ A.RegisterEvent("MAIL_SEND_SUCCESS", function()
         if not send.sentRec then
             send.sentRec = A.db.SentBegin(send.to, send.subject,
                 (not send.isCOD) and send.money or 0,
-                send.isCOD and send.money or 0)
+                send.isCOD and send.money or 0,
+                send.body)
         end
-        A.db.SentAdd(send.sentRec, send.lastSent.item, send.lastSent.count)
+        A.db.SentAdd(send.sentRec, send.lastSent.item, send.lastSent.count,
+            send.lastSent.texture)
         send.lastSent = nil
     end
     if send.queue and table.getn(send.queue) > 0 then
