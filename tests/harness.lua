@@ -76,6 +76,13 @@ CreateFrame = function(kind, name, parent, template)
     -- rawget throughout: see the note above newRegion.
     function f:SetText(t) rawset(self, "text", t) end
     function f:GetText() return rawget(self, "text") end
+    -- REAL focus tracking. There was none: SetFocus fell through to the
+    -- CamelCase no-op, so a Tab chain could be entirely broken and the suite
+    -- would agree with it. Exactly one widget holds focus at a time, as on the
+    -- client.
+    function f:SetFocus() focusedBox = self end
+    function f:ClearFocus() if focusedBox == self then focusedBox = nil end end
+    function f:HasFocus() return focusedBox == self end
     function f:Enable() rawset(self, "enabled", true) end
     function f:Disable() rawset(self, "enabled", false) end
     function f:IsEnabled() return rawget(self, "enabled") ~= false end
@@ -240,6 +247,8 @@ end
 -- time can be asserted rather than eyeballed.
 fakeClock = 0
 GetTime = function() return fakeClock end
+-- Whichever EditBox currently holds the keyboard, or nil.
+focusedBox = nil
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
 MiniMapMailFrame:Show()
 -- Counts operations the SERVER would have to perform. The pump below clocks
@@ -1567,6 +1576,54 @@ check(A.version == tocVersion,
       "A.version agrees with the .toc",
       tostring(A.version) .. " vs " .. tostring(tocVersion))
 
+print("== compose: Tab walks the form ==")
+-- 1.12 has no Tab-order property on an EditBox; OnTabPressed plus an explicit
+-- SetFocus is the whole mechanism, which is why this is worth asserting.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Send")
+local chain = { A.ui.sendTo, A.ui.sendSubject, A.ui.sendBody, A.ui.sendMoney }
+local names = { "To", "Subject", "Body", "Gold" }
+
+local ci = 1
+while ci <= 4 do
+    check(chain[ci].scripts.OnTabPressed ~= nil,
+          names[ci] .. " handles Tab")
+    ci = ci + 1
+end
+
+A.ui.sendTo:SetFocus()
+check(A.ui.sendTo:HasFocus(), "To has the keyboard")
+ci = 1
+while ci <= 3 do
+    chain[ci].scripts.OnTabPressed()
+    check(chain[ci + 1]:HasFocus(),
+          "Tab from " .. names[ci] .. " lands on " .. names[ci + 1])
+    check(chain[ci]:HasFocus() == false,
+          "and " .. names[ci] .. " gives it up")
+    ci = ci + 1
+end
+
+-- Gold is the last field. Wrapping means Tab never reads as a dead key.
+A.ui.sendMoney.scripts.OnTabPressed()
+check(A.ui.sendTo:HasFocus(), "Tab from Gold wraps back to To")
+
+-- The multiline body is in the chain deliberately: handling OnTabPressed is
+-- also what stops Tab typing a literal tab into the message.
+A.ui.sendBody:SetFocus()
+A.ui.sendBody:SetText("hello")
+A.ui.sendBody.scripts.OnTabPressed()
+check(A.ui.sendMoney:HasFocus(), "Tab out of the multiline body works")
+check(A.ui.sendBody:GetText() == "hello",
+      "and does not type a tab character into it",
+      A.ui.sendBody:GetText())
+
+-- Escape on the recipient box still closes the autocomplete first; the Tab
+-- wiring must not have displaced it.
+check(A.ui.sendTo.scripts.OnEscapePressed ~= nil,
+      "To still handles Escape")
+focusedBox = nil
+
 print("== send UI: the Send BUTTON is clickable for a letter ==")
 -- The assertion that was missing when "cannot send without an item" was first
 -- fixed. send.Validate and send.Start were both corrected and tested, but
@@ -1755,19 +1812,25 @@ local function bigInbox(n)
     end
 end
 
--- 10 mails: scrollbar dormant, nothing refires.
-bigInbox(10)
+-- Row counts derive from ROWS, not literals: the crash threshold IS
+-- ROWS + 1, so a hardcoded 11 silently stops testing anything the moment the
+-- list grows.
+local ROWS_N = A.ui.Geometry().rows
+
+-- Exactly ROWS mails: scrollbar dormant, nothing refires.
+bigInbox(ROWS_N)
 scrollRefires = 0
-check(pcall(A.ui.RefreshInbox) == true, "10 mails refresh cleanly")
+check(pcall(A.ui.RefreshInbox) == true, "a full page refreshes cleanly")
 check(scrollRefires == 0, "scrollbar dormant at exactly ROWS mails",
       scrollRefires)
 
--- 11 mails, scrolled: the scrollbar is live and refires synchronously.
-bigInbox(11)
+-- ROWS + 1, scrolled: the scrollbar is live and refires synchronously.
+bigInbox(ROWS_N + 1)
 rawset(A.ui.inboxScroll, "value", 28)      -- user has scrolled one row down
 scrollRefires = 0
 local okBig = pcall(A.ui.RefreshInbox)
-check(okBig == true, "11 mails, scrolled: refresh terminates (the crash case)")
+check(okBig == true,
+      "ROWS+1 mails, scrolled: refresh terminates (the crash case)")
 check(scrollRefires > 0, "and the re-entrant scroll path genuinely fired",
       scrollRefires)
 
@@ -2039,8 +2102,33 @@ check(geom.ledger >= geom.need,
 -- than it needs to be, which is worth noticing.
 check(geom.inbox <= geom.log and geom.inbox <= geom.ledger,
       "the Inbox is still the tightest list, so it sets the window height")
-check(geom.winH == geom.panelH + 68 + 28, "window height derives from the panel",
-      geom.winH)
+check(geom.winH == geom.panelH + geom.panelTop + geom.panelBottom,
+      "window height derives from the panel", geom.winH)
+-- The panels must start BELOW the title bar and the tab row. Arithmetic that
+-- merely balances can still put a panel on top of the tabs, and 1.12 draws
+-- that overlap instead of clipping it.
+check(geom.panelTop >= geom.chromeH,
+      "panels clear the title bar and tab row",
+      geom.panelTop .. " top vs " .. geom.chromeH .. " of chrome")
+-- And they must clear the dialog border's 10px art on the sides.
+check(geom.side >= 10, "panels clear the window border", geom.side)
+
+print("== geometry: the Sent reader's blocks fit without overlapping ==")
+local sg = A.ui.SentGeometry()
+check(sg.slots >= send.MAX_ATTACHMENTS,
+      "every item a batch can hold has a visible slot -- no scrolling needed",
+      sg.slots .. " slots for " .. send.MAX_ATTACHMENTS .. " max items")
+check(sg.head + sg.items + sg.gap + sg.bodyH + sg.foot == sg.readerH,
+      "the blocks account for exactly the reader's height",
+      sg.readerH)
+check(sg.bodyH > 0, "the message well has real height", sg.bodyH)
+-- The request was "twice as tall". Measured against the 92px it had before.
+check(sg.bodyH >= 92 * 2,
+      "the message well is at least double what it was",
+      sg.bodyH .. " vs 92 before")
+-- And it must be tall enough to show the whole of a body, which is capped.
+check(sg.bodyH >= 140,
+      "tall enough to show a full-length message without scrolling", sg.bodyH)
 
 print("== clock: a step that skips a mail must re-arm itself ==")
 -- take.armed is set by nothing but MAIL_INBOX_UPDATE, and the server only

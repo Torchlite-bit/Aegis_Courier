@@ -46,7 +46,11 @@ local C = {
 }
 
 local ROW_H         = 28
-local ROWS          = 10
+-- Twelve, not ten. The window grows for the heavier chrome and the taller Sent
+-- reader regardless, and a list that shows more of a full mailbox at once was
+-- already the point -- the geometry below resizes the window to match rather
+-- than letting rows overflow their well.
+local ROWS          = 12
 
 -- ---- window geometry -------------------------------------------------------
 -- The window height is DERIVED from the list, not picked by eye. It used to be
@@ -61,7 +65,21 @@ local ROWS          = 10
 -- result and the harness asserts the rows fit.
 local LIST_PAD = 4                          -- well edge to first/last row
 
-local PANEL_TOP,  PANEL_BOTTOM  = 68, 28    -- panel inset within the window
+-- ---- window chrome ---------------------------------------------------------
+-- The main window wears Aegis: Exchange's dialog frame rather than the thin
+-- tooltip border the inner wells use (see WindowBackdrop). That art is 28px
+-- deep with 10px insets, so everything inside has to be pushed clear of it --
+-- these are the numbers that do it, and every anchor derives from them rather
+-- than repeating a literal.
+local TITLE_INSET = 12                      -- title bar offset from the corner
+local TITLE_H     = 26
+local TAB_H       = 24                      -- sub-tab button height
+local GAP         = 6
+local PANEL_SIDE  = 12                      -- panel inset left/right
+
+-- Panel top clears the border, the title bar and the tab row in turn.
+local PANEL_TOP    = TITLE_INSET + TITLE_H + GAP + TAB_H + GAP
+local PANEL_BOTTOM = 32                     -- clears the footer and the border
 -- The Inbox is the tightest of the three panels: a summary line, an action bar
 -- and a column header sit above its well, and the hint line sits below it.
 local INBOX_TOP,  INBOX_BOTTOM  = 58, 22
@@ -90,6 +108,15 @@ function ui.Geometry()
         rowH   = ROW_H,
         winH   = WIN_H,
         panelH = PANEL_H,
+        panelTop    = PANEL_TOP,
+        panelBottom = PANEL_BOTTOM,
+        -- Chrome the panels have to start below. Reported so the harness can
+        -- assert the clearance rather than only the internal arithmetic: a
+        -- panelTop that is merely self-consistent can still sit on top of the
+        -- tab row, and 1.12 draws the overlap rather than clipping it.
+        chromeH     = TITLE_INSET + TITLE_H + GAP + TAB_H,
+        titleInset  = TITLE_INSET,
+        side        = PANEL_SIDE,
         inbox  = INBOX_WELL,
         log    = LOG_WELL,
         ledger = LEDGER_WELL,
@@ -146,6 +173,42 @@ local function Backdrop(frame, bg, border)
     frame:SetBackdropColor(bg[1], bg[2], bg[3], 1)
     if border then
         frame:SetBackdropBorderColor(C.border[1], C.border[2], C.border[3], 0.8)
+    end
+end
+
+-- The MAIN WINDOW's frame, deliberately different from the thin tooltip border
+-- every inner well uses. These values are Aegis: Exchange's, copied so the two
+-- addons read as one suite when neither is skinned:
+--   * UI-DialogBox-Border is ornamental 9-slice art with a much heavier edge
+--     (28 vs the tooltip border's 12), so it needs insets of 10 to keep content
+--     off the frame rather than the wells' 3.
+--   * The border colour stays WHITE. Tinting it, which the tooltip border wants
+--     to look right, muddies the dialog art's own gold ornamentation.
+local function WindowBackdrop(frame, bg)
+    frame:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 28,
+        insets = { left = 10, right = 10, top = 10, bottom = 10 },
+    })
+    frame:SetBackdropColor(bg[1], bg[2], bg[3], 1)
+    frame:SetBackdropBorderColor(1, 1, 1)
+end
+
+-- Wire a list of EditBoxes so Tab walks them in order and wraps at the end.
+-- Kept as a helper so the order is declared in one readable line at the call
+-- site rather than smeared across four SetScript calls.
+function ui.SetTabChain(boxes)
+    local n = table.getn(boxes)
+    local i = 1
+    while i <= n do
+        local nextBox = boxes[i + 1] or boxes[1]
+        -- Captured per iteration; `nextBox` is a fresh local each pass, so the
+        -- closures do not all end up pointing at the last one.
+        boxes[i]:SetScript("OnTabPressed", function()
+            nextBox:SetFocus()
+        end)
+        i = i + 1
     end
 end
 
@@ -237,7 +300,7 @@ function ui.BuildWindow()
     f:EnableMouse(true)
     f:SetMovable(true)
     f:RegisterForDrag("LeftButton")
-    Backdrop(f, C.panelBG, true)
+    WindowBackdrop(f, C.panelBG)
     f:Hide()
 
     -- Restore the saved position, defaulting to centre-ish.
@@ -282,12 +345,14 @@ function ui.BuildWindow()
     -- ---- title bar ------------------------------------------------------
     local title = CreateFrame("Frame", nil, f)
     title:SetHeight(26)
-    title:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -4)
-    title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
+    -- TITLE_INSET, not 4: the dialog border is 28px of art with 10px insets,
+    -- so a title bar tucked into the corner would sit underneath it.
+    title:SetPoint("TOPLEFT", f, "TOPLEFT", TITLE_INSET, -TITLE_INSET)
+    title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -TITLE_INSET - 2, -TITLE_INSET)
     Backdrop(title, C.titleBG, false)
     ui.titleBar = title
 
-    local titleText = Label(title, "GameFontNormal", C.gold)
+    local titleText = Label(title, "GameFontNormalLarge", C.gold)
     titleText:SetPoint("LEFT", title, "LEFT", 10, 0)
     titleText:SetText("Aegis: Courier  v" .. A.version)
 
@@ -322,14 +387,14 @@ function ui.BuildWindow()
         if prev then
             b:SetPoint("LEFT", prev, "RIGHT", 4, 0)
         else
-            b:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 6, -6)
+            b:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -GAP)
         end
         ui.subTabs[name] = b
         prev = b
 
         local panel = CreateFrame("Frame", "AegisCourierPanel" .. name, f)
-        panel:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -PANEL_TOP)
-        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, PANEL_BOTTOM)
+        panel:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_SIDE, -PANEL_TOP)
+        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PANEL_SIDE, PANEL_BOTTOM)
         panel:Hide()
         ui.panels[name] = panel
 
@@ -338,7 +403,7 @@ function ui.BuildWindow()
 
     -- ---- footer ---------------------------------------------------------
     local footer = Label(f, "GameFontNormalSmall", C.dim)
-    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 10)
+    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, 14)
     ui.footer = footer
 
     ui.BuildInboxPanel()
@@ -1257,6 +1322,21 @@ function ui.BuildSendPanel()
     moneyBox:SetScript("OnTextChanged", function() ui.RefreshSend() end)
     ui.sendMoney = moneyBox
 
+    -- ---- Tab moves to the next field ------------------------------------
+    -- The stock mail form chains its own Name/Subject/Body boxes this way and
+    -- players expect it. There is no Tab-order property on a 1.12 EditBox --
+    -- OnTabPressed plus an explicit SetFocus IS the mechanism.
+    --
+    -- Order is the form's visual order, top to bottom. The attachment slots
+    -- sit between Body and Gold but are icon buttons, not text fields, so they
+    -- are not in the chain.
+    --
+    -- Gold WRAPS back to To rather than dropping focus: the form is short and
+    -- cyclable, and a Tab that silently does nothing reads as a broken key.
+    -- Note the multiline body is included -- handling OnTabPressed is also
+    -- what stops Tab inserting a literal tab character into the message.
+    ui.SetTabChain({ toBox, subjBox, bodyBox, moneyBox })
+
     local moneyHint = Label(panel, "GameFontNormalSmall", C.dim)
     moneyHint:SetPoint("LEFT", moneyBox, "RIGHT", 8, 0)
     moneyHint:SetText("e.g. 12g 30s")
@@ -1780,7 +1860,48 @@ end
 -- someone else; there is nothing to act on. The one useful action is to write
 -- to the same person again, which is what the Compose button does.
 
-local SENT_ITEM_ROWS = 6        -- per column, two columns = 12, the batch max
+-- ---- Sent reader geometry --------------------------------------------------
+-- THREE columns of four rather than two of six. A batch cannot exceed
+-- MAX_ATTACHMENTS (12), so 3 x 4 still shows every possible item without
+-- scrolling -- but in four rows instead of six, which hands 32px straight to
+-- the message below it. Widening beats lengthening here: the reader is far
+-- wider than it is tall, and item labels are short.
+--
+-- Every offset below derives from these; ui.SentGeometry() reports the result
+-- and the harness asserts the blocks fit without overlapping.
+local SENT_ITEM_COLS = 3
+local SENT_ITEM_ROWS = 4                    -- x COLS = 12 = MAX_ATTACHMENTS
+local SENT_ITEM_H    = 16
+
+-- Header block: Back/recipient, subject, then one line carrying both the mail
+-- count and the item count. Merging those two lines is where another 18px for
+-- the message came from.
+local SENT_HEAD_H = 60
+local SENT_FOOT_H = 26                      -- the Compose button strip
+local SENT_GAP    = 8
+
+local SENT_ITEMS_H = SENT_ITEM_ROWS * SENT_ITEM_H
+local SENT_BODY_TOP = SENT_HEAD_H + SENT_ITEMS_H + SENT_GAP
+
+-- The Sent reader's vertical budget, reported so the harness can assert the
+-- blocks actually fit. 1.12 does not clip children -- an overflowing block
+-- just draws over whatever is beneath it -- which is the same trap the Inbox
+-- list hit in v1.1.0, and the reason this is asserted rather than eyeballed.
+function ui.SentGeometry()
+    local readerH = PANEL_H - LOG_TOP - LOG_BOTTOM - (LIST_PAD * 2)
+    return {
+        readerH = readerH,
+        head    = SENT_HEAD_H,
+        items   = SENT_ITEMS_H,
+        gap     = SENT_GAP,
+        foot    = SENT_FOOT_H,
+        bodyTop = SENT_BODY_TOP,
+        bodyH   = readerH - SENT_BODY_TOP - SENT_FOOT_H,
+        cols    = SENT_ITEM_COLS,
+        rows    = SENT_ITEM_ROWS,
+        slots   = SENT_ITEM_COLS * SENT_ITEM_ROWS,
+    }
+end
 
 function ui.BuildSentPanel()
     local panel = ui.panels["Sent"]
@@ -1900,29 +2021,29 @@ function ui.BuildSentReader(well)
     ui.sentWhen = when
 
     local subject = Label(r, "GameFontNormal", C.text)
-    subject:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -28)
+    subject:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -26)
     ui.sentSubject = subject
 
     local meta = Label(r, "GameFontNormalSmall", C.dim)
-    meta:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -48)
+    meta:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -44)
     ui.sentMeta = meta
 
-    local itemsHead = Label(r, "GameFontNormalSmall", C.goldDim)
-    itemsHead:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -68)
-    ui.sentItemsHead = itemsHead
+    -- Item count rides the meta line now; this label is gone as a separate row.
+    ui.sentItemsHead = meta
 
-    -- Two columns of six: a batch is capped at MAX_ATTACHMENTS (12), so the
-    -- list never scrolls and the body below keeps its room.
+    -- Filled column-major so reading down a column is reading the batch in
+    -- order, the way the attachment grid on the Compose tab is laid out.
+    local colW = math.floor((WIN_W - (PANEL_SIDE * 2) - 40) / SENT_ITEM_COLS)
     ui.sentItemRows = {}
     local n = 1
-    while n <= SENT_ITEM_ROWS * 2 do
-        local col = (n > SENT_ITEM_ROWS) and 1 or 0
+    while n <= SENT_ITEM_ROWS * SENT_ITEM_COLS do
+        local col = math.floor((n - 1) / SENT_ITEM_ROWS)
         local rowIdx = n - (col * SENT_ITEM_ROWS)
         local f = CreateFrame("Frame", nil, r)
-        f:SetHeight(16)
-        f:SetWidth(280)
-        f:SetPoint("TOPLEFT", r, "TOPLEFT", 6 + col * 292,
-            -84 - (rowIdx - 1) * 16)
+        f:SetHeight(SENT_ITEM_H)
+        f:SetWidth(colW - 6)
+        f:SetPoint("TOPLEFT", r, "TOPLEFT", 6 + col * colW,
+            -SENT_HEAD_H - (rowIdx - 1) * SENT_ITEM_H)
 
         local icon = f:CreateTexture(nil, "ARTWORK")
         icon:SetWidth(14)
@@ -1940,8 +2061,8 @@ function ui.BuildSentReader(well)
     end
 
     local bodyWell = CreateFrame("Frame", nil, r)
-    bodyWell:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -188)
-    bodyWell:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, 26)
+    bodyWell:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -SENT_BODY_TOP)
+    bodyWell:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, SENT_FOOT_H)
     Backdrop(bodyWell, C.well, true)
     ui.sentBodyWell = bodyWell
 
@@ -2149,12 +2270,13 @@ function ui.RefreshSentReader()
     elseif rec.money and rec.money > 0 then
         meta = meta .. "  |  " .. util.FormatMoney(rec.money, true) .. " sent"
     end
-    ui.sentMeta:SetText(meta)
-
+    -- Mail count and item count share ONE line. They used to be two, and the
+    -- 18px that bought went to the message well below.
     local items = rec.items or {}
     local n = table.getn(items)
-    ui.sentItemsHead:SetText(n == 0 and "No attachments"
+    meta = meta .. "  |  " .. (n == 0 and "no attachments"
         or (n .. (n == 1 and " item" or " items")))
+    ui.sentMeta:SetText(meta)
 
     local i = 1
     while i <= SENT_ITEM_ROWS * 2 do

@@ -9,6 +9,31 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.5.0]
+
+The window now matches Aegis: Exchange, the Sent reader gives the message room
+to breathe, and **Tab** moves between fields when composing. `/reload`.
+
+### Changed
+- **The window wears Exchange's frame.** Unskinned, Courier used a thin tooltip
+  border throughout while Exchange used the heavier ornamental dialog frame, so
+  running both looked like running two unrelated addons. Courier now uses the
+  same frame, title inset and title size. (With pfUI installed the two already
+  matched — that path is untouched.)
+- **The inbox shows 12 mails at a time, up from 10.** The window grew for the
+  heavier frame and the taller message area anyway, and the list is sized from
+  the window rather than the other way round.
+- **The Sent reader's message area is more than twice as tall** — 204px, up
+  from 92px. The item list moved from two columns of six to three of four,
+  which still shows every item a batch can hold (12 is the cap) while giving
+  132px back to the message. The mail count and item count now share one line
+  instead of two.
+
+### Added
+- **Tab moves to the next field when composing** — To → Subject → Body → Gold,
+  wrapping back to To. This is how the stock mail form behaves. Tab inside the
+  message no longer types a tab character.
+
 ## [1.4.0]
 
 Sent mail gets its own tab with a reader, the Send tab is now **Compose**, and

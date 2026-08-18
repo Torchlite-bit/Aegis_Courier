@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.4.0)
+# Aegis: Courier (v1.5.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -149,6 +149,7 @@ and the cost line shows the **real** total postage rather than a single mail's.
 | **subject** | leave it blank and each mail is named after its item (`Silk Cloth (20)`); fill it in and a batch is numbered `subject [2/5]` |
 | **recipient** | starts suggesting names you have mailed or been mailed by, most recent first — the arrow button beside the box lists them all |
 | **gold** | type `12g 30s`, or a bare number for gold |
+| **Tab** | moves to the next field — To → Subject → Body → Gold, then back to To |
 | **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
 
 Attached gold rides the **first** mail only, so a 10-item send does not send

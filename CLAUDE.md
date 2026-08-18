@@ -427,8 +427,13 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       `take.Advance`; the harness pump still clocks off `serverCalls`.
 - [ ] No body is fetched for mail that still holds something without the
       player asking (`inbox.ReadIsFree`).
-- [ ] List rows still fit their well — `ui.Geometry()` is asserted by the
-      harness; 1.12 does not clip children, it just draws over the border.
+- [ ] List rows still fit their well — `ui.Geometry()` / `ui.SentGeometry()`
+      are asserted by the harness; 1.12 does not clip children, it just draws
+      over the border. A panel must also CLEAR the chrome above it, not merely
+      balance the arithmetic.
+- [ ] Layout numbers are DERIVED, never literal. A hardcoded row count or inset
+      in a test stops testing anything the moment the window changes shape —
+      read `ui.Geometry()` instead.
 - [ ] A tab's KEY was not changed to relabel it. `SUBTABS` entries name the
       panel frame global, the `ui.panels` / `ui.subTabs` keys, the
       `SendAttachActive` comparison and the remembered tab in
