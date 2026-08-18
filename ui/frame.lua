@@ -46,7 +46,11 @@ local C = {
 }
 
 local ROW_H         = 28
-local ROWS          = 10
+-- Twelve, not ten. The window grows for the heavier chrome and the taller Sent
+-- reader regardless, and a list that shows more of a full mailbox at once was
+-- already the point -- the geometry below resizes the window to match rather
+-- than letting rows overflow their well.
+local ROWS          = 12
 
 -- ---- window geometry -------------------------------------------------------
 -- The window height is DERIVED from the list, not picked by eye. It used to be
@@ -61,7 +65,21 @@ local ROWS          = 10
 -- result and the harness asserts the rows fit.
 local LIST_PAD = 4                          -- well edge to first/last row
 
-local PANEL_TOP,  PANEL_BOTTOM  = 68, 28    -- panel inset within the window
+-- ---- window chrome ---------------------------------------------------------
+-- The main window wears Aegis: Exchange's dialog frame rather than the thin
+-- tooltip border the inner wells use (see WindowBackdrop). That art is 28px
+-- deep with 10px insets, so everything inside has to be pushed clear of it --
+-- these are the numbers that do it, and every anchor derives from them rather
+-- than repeating a literal.
+local TITLE_INSET = 12                      -- title bar offset from the corner
+local TITLE_H     = 26
+local TAB_H       = 24                      -- sub-tab button height
+local GAP         = 6
+local PANEL_SIDE  = 12                      -- panel inset left/right
+
+-- Panel top clears the border, the title bar and the tab row in turn.
+local PANEL_TOP    = TITLE_INSET + TITLE_H + GAP + TAB_H + GAP
+local PANEL_BOTTOM = 32                     -- clears the footer and the border
 -- The Inbox is the tightest of the three panels: a summary line, an action bar
 -- and a column header sit above its well, and the hint line sits below it.
 local INBOX_TOP,  INBOX_BOTTOM  = 58, 22
@@ -90,13 +108,36 @@ function ui.Geometry()
         rowH   = ROW_H,
         winH   = WIN_H,
         panelH = PANEL_H,
+        panelTop    = PANEL_TOP,
+        panelBottom = PANEL_BOTTOM,
+        -- Chrome the panels have to start below. Reported so the harness can
+        -- assert the clearance rather than only the internal arithmetic: a
+        -- panelTop that is merely self-consistent can still sit on top of the
+        -- tab row, and 1.12 draws the overlap rather than clipping it.
+        chromeH     = TITLE_INSET + TITLE_H + GAP + TAB_H,
+        titleInset  = TITLE_INSET,
+        side        = PANEL_SIDE,
         inbox  = INBOX_WELL,
         log    = LOG_WELL,
         ledger = LEDGER_WELL,
     }
 end
 
-local SUBTABS = { "Inbox", "Send", "Log", "Ledger", "Courier" }
+-- Tab KEYS. These are identity, not presentation: they name the panel frame
+-- (AegisCourierPanelSend), the ui.panels / ui.subTabs entries, the comparison
+-- in ui.SendAttachActive, and the remembered tab persisted in
+-- db.char.ui.tab. Renaming one silently drops every player onto a different
+-- tab after an update, so a key is never changed to relabel something.
+local SUBTABS = { "Inbox", "Send", "Sent", "Log", "Ledger", "Courier" }
+
+-- Display labels, where they differ from the key. "Send" is the compose form;
+-- "Sent" is the record of what already went. Calling the first one Send next
+-- to the second reads as two views of the same thing, which they are not.
+local SUBTAB_LABELS = { Send = "Compose" }
+
+local function SubTabLabel(key)
+    return SUBTAB_LABELS[key] or key
+end
 
 -- ---------------------------------------------------------------------------
 -- Small helpers
@@ -135,6 +176,42 @@ local function Backdrop(frame, bg, border)
     end
 end
 
+-- The MAIN WINDOW's frame, deliberately different from the thin tooltip border
+-- every inner well uses. These values are Aegis: Exchange's, copied so the two
+-- addons read as one suite when neither is skinned:
+--   * UI-DialogBox-Border is ornamental 9-slice art with a much heavier edge
+--     (28 vs the tooltip border's 12), so it needs insets of 10 to keep content
+--     off the frame rather than the wells' 3.
+--   * The border colour stays WHITE. Tinting it, which the tooltip border wants
+--     to look right, muddies the dialog art's own gold ornamentation.
+local function WindowBackdrop(frame, bg)
+    frame:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 28,
+        insets = { left = 10, right = 10, top = 10, bottom = 10 },
+    })
+    frame:SetBackdropColor(bg[1], bg[2], bg[3], 1)
+    frame:SetBackdropBorderColor(1, 1, 1)
+end
+
+-- Wire a list of EditBoxes so Tab walks them in order and wraps at the end.
+-- Kept as a helper so the order is declared in one readable line at the call
+-- site rather than smeared across four SetScript calls.
+function ui.SetTabChain(boxes)
+    local n = table.getn(boxes)
+    local i = 1
+    while i <= n do
+        local nextBox = boxes[i + 1] or boxes[1]
+        -- Captured per iteration; `nextBox` is a fresh local each pass, so the
+        -- closures do not all end up pointing at the last one.
+        boxes[i]:SetScript("OnTabPressed", function()
+            nextBox:SetFocus()
+        end)
+        i = i + 1
+    end
+end
+
 local function Label(parent, template, color)
     local fs = parent:CreateFontString(nil, "OVERLAY",
         template or "GameFontNormalSmall")
@@ -158,7 +235,8 @@ local function MakeSubTab(parent, name)
     })
     local fs = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     fs:SetPoint("CENTER", b, "CENTER", 0, 0)
-    fs:SetText(name)
+    -- Label, not key. The button still answers to `name` everywhere else.
+    fs:SetText(SubTabLabel(name))
     b.label = fs
     b:SetWidth(fs:GetStringWidth() + 30)
     b:SetScript("OnClick", function()
@@ -222,7 +300,7 @@ function ui.BuildWindow()
     f:EnableMouse(true)
     f:SetMovable(true)
     f:RegisterForDrag("LeftButton")
-    Backdrop(f, C.panelBG, true)
+    WindowBackdrop(f, C.panelBG)
     f:Hide()
 
     -- Restore the saved position, defaulting to centre-ish.
@@ -267,12 +345,14 @@ function ui.BuildWindow()
     -- ---- title bar ------------------------------------------------------
     local title = CreateFrame("Frame", nil, f)
     title:SetHeight(26)
-    title:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -4)
-    title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -4, -4)
+    -- TITLE_INSET, not 4: the dialog border is 28px of art with 10px insets,
+    -- so a title bar tucked into the corner would sit underneath it.
+    title:SetPoint("TOPLEFT", f, "TOPLEFT", TITLE_INSET, -TITLE_INSET)
+    title:SetPoint("TOPRIGHT", f, "TOPRIGHT", -TITLE_INSET - 2, -TITLE_INSET)
     Backdrop(title, C.titleBG, false)
     ui.titleBar = title
 
-    local titleText = Label(title, "GameFontNormal", C.gold)
+    local titleText = Label(title, "GameFontNormalLarge", C.gold)
     titleText:SetPoint("LEFT", title, "LEFT", 10, 0)
     titleText:SetText("Aegis: Courier  v" .. A.version)
 
@@ -307,14 +387,14 @@ function ui.BuildWindow()
         if prev then
             b:SetPoint("LEFT", prev, "RIGHT", 4, 0)
         else
-            b:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 6, -6)
+            b:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -GAP)
         end
         ui.subTabs[name] = b
         prev = b
 
         local panel = CreateFrame("Frame", "AegisCourierPanel" .. name, f)
-        panel:SetPoint("TOPLEFT", f, "TOPLEFT", 8, -PANEL_TOP)
-        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -8, PANEL_BOTTOM)
+        panel:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_SIDE, -PANEL_TOP)
+        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PANEL_SIDE, PANEL_BOTTOM)
         panel:Hide()
         ui.panels[name] = panel
 
@@ -323,11 +403,12 @@ function ui.BuildWindow()
 
     -- ---- footer ---------------------------------------------------------
     local footer = Label(f, "GameFontNormalSmall", C.dim)
-    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 12, 10)
+    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, 14)
     ui.footer = footer
 
     ui.BuildInboxPanel()
     ui.BuildSendPanel()
+    ui.BuildSentPanel()
     ui.BuildLogPanel()
     ui.BuildLedgerPanel()
     ui.BuildCourierPanel()
@@ -1241,6 +1322,21 @@ function ui.BuildSendPanel()
     moneyBox:SetScript("OnTextChanged", function() ui.RefreshSend() end)
     ui.sendMoney = moneyBox
 
+    -- ---- Tab moves to the next field ------------------------------------
+    -- The stock mail form chains its own Name/Subject/Body boxes this way and
+    -- players expect it. There is no Tab-order property on a 1.12 EditBox --
+    -- OnTabPressed plus an explicit SetFocus IS the mechanism.
+    --
+    -- Order is the form's visual order, top to bottom. The attachment slots
+    -- sit between Body and Gold but are icon buttons, not text fields, so they
+    -- are not in the chain.
+    --
+    -- Gold WRAPS back to To rather than dropping focus: the form is short and
+    -- cyclable, and a Tab that silently does nothing reads as a broken key.
+    -- Note the multiline body is included -- handling OnTabPressed is also
+    -- what stops Tab inserting a literal tab character into the message.
+    ui.SetTabChain({ toBox, subjBox, bodyBox, moneyBox })
+
     local moneyHint = Label(panel, "GameFontNormalSmall", C.dim)
     moneyHint:SetPoint("LEFT", moneyBox, "RIGHT", 8, 0)
     moneyHint:SetText("e.g. 12g 30s")
@@ -1489,29 +1585,17 @@ end
 
 function ui.BuildLogPanel()
     local panel = ui.panels["Log"]
+    -- RECEIVED ONLY. Sent mail has its own tab, with a reader -- keeping a
+    -- second, poorer view of it here would mean two places to look and two
+    -- answers to the same question.
     ui.logDir = "received"
 
-    local function DirButton(name, label, dir)
-        local b = CreateFrame("Button", "AegisCourierLogDir" .. name, panel,
-            "UIPanelButtonTemplate")
-        b:SetWidth(76)
-        b:SetHeight(21)
-        b:SetText(label)
-        b:SetScript("OnClick", function()
-            ui.logDir = dir
-            ui.RefreshLog()
-        end)
-        return b
-    end
-
-    local recvBtn = DirButton("Received", "Received", "received")
-    recvBtn:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -2)
-    local sentBtn = DirButton("Sent", "Sent", "sent")
-    sentBtn:SetPoint("LEFT", recvBtn, "RIGHT", 4, 0)
-    ui.logRecvBtn, ui.logSentBtn = recvBtn, sentBtn
+    local heading = Label(panel, "GameFontNormalSmall", C.gold)
+    heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -6)
+    heading:SetText("Mail you collected")
 
     local findLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
-    findLbl:SetPoint("LEFT", sentBtn, "RIGHT", 16, 0)
+    findLbl:SetPoint("LEFT", heading, "RIGHT", 20, 0)
     findLbl:SetText("Find")
 
     -- One search box covers both filters the audit calls for: it matches the
@@ -1582,14 +1666,61 @@ function ui.BuildLogPanel()
     clear:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
     clear:SetText("Clear view")
     clear:SetScript("OnClick", function()
-        -- Clears the direction currently on screen, not both -- wiping the
-        -- half you are not looking at would be a nasty surprise.
-        db.ClearLog(ui.logDir)
+        -- Received only. The sent box is cleared from its own tab, so neither
+        -- Clear button can wipe something the user is not looking at.
+        db.ClearLog("received")
         ui.RefreshLog()
     end)
 end
 
 -- Entries for the current direction, newest first, after filtering.
+-- Flatten a sent-box batch into the same shape the row renderer already
+-- expects, so one paint path serves both directions.
+--
+-- A batch is one row, not one row per mail: mailing 12 items to a bank alt is
+-- 12 mails on the server, and listing them individually is what made the old
+-- sent log useless for exactly the case people care about.
+function ui.SentRow(rec)
+    local n = table.getn(rec.items or {})
+    -- Name the items outright while they fit; past that, lead with the first
+    -- and count the rest. "12 items" alone tells you nothing you wanted.
+    local label = ""
+    local allNames = ""
+    local ai = 1
+    while ai <= n do
+        allNames = allNames .. " " .. (rec.items[ai].n or "")
+        ai = ai + 1
+    end
+    local i = 1
+    while i <= n and i <= 3 do
+        if i > 1 then label = label .. ", " end
+        label = label .. rec.items[i].n
+        if rec.items[i].c and rec.items[i].c > 1 then
+            label = label .. " x" .. rec.items[i].c
+        end
+        i = i + 1
+    end
+    if n > 3 then label = label .. " +" .. (n - 3) .. " more" end
+
+    return {
+        t       = rec.t,
+        who     = rec.to,
+        subject = rec.s,
+        char    = rec.char,
+        money   = rec.money,
+        cod     = rec.cod,
+        -- Carried as `item` because that is the field the row renderer tints
+        -- and appends; the sent box's own list stays untouched.
+        item    = (label ~= "" and label) or nil,
+        mails   = rec.mails,
+        -- Every item name, for the find box only. The visible label is
+        -- truncated to fit the row, but SEARCH must not be: a bank-alt send is
+        -- exactly where the item you are looking for sits ninth in the list,
+        -- and "did I mail that?" is the whole reason to open a sent box.
+        searchExtra = allNames,
+    }
+end
+
 function ui.LogRows()
     local out = {}
     local entries = db.Log(ui.logDir)
@@ -1607,7 +1738,7 @@ function ui.LogRows()
             -- both the participant filter and the category filter.
             local hay = string.lower((e.who or "") .. " " .. (e.subject or "")
                 .. " " .. (e.item or "") .. " " .. (e.auction or "")
-                .. " " .. (e.char or ""))
+                .. " " .. (e.char or "") .. " " .. (e.searchExtra or ""))
             if not util.Contains(hay, find) then keep = false end
         end
         if keep then table.insert(out, e) end
@@ -1622,15 +1753,6 @@ function ui.RefreshLog()
     -- Reentrancy guard -- see RefreshInbox for the FrameXML recursion chain.
     if ui.logRefreshing then return end
     ui.logRefreshing = true
-
-    -- Selected direction reads as pressed.
-    if ui.logDir == "sent" then
-        ui.logRecvBtn:UnlockHighlight()
-        ui.logSentBtn:LockHighlight()
-    else
-        ui.logRecvBtn:LockHighlight()
-        ui.logSentBtn:UnlockHighlight()
-    end
 
     local rows = ui.LogRows()
     local total = table.getn(rows)
@@ -1657,6 +1779,11 @@ function ui.RefreshLog()
                 subject = subject .. "  |cff8fd6a8" .. e.item ..
                     (e.count and e.count > 1 and (" x" .. e.count) or "") .. "|r"
             end
+            -- A batch says how many mails it actually cost, because postage is
+            -- per mail and "one send" is not one mail on this client.
+            if e.mails and e.mails > 1 then
+                subject = subject .. " |cff8c8573(" .. e.mails .. " mails)|r"
+            end
             SetClipped(row.subject, subject, 250)
 
             if e.cod and e.cod > 0 then
@@ -1676,7 +1803,7 @@ function ui.RefreshLog()
     end
 
     local stored = table.getn(db.Log(ui.logDir))
-    local label = (ui.logDir == "sent") and "sent" or "received"
+    local label = "received"
     if stored == 0 then
         ui.logSummary:SetText("Nothing logged yet. Mail is recorded as you " ..
             "collect and send it.")
@@ -1716,6 +1843,474 @@ end
 -- ---------------------------------------------------------------------------
 -- Ledger panel
 -- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Sent panel
+-- ---------------------------------------------------------------------------
+-- A record view, NOT a mail view, and the distinction is the whole design.
+--
+-- Once a mail is sent it is gone from the client. Vanilla has no sent-items
+-- store and no API to read a mail you sent -- GetInboxHeaderInfo and
+-- GetInboxText only ever see YOUR INBOX. So nothing here queries anything: it
+-- replays what Courier wrote down at send time, and whatever was not captured
+-- then is gone for good. That is why send.lastSent carries the item texture
+-- and db.SentBegin stores the body.
+--
+-- It follows that there is no Take and no Return. The mail is on its way to
+-- someone else; there is nothing to act on. The one useful action is to write
+-- to the same person again, which is what the Compose button does.
+
+-- ---- Sent reader geometry --------------------------------------------------
+-- THREE columns of four rather than two of six. A batch cannot exceed
+-- MAX_ATTACHMENTS (12), so 3 x 4 still shows every possible item without
+-- scrolling -- but in four rows instead of six, which hands 32px straight to
+-- the message below it. Widening beats lengthening here: the reader is far
+-- wider than it is tall, and item labels are short.
+--
+-- Every offset below derives from these; ui.SentGeometry() reports the result
+-- and the harness asserts the blocks fit without overlapping.
+local SENT_ITEM_COLS = 3
+local SENT_ITEM_ROWS = 4                    -- x COLS = 12 = MAX_ATTACHMENTS
+local SENT_ITEM_H    = 16
+
+-- Header block: Back/recipient, subject, then one line carrying both the mail
+-- count and the item count. Merging those two lines is where another 18px for
+-- the message came from.
+local SENT_HEAD_H = 60
+local SENT_FOOT_H = 26                      -- the Compose button strip
+local SENT_GAP    = 8
+
+local SENT_ITEMS_H = SENT_ITEM_ROWS * SENT_ITEM_H
+local SENT_BODY_TOP = SENT_HEAD_H + SENT_ITEMS_H + SENT_GAP
+
+-- The Sent reader's vertical budget, reported so the harness can assert the
+-- blocks actually fit. 1.12 does not clip children -- an overflowing block
+-- just draws over whatever is beneath it -- which is the same trap the Inbox
+-- list hit in v1.1.0, and the reason this is asserted rather than eyeballed.
+function ui.SentGeometry()
+    local readerH = PANEL_H - LOG_TOP - LOG_BOTTOM - (LIST_PAD * 2)
+    return {
+        readerH = readerH,
+        head    = SENT_HEAD_H,
+        items   = SENT_ITEMS_H,
+        gap     = SENT_GAP,
+        foot    = SENT_FOOT_H,
+        bodyTop = SENT_BODY_TOP,
+        bodyH   = readerH - SENT_BODY_TOP - SENT_FOOT_H,
+        cols    = SENT_ITEM_COLS,
+        rows    = SENT_ITEM_ROWS,
+        slots   = SENT_ITEM_COLS * SENT_ITEM_ROWS,
+    }
+end
+
+function ui.BuildSentPanel()
+    local panel = ui.panels["Sent"]
+
+    local heading = Label(panel, "GameFontNormalSmall", C.gold)
+    heading:SetPoint("TOPLEFT", panel, "TOPLEFT", 4, -6)
+    heading:SetText("Mail you sent")
+
+    local findLbl = Label(panel, "GameFontNormalSmall", C.goldDim)
+    findLbl:SetPoint("LEFT", heading, "RIGHT", 20, 0)
+    findLbl:SetText("Find")
+
+    local findBox = MakeEditBox("SentFind", panel, 130)
+    findBox:SetPoint("LEFT", findLbl, "RIGHT", 8, 0)
+    findBox:SetScript("OnTextChanged", function() ui.RefreshSent() end)
+    ui.sentFind = findBox
+
+    local mine = MakeToggle(panel, "SentMine", "this character only")
+    mine:SetPoint("LEFT", findBox, "RIGHT", 14, 0)
+    mine:SetScript("OnClick", function() ui.RefreshSent() end)
+    ui.sentMine = mine
+
+    local well = CreateFrame("Frame", nil, panel)
+    well:SetPoint("TOPLEFT", panel, "TOPLEFT", 0, -LOG_TOP)
+    well:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", 0, LOG_BOTTOM)
+    Backdrop(well, C.well, true)
+    ui.sentWell = well
+
+    local scroll = CreateFrame("ScrollFrame", "AegisCourierSentScroll", well,
+        "FauxScrollFrameTemplate")
+    scroll:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -4)
+    scroll:SetPoint("BOTTOMRIGHT", well, "BOTTOMRIGHT", -26, 4)
+    -- Two args on 1.12; frame and offset arrive as the `this` / `arg1` globals.
+    scroll:SetScript("OnVerticalScroll", function()
+        FauxScrollFrame_OnVerticalScroll(ROW_H, ui.RefreshSent)
+    end)
+    ui.sentScroll = scroll
+
+    ui.sentRows = {}
+    local i = 1
+    while i <= ROWS do
+        local row = CreateFrame("Button", "AegisCourierSentRow" .. i, well)
+        row:SetHeight(ROW_H)
+        row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
+        row:SetPoint("TOPRIGHT", well, "TOPRIGHT", -26, -LIST_PAD - (i - 1) * ROW_H)
+        row:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+        row.courierNoSkin = true
+        row:SetScript("OnClick", function()
+            if row.recIndex then ui.OpenSentRecord(row.recIndex) end
+        end)
+
+        local when = Label(row, "GameFontNormalSmall", C.dim)
+        when:SetPoint("LEFT", row, "LEFT", 0, 0)
+        row.when = when
+
+        local who = Label(row, "GameFontNormalSmall", C.text)
+        who:SetPoint("LEFT", row, "LEFT", 84, 0)
+        row.who = who
+
+        local subject = Label(row, "GameFontNormalSmall", C.text)
+        subject:SetPoint("LEFT", row, "LEFT", 200, 0)
+        row.subject = subject
+
+        local amount = Label(row, "GameFontNormalSmall", C.gold)
+        amount:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+        row.amount = amount
+
+        row:Hide()
+        ui.sentRows[i] = row
+        i = i + 1
+    end
+
+    local summary = Label(panel, "GameFontNormalSmall", C.dim)
+    summary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 6)
+    ui.sentSummary = summary
+
+    local clear = CreateFrame("Button", "AegisCourierBtnClearSent", panel,
+        "UIPanelButtonTemplate")
+    clear:SetWidth(90)
+    clear:SetHeight(20)
+    clear:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
+    clear:SetText("Clear view")
+    clear:SetScript("OnClick", function()
+        db.ClearSentBox()
+        ui.CloseSentRecord()
+    end)
+    ui.btnClearSent = clear
+
+    ui.BuildSentReader(well)
+end
+
+-- The reader, filling the same well as the list and swapping with it -- the
+-- pattern the Inbox reader uses, for the same reason: one panel, one place to
+-- look, nothing extra to keep positioned and skinned.
+function ui.BuildSentReader(well)
+    local r = CreateFrame("Frame", "AegisCourierSentReader", well)
+    r:SetPoint("TOPLEFT", well, "TOPLEFT", LIST_PAD, -LIST_PAD)
+    r:SetPoint("BOTTOMRIGHT", well, "BOTTOMRIGHT", -LIST_PAD, LIST_PAD)
+    r:Hide()
+    ui.sentReader = r
+
+    local back = CreateFrame("Button", "AegisCourierSentBack", r,
+        "UIPanelButtonTemplate")
+    back:SetWidth(60)
+    back:SetHeight(19)
+    back:SetPoint("TOPLEFT", r, "TOPLEFT", 2, -2)
+    back:SetText("Back")
+    back:SetScript("OnClick", function() ui.CloseSentRecord() end)
+    ui.sentBack = back
+
+    local to = Label(r, "GameFontNormal", C.gold)
+    to:SetPoint("LEFT", back, "RIGHT", 8, 0)
+    ui.sentTo = to
+
+    local when = Label(r, "GameFontNormalSmall", C.dim)
+    when:SetPoint("TOPRIGHT", r, "TOPRIGHT", -4, -6)
+    ui.sentWhen = when
+
+    local subject = Label(r, "GameFontNormal", C.text)
+    subject:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -26)
+    ui.sentSubject = subject
+
+    local meta = Label(r, "GameFontNormalSmall", C.dim)
+    meta:SetPoint("TOPLEFT", r, "TOPLEFT", 4, -44)
+    ui.sentMeta = meta
+
+    -- Item count rides the meta line now; this label is gone as a separate row.
+    ui.sentItemsHead = meta
+
+    -- Filled column-major so reading down a column is reading the batch in
+    -- order, the way the attachment grid on the Compose tab is laid out.
+    local colW = math.floor((WIN_W - (PANEL_SIDE * 2) - 40) / SENT_ITEM_COLS)
+    ui.sentItemRows = {}
+    local n = 1
+    while n <= SENT_ITEM_ROWS * SENT_ITEM_COLS do
+        local col = math.floor((n - 1) / SENT_ITEM_ROWS)
+        local rowIdx = n - (col * SENT_ITEM_ROWS)
+        local f = CreateFrame("Frame", nil, r)
+        f:SetHeight(SENT_ITEM_H)
+        f:SetWidth(colW - 6)
+        f:SetPoint("TOPLEFT", r, "TOPLEFT", 6 + col * colW,
+            -SENT_HEAD_H - (rowIdx - 1) * SENT_ITEM_H)
+
+        local icon = f:CreateTexture(nil, "ARTWORK")
+        icon:SetWidth(14)
+        icon:SetHeight(14)
+        icon:SetPoint("LEFT", f, "LEFT", 0, 0)
+        f.icon = icon
+
+        local label = Label(f, "GameFontNormalSmall", C.text)
+        label:SetPoint("LEFT", f, "LEFT", 18, 0)
+        f.label = label
+
+        f:Hide()
+        ui.sentItemRows[n] = f
+        n = n + 1
+    end
+
+    local bodyWell = CreateFrame("Frame", nil, r)
+    bodyWell:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -SENT_BODY_TOP)
+    bodyWell:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, SENT_FOOT_H)
+    Backdrop(bodyWell, C.well, true)
+    ui.sentBodyWell = bodyWell
+
+    local bodyScroll = CreateFrame("ScrollFrame", "AegisCourierSentBodyScroll",
+        bodyWell, "UIPanelScrollFrameTemplate")
+    bodyScroll:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 6, -6)
+    bodyScroll:SetPoint("BOTTOMRIGHT", bodyWell, "BOTTOMRIGHT", -26, 6)
+    local child = CreateFrame("Frame", nil, bodyScroll)
+    child:SetWidth(WIN_W - 90)
+    child:SetHeight(1)
+    bodyScroll:SetScrollChild(child)
+
+    local body = Label(child, "GameFontHighlightSmall", C.text)
+    body:SetPoint("TOPLEFT", child, "TOPLEFT", 0, 0)
+    body:SetWidth(WIN_W - 96)
+    body:SetJustifyH("LEFT")
+    body:SetJustifyV("TOP")
+    ui.sentBody = body
+
+    local compose = CreateFrame("Button", "AegisCourierSentCompose", r,
+        "UIPanelButtonTemplate")
+    compose:SetWidth(150)
+    compose:SetHeight(20)
+    compose:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 2)
+    compose:SetText("Compose")
+    compose:SetScript("OnClick", function()
+        local rec = ui.SentRecord()
+        if not rec then return end
+        ui.SelectSubTab("Send")
+        if ui.sendTo then
+            ui.sendTo:SetText(rec.to or "")
+            ui.RefreshSend()
+        end
+    end)
+    ui.sentCompose = compose
+end
+
+-- The record currently open, or nil. Held by INDEX into the box, so a prune or
+-- a new send between paints cannot leave the reader showing a stale table --
+-- the index is re-read and re-validated on every refresh.
+function ui.SentRecord()
+    if not ui.sentIndex then return nil end
+    local box = db.SentBox()
+    local rec = box[ui.sentIndex]
+    if not rec then return nil end
+    -- Identity, not position. A prune or a new send can move a record under a
+    -- held index, and `t` alone would not catch it -- see db.SentBegin.
+    if ui.sentStamp and rec.id ~= ui.sentStamp then return nil end
+    return rec
+end
+
+function ui.OpenSentRecord(index)
+    local box = db.SentBox()
+    local rec = box[index]
+    if not rec then return false end
+    ui.sentIndex = index
+    -- Remembered so a record shifting under the index (a prune, or the box
+    -- being cleared) is detected rather than silently rendered as a different
+    -- send.
+    ui.sentStamp = rec.id
+    ui.RefreshSent()
+    return true
+end
+
+function ui.CloseSentRecord()
+    ui.sentIndex = nil
+    ui.sentStamp = nil
+    ui.RefreshSent()
+end
+
+function ui.SentReaderOpen()
+    return ui.SentRecord() ~= nil
+end
+
+-- Rows for the Sent list, newest first, with the same filters the Log offers.
+function ui.SentRows()
+    local out = {}
+    local box = db.SentBox()
+    local find = string.lower(util.Trim(ui.sentFind:GetText() or ""))
+    local mineOnly = ui.sentMine:GetChecked() and true or false
+    local me = UnitName and UnitName("player") or nil
+
+    local i = table.getn(box)
+    while i >= 1 do
+        local rec = box[i]
+        local keep = true
+        if mineOnly and me and rec.char and rec.char ~= me then keep = false end
+        if keep and find ~= "" then
+            local row = ui.SentRow(rec)
+            -- searchExtra carries EVERY item name; the visible label is
+            -- truncated to fit the row and must not narrow the search.
+            local hay = string.lower((rec.to or "") .. " " .. (rec.s or "")
+                .. " " .. (rec.char or "") .. " " .. (row.searchExtra or "")
+                .. " " .. (rec.body or ""))
+            if not util.Contains(hay, find) then keep = false end
+        end
+        -- The list index is the BOX index, so a click can find the record
+        -- again without carrying the table itself around.
+        if keep then table.insert(out, { rec = rec, index = i }) end
+        i = i - 1
+    end
+    return out
+end
+
+function ui.RefreshSent()
+    if not ui.frame or not ui.frame:IsVisible() then return end
+    if ui.selectedSubTab ~= "Sent" then return end
+    -- Same FrameXML recursion chain the other lists guard against.
+    if ui.sentRefreshing then return end
+    ui.sentRefreshing = true
+
+    if ui.sentIndex then
+        if ui.RefreshSentReader() then
+            local h = 1
+            while h <= ROWS do ui.sentRows[h]:Hide() h = h + 1 end
+            ui.sentScroll:Hide()
+            ui.sentReader:Show()
+            ui.sentSummary:SetText("")
+            ui.sentRefreshing = false
+            return
+        end
+        -- The record went away under us. Fall through to the list.
+        ui.sentIndex = nil
+        ui.sentStamp = nil
+    end
+    ui.sentReader:Hide()
+    ui.sentScroll:Show()
+
+    local rows = ui.SentRows()
+    local total = table.getn(rows)
+
+    FauxScrollFrame_Update(ui.sentScroll, total, ROWS, ROW_H)
+    local offset = FauxScrollFrame_GetOffset(ui.sentScroll) or 0
+    local now = time()
+
+    local i = 1
+    while i <= ROWS do
+        local row = ui.sentRows[i]
+        local entry = rows[offset + i]
+        if entry then
+            local rec = entry.rec
+            local flat = ui.SentRow(rec)
+            row.when:SetText(util.FormatAgo(now - (rec.t or now)))
+            SetClipped(row.who, rec.to or "?", 108)
+
+            local subject = rec.s or ""
+            if subject == "" then subject = "|cff8c8573(no subject)|r" end
+            if flat.item then
+                subject = subject .. "  |cff8fd6a8" .. flat.item .. "|r"
+            end
+            if rec.mails and rec.mails > 1 then
+                subject = subject .. " |cff8c8573(" .. rec.mails .. " mails)|r"
+            end
+            SetClipped(row.subject, subject, 250)
+
+            if rec.cod and rec.cod > 0 then
+                row.amount:SetText("|cffd05050COD " ..
+                    util.FormatMoney(rec.cod, false) .. "|r")
+            elseif rec.money and rec.money > 0 then
+                row.amount:SetText("-" .. util.FormatMoney(rec.money, true))
+            else
+                row.amount:SetText("")
+            end
+            row.recIndex = entry.index
+            row:Show()
+        else
+            row.recIndex = nil
+            row:Hide()
+        end
+        i = i + 1
+    end
+
+    local stored = table.getn(db.SentBox())
+    if stored == 0 then
+        ui.sentSummary:SetText("Nothing sent yet. Mail you send is recorded " ..
+            "here for " .. db.SENT_DAYS .. " days.")
+    elseif total == stored then
+        ui.sentSummary:SetText(stored .. (stored == 1 and " send" or " sends"))
+    else
+        ui.sentSummary:SetText(total .. " of " .. stored .. " sends")
+    end
+
+    ui.sentRefreshing = false
+end
+
+-- Paint the open record. Returns false when it is no longer there, so the
+-- caller drops back to the list instead of showing the wrong send.
+function ui.RefreshSentReader()
+    local rec = ui.SentRecord()
+    if not rec then return false end
+
+    ui.sentTo:SetText(rec.to or "?")
+    ui.sentWhen:SetText(util.FormatAgo(time() - (rec.t or time())))
+    local subject = rec.s or ""
+    if subject == "" then subject = "|cff8c8573(no subject)|r" end
+    ui.sentSubject:SetText(subject)
+
+    -- Postage is per mail on this client, so the mail count is real
+    -- information rather than trivia: it is what the send actually cost.
+    local meta = (rec.mails or 0) .. ((rec.mails == 1) and " mail" or " mails")
+    if rec.char then meta = meta .. "  |  from " .. rec.char end
+    if rec.cod and rec.cod > 0 then
+        meta = meta .. "  |  |cffd05050COD " ..
+            util.FormatMoney(rec.cod, false) .. "|r"
+    elseif rec.money and rec.money > 0 then
+        meta = meta .. "  |  " .. util.FormatMoney(rec.money, true) .. " sent"
+    end
+    -- Mail count and item count share ONE line. They used to be two, and the
+    -- 18px that bought went to the message well below.
+    local items = rec.items or {}
+    local n = table.getn(items)
+    meta = meta .. "  |  " .. (n == 0 and "no attachments"
+        or (n .. (n == 1 and " item" or " items")))
+    ui.sentMeta:SetText(meta)
+
+    local i = 1
+    while i <= SENT_ITEM_ROWS * 2 do
+        local f = ui.sentItemRows[i]
+        local it = items[i]
+        if it then
+            -- `x` is absent on records written before icons were captured. A
+            -- sent mail cannot be re-read to fill it in, so fall back rather
+            -- than leaving a hole.
+            if it.x then
+                f.icon:SetTexture(it.x)
+                f.icon:Show()
+            else
+                f.icon:Hide()
+            end
+            local label = it.n or "?"
+            if it.c and it.c > 1 then label = label .. " x" .. it.c end
+            SetClipped(f.label, label, 258)
+            f:Show()
+        else
+            f:Hide()
+        end
+        i = i + 1
+    end
+
+    if rec.body and rec.body ~= "" then
+        ui.sentBody:SetText(rec.body)
+    else
+        ui.sentBody:SetText("|cff808080(no message)|r")
+    end
+
+    ui.sentCompose:SetText("Compose to " .. (rec.to or "?"))
+    return true
+end
 
 function ui.BuildLedgerPanel()
     local panel = ui.panels["Ledger"]
@@ -1955,7 +2550,7 @@ function ui.RefreshCourier()
     ui.courierStats:SetText(
         "Ledger: " .. Plural(table.getn(db.Ledger()), "entry", "entries") ..
         "   |   Log: " .. table.getn(db.Log("received")) .. " received, " ..
-        table.getn(db.Log("sent")) .. " sent")
+        table.getn(db.SentBox()) .. " sent")
 end
 
 -- ---------------------------------------------------------------------------
@@ -1974,6 +2569,8 @@ function ui.Refresh()
         ui.OnTakeStateChanged()
     elseif ui.selectedSubTab == "Send" then
         ui.RefreshSend()
+    elseif ui.selectedSubTab == "Sent" then
+        ui.RefreshSent()
     elseif ui.selectedSubTab == "Log" then
         ui.RefreshLog()
     elseif ui.selectedSubTab == "Ledger" then

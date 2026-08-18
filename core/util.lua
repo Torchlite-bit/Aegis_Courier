@@ -200,6 +200,17 @@ end
 -- the square brackets:
 --   |cff1eff00|Hitem:2589:0:0:0|h[Linen Cloth]|h|r  ->  "Linen Cloth"
 -- string.find with a capture; NOT string.match.
+-- Seconds to one decimal place, e.g. 4.2s. Hand-rolled rather than via
+-- string.format to match the rest of this file, and built from math.floor
+-- only -- Lua 5.0 has no integer division and no % operator.
+function util.FormatSeconds(secs)
+    if type(secs) ~= "number" or secs < 0 then return "?" end
+    local tenths = math.floor(secs * 10 + 0.5)
+    local whole = math.floor(tenths / 10)
+    local frac = tenths - (whole * 10)
+    return whole .. "." .. frac .. "s"
+end
+
 function util.ItemNameFromLink(link)
     if type(link) ~= "string" then return nil end
     local _, _, name = string.find(link, "%[(.+)%]")

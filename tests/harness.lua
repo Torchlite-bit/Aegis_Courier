@@ -76,6 +76,13 @@ CreateFrame = function(kind, name, parent, template)
     -- rawget throughout: see the note above newRegion.
     function f:SetText(t) rawset(self, "text", t) end
     function f:GetText() return rawget(self, "text") end
+    -- REAL focus tracking. There was none: SetFocus fell through to the
+    -- CamelCase no-op, so a Tab chain could be entirely broken and the suite
+    -- would agree with it. Exactly one widget holds focus at a time, as on the
+    -- client.
+    function f:SetFocus() focusedBox = self end
+    function f:ClearFocus() if focusedBox == self then focusedBox = nil end end
+    function f:HasFocus() return focusedBox == self end
     function f:Enable() rawset(self, "enabled", true) end
     function f:Disable() rawset(self, "enabled", false) end
     function f:IsEnabled() return rawget(self, "enabled") ~= false end
@@ -236,6 +243,12 @@ GetInboxInvoiceInfo = function(i)
     local v = m.invoice
     return v.kind, v.item, v.who, v.bid, v.buyout, v.deposit, v.consignment
 end
+-- The client's high-resolution timer. Advanced by the send pump so an elapsed
+-- time can be asserted rather than eyeballed.
+fakeClock = 0
+GetTime = function() return fakeClock end
+-- Whichever EditBox currently holds the keyboard, or nil.
+focusedBox = nil
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
 MiniMapMailFrame:Show()
 -- Counts operations the SERVER would have to perform. The pump below clocks
@@ -301,19 +314,46 @@ UnitName = function() return "Tester" end
 ClearCursor = function() cursor = nil end
 CursorHasItem = function() return cursor ~= nil end
 
+-- texture, itemCount, locked, quality, readable -- the 1.12 signature. The
+-- THIRD value is the one that matters: the addon has to read it, because
+-- PickupContainerItem on a locked slot is a silent no-op on the real client.
+-- A slot is locked while its item is on the cursor, or while a test pins it.
 GetContainerItemInfo = function(bag, slot)
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
-    return it.texture, it.count
+    local locked = it.locked
+    if cursor and cursor.bag == bag and cursor.slot == slot then locked = 1 end
+    return it.texture, it.count, locked, 1, nil
+end
+-- The backpack is bag 0 and always has 16 slots; a nil BAGS entry is a bag the
+-- character does not have equipped.
+GetContainerNumSlots = function(bag)
+    if type(bag) ~= "number" or bag < 0 or bag > 4 then return 0 end
+    if bag == 0 or BAGS[bag] then return 16 end
+    return 0
 end
 GetContainerItemLink = function(bag, slot)
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
     return "|cff1eff00|Hitem:1:0:0:0|h[" .. it.name .. "]|h|r"
 end
+-- Test hook for the race the post-attach name check exists to catch: the slot
+-- verified a moment ago, but the server hands us a different stack when the
+-- pickup actually lands. Nothing but a name comparison after the fact can see
+-- this, so the mock has to be able to produce it.
+swapPickupWith = nil
 PickupContainerItem = function(bag, slot)
+    if swapPickupWith then
+        bag, slot = swapPickupWith.bag, swapPickupWith.slot
+        swapPickupWith = nil
+    end
     local it = BAGS[bag] and BAGS[bag][slot]
-    if it then cursor = { bag = bag, slot = slot, item = it } end
+    if not it then return end
+    -- A LOCKED SLOT DOES NOT RESPOND. No error, no event, nothing on the
+    -- cursor -- this silent no-op is what produced "could not attach" in the
+    -- field, and a mock that ignored the flag could never reproduce it.
+    if it.locked then return end
+    cursor = { bag = bag, slot = slot, item = it }
 end
 SplitContainerItem = function() end
 useContainerCalls = 0
@@ -949,6 +989,8 @@ local function pumpSend(limit)
     local n, seenAttempts = 0, sendAttempts
     while send.sending and n < (limit or 60) do
         -- A generous frame delta so any settle/retry wait elapses in one tick.
+        -- The fake clock advances with it, so elapsed time is measurable.
+        fakeClock = fakeClock + 5
         arg1 = 5
         sdriver.scripts.OnUpdate()
         arg1 = nil
@@ -1126,16 +1168,129 @@ pumpSend()
 check(SENT[1].cod == 5000 and SENT[2].cod == 5000, "codAll charges every mail",
       tostring(SENT[1].cod) .. "/" .. tostring(SENT[2].cod))
 
-print("== send: an item that will not attach stops the batch ==")
+print("== send: a stack the server has LOCKED is waited for, not abandoned ==")
+-- The reported "could not attach X -- send stopped". GetContainerItemInfo's
+-- third return is `locked`, and PickupContainerItem on a locked slot does
+-- nothing at all -- so a run that ignores the flag attaches nothing, fails its
+-- own verification, and used to throw the rest of the queue away.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+BAGS[0][2].locked = 1                 -- the server is holding Copper Ore
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(8)
+check(send.sending, "the run is still alive, waiting on the lock")
+check(table.getn(SENT) == 1, "the unlocked item went out", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "and it was the right one", SENT[1].item)
+check((send.skipped or 0) == 0, "nothing has been skipped yet", send.skipped)
+BAGS[0][2].locked = nil               -- server releases it
+pumpSend()
+check(not send.sending, "run completes once the lock clears")
+check(table.getn(SENT) == 2, "both items sent", table.getn(SENT))
+check(SENT[2].item == "Copper Ore", "including the one that was locked",
+      SENT[2].item)
+check((send.skipped or 0) == 0, "and nothing was skipped", send.skipped)
+
+print("== send: a lock that never clears costs one item, not the batch ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+BAGS[0][1].locked = 1                 -- stuck forever
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(200)
+BAGS[0][1].locked = nil
+check(not send.sending, "the run finished rather than hanging")
+check(send.skipped == 1, "the stuck item was skipped", send.skipped)
+check(table.getn(SENT) == 2, "the other two still went out", table.getn(SENT))
+check(BAGS[0][1] ~= nil, "and the stuck item is still in the bag")
+
+print("== send: a stack that MOVED is found again, not lost ==")
+-- Bag coordinates are the only address 1.12 gives us and they are not stable:
+-- a snapshot taken at queue time can be wrong by the time the batch reaches it.
+stockBags()
+send.Attach(0, 1)                     -- Silk Cloth at slot 1
+send.Attach(0, 2)
+BAGS[0][7] = BAGS[0][1]               -- player reshuffles: Silk Cloth -> slot 7
+BAGS[0][1] = nil
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "run finished")
+check((send.skipped or 0) == 0, "nothing was skipped", send.skipped)
+check(table.getn(SENT) == 2, "both mails sent", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "the moved stack was relocated by name",
+      SENT[1].item)
+
+print("== send: a DIFFERENT item in the remembered slot is never mailed ==")
+-- First line of defence: ResolveSlot compares names before touching anything.
+-- The dangerous case. The old verification asked only "is something
+-- attached?", so a stack that had moved out and been replaced sent the
+-- REPLACEMENT to the recipient silently. Worse than the visible abort.
+stockBags()
+send.Attach(0, 1)                     -- queue Silk Cloth
+send.Attach(0, 2)                     -- and Copper Ore
+-- Silk Cloth leaves the bags entirely; Black Lotus takes its slot.
+BAGS[0][1] = { name = "Black Lotus", texture = "t9", count = 1 }
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "run finished")
+check(send.skipped == 1, "the vanished item was skipped", send.skipped)
+local mailedLotus = false
+local mi = 1
+while mi <= table.getn(SENT) do
+    if SENT[mi].item == "Black Lotus" then mailedLotus = true end
+    mi = mi + 1
+end
+check(mailedLotus == false, "the WRONG item was never mailed")
+check(BAGS[0][1] ~= nil and BAGS[0][1].name == "Black Lotus",
+      "and it is still safely in the bag")
+check(table.getn(SENT) == 1, "the other item still went out", table.getn(SENT))
+check(SENT[1].item == "Copper Ore", "and it was the right one", SENT[1].item)
+
+print("== send: a last-instant swap is caught AFTER the attach ==")
+-- Second line of defence, and the one the first cannot cover. ResolveSlot
+-- verified the slot, but the server can still move the stack in the instant
+-- between that check and the pickup landing. Only comparing what actually
+-- ended up on the mail against what we queued catches that -- which is why
+-- "is something attached?" was never a sufficient question.
+stockBags()
+send.Attach(0, 1)                      -- queue Silk Cloth, slot verified fine
+swapPickupWith = { bag = 0, slot = 3 } -- server hands over Black Lotus instead
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+swapPickupWith = nil
+check(send.skipped == 1, "the mismatch was caught", send.skipped)
+check(table.getn(SENT) == 0, "and NOTHING was mailed", table.getn(SENT))
+check(BAGS[0][3] ~= nil and BAGS[0][3].name == "Black Lotus",
+      "the wrong item was put back in the bag, not posted")
+
+print("== send: a partial run reports what it left behind ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+BAGS[0][2] = nil                      -- Copper Ore is gone
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(send.skipped == 1, "one skipped", send.skipped)
+check(send.sentCount == 2, "two sent", send.sentCount)
+local msgs = DEFAULT_CHAT_FRAME.messages
+local saidSkipped = false
+local pi = 1
+while pi <= table.getn(msgs) do
+    if A.util.Contains(msgs[pi], "skipped") then saidSkipped = true end
+    pi = pi + 1
+end
+check(saidSkipped, "the user is told, rather than the run looking complete")
+
+print("== send: an item the game refuses to attach costs only that item ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 failAttach = true
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 failAttach = false
-check(not send.sending, "aborted")
+check(not send.sending, "run ended")
 check(table.getn(SENT) == 0, "NOTHING was sent -- no empty mail went out",
       table.getn(SENT))
+check(send.skipped == 2, "both were skipped rather than aborting the batch",
+      send.skipped)
 check(send.Count() == 2, "attachments kept so the user can retry", send.Count())
 
 print("== send: MAIL_FAILED aborts the batch ==")
@@ -1421,6 +1576,54 @@ check(A.version == tocVersion,
       "A.version agrees with the .toc",
       tostring(A.version) .. " vs " .. tostring(tocVersion))
 
+print("== compose: Tab walks the form ==")
+-- 1.12 has no Tab-order property on an EditBox; OnTabPressed plus an explicit
+-- SetFocus is the whole mechanism, which is why this is worth asserting.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Send")
+local chain = { A.ui.sendTo, A.ui.sendSubject, A.ui.sendBody, A.ui.sendMoney }
+local names = { "To", "Subject", "Body", "Gold" }
+
+local ci = 1
+while ci <= 4 do
+    check(chain[ci].scripts.OnTabPressed ~= nil,
+          names[ci] .. " handles Tab")
+    ci = ci + 1
+end
+
+A.ui.sendTo:SetFocus()
+check(A.ui.sendTo:HasFocus(), "To has the keyboard")
+ci = 1
+while ci <= 3 do
+    chain[ci].scripts.OnTabPressed()
+    check(chain[ci + 1]:HasFocus(),
+          "Tab from " .. names[ci] .. " lands on " .. names[ci + 1])
+    check(chain[ci]:HasFocus() == false,
+          "and " .. names[ci] .. " gives it up")
+    ci = ci + 1
+end
+
+-- Gold is the last field. Wrapping means Tab never reads as a dead key.
+A.ui.sendMoney.scripts.OnTabPressed()
+check(A.ui.sendTo:HasFocus(), "Tab from Gold wraps back to To")
+
+-- The multiline body is in the chain deliberately: handling OnTabPressed is
+-- also what stops Tab typing a literal tab into the message.
+A.ui.sendBody:SetFocus()
+A.ui.sendBody:SetText("hello")
+A.ui.sendBody.scripts.OnTabPressed()
+check(A.ui.sendMoney:HasFocus(), "Tab out of the multiline body works")
+check(A.ui.sendBody:GetText() == "hello",
+      "and does not type a tab character into it",
+      A.ui.sendBody:GetText())
+
+-- Escape on the recipient box still closes the autocomplete first; the Tab
+-- wiring must not have displaced it.
+check(A.ui.sendTo.scripts.OnEscapePressed ~= nil,
+      "To still handles Escape")
+focusedBox = nil
+
 print("== send UI: the Send BUTTON is clickable for a letter ==")
 -- The assertion that was missing when "cannot send without an item" was first
 -- fixed. send.Validate and send.Start were both corrected and tested, but
@@ -1609,19 +1812,25 @@ local function bigInbox(n)
     end
 end
 
--- 10 mails: scrollbar dormant, nothing refires.
-bigInbox(10)
+-- Row counts derive from ROWS, not literals: the crash threshold IS
+-- ROWS + 1, so a hardcoded 11 silently stops testing anything the moment the
+-- list grows.
+local ROWS_N = A.ui.Geometry().rows
+
+-- Exactly ROWS mails: scrollbar dormant, nothing refires.
+bigInbox(ROWS_N)
 scrollRefires = 0
-check(pcall(A.ui.RefreshInbox) == true, "10 mails refresh cleanly")
+check(pcall(A.ui.RefreshInbox) == true, "a full page refreshes cleanly")
 check(scrollRefires == 0, "scrollbar dormant at exactly ROWS mails",
       scrollRefires)
 
--- 11 mails, scrolled: the scrollbar is live and refires synchronously.
-bigInbox(11)
+-- ROWS + 1, scrolled: the scrollbar is live and refires synchronously.
+bigInbox(ROWS_N + 1)
 rawset(A.ui.inboxScroll, "value", 28)      -- user has scrolled one row down
 scrollRefires = 0
 local okBig = pcall(A.ui.RefreshInbox)
-check(okBig == true, "11 mails, scrolled: refresh terminates (the crash case)")
+check(okBig == true,
+      "ROWS+1 mails, scrolled: refresh terminates (the crash case)")
 check(scrollRefires > 0, "and the re-entrant scroll path genuinely fired",
       scrollRefires)
 
@@ -1893,8 +2102,33 @@ check(geom.ledger >= geom.need,
 -- than it needs to be, which is worth noticing.
 check(geom.inbox <= geom.log and geom.inbox <= geom.ledger,
       "the Inbox is still the tightest list, so it sets the window height")
-check(geom.winH == geom.panelH + 68 + 28, "window height derives from the panel",
-      geom.winH)
+check(geom.winH == geom.panelH + geom.panelTop + geom.panelBottom,
+      "window height derives from the panel", geom.winH)
+-- The panels must start BELOW the title bar and the tab row. Arithmetic that
+-- merely balances can still put a panel on top of the tabs, and 1.12 draws
+-- that overlap instead of clipping it.
+check(geom.panelTop >= geom.chromeH,
+      "panels clear the title bar and tab row",
+      geom.panelTop .. " top vs " .. geom.chromeH .. " of chrome")
+-- And they must clear the dialog border's 10px art on the sides.
+check(geom.side >= 10, "panels clear the window border", geom.side)
+
+print("== geometry: the Sent reader's blocks fit without overlapping ==")
+local sg = A.ui.SentGeometry()
+check(sg.slots >= send.MAX_ATTACHMENTS,
+      "every item a batch can hold has a visible slot -- no scrolling needed",
+      sg.slots .. " slots for " .. send.MAX_ATTACHMENTS .. " max items")
+check(sg.head + sg.items + sg.gap + sg.bodyH + sg.foot == sg.readerH,
+      "the blocks account for exactly the reader's height",
+      sg.readerH)
+check(sg.bodyH > 0, "the message well has real height", sg.bodyH)
+-- The request was "twice as tall". Measured against the 92px it had before.
+check(sg.bodyH >= 92 * 2,
+      "the message well is at least double what it was",
+      sg.bodyH .. " vs 92 before")
+-- And it must be tall enough to show the whole of a body, which is capped.
+check(sg.bodyH >= 140,
+      "tall enough to show a full-length message without scrolling", sg.bodyH)
 
 print("== clock: a step that skips a mail must re-arm itself ==")
 -- take.armed is set by nothing but MAIL_INBOX_UPDATE, and the server only
@@ -2075,33 +2309,135 @@ check(table.getn(INBOX) == 0, "mail was deleted")
 check(table.getn(A.db.Log("received")) == 0,
       "an already-empty mail carries nothing to log")
 
-print("== log: sent mail is logged per mail, on confirmation ==")
+print("== pacing: a batch starts at full speed and earns any delay ==")
+-- Courier used to pause a fixed 0.3s between every mail, which on a 12-item
+-- send is 3.6 seconds of pure waiting that TurtleMail does not pay -- it
+-- re-arms on the next frame. That constant was chosen when MAIL_FAILED threw
+-- the whole batch away; it now retries per mail, so the delay is earned rather
+-- than assumed.
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "quick", "", 0, false, false)
+check(send.settle == send.SETTLE_MIN,
+      "a fresh batch starts at the minimum", send.settle)
+pumpSend()
+check(send.settle == send.SETTLE_MIN,
+      "a clean run never slows itself down", send.settle)
+
+print("== pacing: a batch reports its own elapsed time ==")
+-- "Did the speed change?" was not answerable by feel. A batch that measures
+-- itself turns it into a number.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "timed", "", 0, false, false)
+pumpSend()
+check(send.lastElapsed ~= nil, "the batch measured itself",
+      tostring(send.lastElapsed))
+check(send.lastElapsed > 0, "and the clock moved", send.lastElapsed)
+local saidTime = false
+local ti = 1
+while ti <= table.getn(DEFAULT_CHAT_FRAME.messages) do
+    if A.util.Contains(DEFAULT_CHAT_FRAME.messages[ti], " in ") then
+        saidTime = true
+    end
+    ti = ti + 1
+end
+check(saidTime, "and it told the user how long it took")
+check(A.util.FormatSeconds(4.24) == "4.2s", "seconds format to one decimal",
+      A.util.FormatSeconds(4.24))
+check(A.util.FormatSeconds(4.26) == "4.3s", "rounding to nearest",
+      A.util.FormatSeconds(4.26))
+check(A.util.FormatSeconds(0) == "0.0s", "zero is fine")
+
+print("== pacing: SETTLE_MIN really does mean the very next frame ==")
+-- Arm(0) sets wait = 0; the driver's guard is `waited < wait`, so with a wait
+-- of zero the first tick after arming steps immediately. If this ever became
+-- `<=` the batch would silently cost an extra frame per mail.
+send.Arm(0)
+check(send.armed == true, "armed")
+local steppedOn = nil
+local origStep = send.Step
+send.Step = function() steppedOn = "yes" end
+arg1 = 0.016            -- one 60fps frame
+sdriver.scripts.OnUpdate()
+arg1 = nil
+send.Step = origStep
+check(steppedOn == "yes", "one frame later, it stepped")
+send.armed = false
+
+print("== pacing: a refusal backs off, and the backoff sticks ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+failSendCount = 1                  -- the server refuses the first mail once
+send.Start("Ann", "bumpy", "", 0, false, false)
+pumpSend()
+failSendCount = 0
+check(send.settle > send.SETTLE_MIN,
+      "the refusal bought a delay", send.settle)
+check(send.settle == send.SETTLE_MIN + send.SETTLE_STEP,
+      "of exactly one step", send.settle)
+check(table.getn(SENT) == 2, "and the batch still completed", table.getn(SENT))
+
+-- It must not creep past the ceiling however bad the connection is.
+send.settle = send.SETTLE_MAX
+local before = send.settle
+fire("MAIL_FAILED")                -- not sending, so this must be inert
+check(send.settle == before, "MAIL_FAILED outside a run changes nothing",
+      send.settle)
+
+stockBags()
+send.Attach(0, 1)
+failSendCount = 3
+send.Start("Ann", "rough", "", 0, false, false)
+pumpSend()
+failSendCount = 0
+check(send.settle <= send.SETTLE_MAX, "the backoff is capped", send.settle)
+
+-- And the next batch starts optimistic again rather than inheriting it.
+stockBags()
+send.Attach(0, 1)
+send.Start("Ann", "fresh", "", 0, false, false)
+check(send.settle == send.SETTLE_MIN,
+      "a new batch does not inherit the last one's penalty", send.settle)
+pumpSend()
+
+print("== sent box: a batch is ONE record carrying its items ==")
+-- Vanilla mail has one attachment per message, so mailing two items is two
+-- mails and the server has no notion they belong together. The grouping is
+-- ours, and it can only be captured at send time.
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 send.Start("Ann", "supplies", "", 5000, false, false)
 pumpSend()
-local sent = A.db.Log("sent")
-check(table.getn(sent) == 2, "one entry per mail", table.getn(sent))
-check(sent[1].who == "Ann", "recipient recorded")
-check(sent[1].subject == "supplies [1/2]", "the actual subject sent",
-      sent[1].subject)
-check(sent[1].item == "Silk Cloth", "item recorded")
-check(sent[1].count == 20, "stack count recorded", sent[1].count)
-check(sent[1].money == 5000, "gold on the first entry", sent[1].money)
-check(sent[2].money == 0, "not on the second", sent[2].money)
+local box = A.db.SentBox()
+check(table.getn(box) == 1, "two mails, ONE sent-box record", table.getn(box))
+local rec = box[1]
+check(rec.to == "Ann", "recipient recorded", rec.to)
+check(rec.s == "supplies", "the subject as TYPED, not the per-mail numbering",
+      rec.s)
+check(rec.mails == 2, "both mails counted", rec.mails)
+check(table.getn(rec.items) == 2, "both items listed",
+      table.getn(rec.items))
+check(rec.items[1].n == "Silk Cloth", "item name", rec.items[1].n)
+check(rec.items[1].c == 20, "stack count", rec.items[1].c)
+check(rec.items[2].n == "Copper Ore", "second item", rec.items[2].n)
+check(rec.money == 5000, "gold recorded once for the batch", rec.money)
+check(rec.char ~= nil, "and which character sent it", tostring(rec.char))
 
-print("== log: COD is logged as COD, not as gold ==")
+print("== sent box: COD is recorded as COD, not as gold ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1)
 send.Start("Ann", "cod parcel", "", 2500, true, false)
 pumpSend()
-sent = A.db.Log("sent")
-check(sent[1].cod == 2500, "cod recorded", sent[1].cod)
-check(sent[1].money == 0, "and not counted as attached gold", sent[1].money)
+rec = A.db.SentBox()[1]
+check(rec.cod == 2500, "cod recorded", rec.cod)
+check(rec.money == 0, "and not counted as attached gold", rec.money)
 
-print("== log: a mail the server rejected is not logged ==")
+print("== sent box: nothing is recorded until the server confirms ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
@@ -2109,24 +2445,261 @@ send.Start("Ann", "x", "", 0, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()      -- first mail issued, not yet confirmed
 arg1 = nil
-check(table.getn(A.db.Log("sent")) == 0, "nothing logged before confirmation")
+check(table.getn(A.db.SentBox()) == 0, "nothing recorded before confirmation")
 local guard2 = 0
 while send.sending and guard2 < 10 do
     fire("MAIL_FAILED")
     guard2 = guard2 + 1
 end
-check(table.getn(A.db.Log("sent")) == 0, "and nothing after a failure",
-      table.getn(A.db.Log("sent")))
+check(table.getn(A.db.SentBox()) == 0,
+      "and a batch that got NOTHING out leaves no record at all",
+      table.getn(A.db.SentBox()))
 
-print("== log: the logEnabled setting is honoured ==")
+print("== sent box: a batch abandoned halfway keeps what did go ==")
+-- The record is opened by the first confirmed mail and appended to per
+-- confirmation, so a run that dies partway is neither lost nor overstated.
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Ann", "partial", "", 0, false, false)
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+fire("MAIL_SEND_SUCCESS")       -- mail 1 lands
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+local g3 = 0
+while send.sending and g3 < 12 do      -- the server then refuses forever
+    fire("MAIL_FAILED")
+    g3 = g3 + 1
+end
+check(table.getn(A.db.SentBox()) == 1, "the record exists",
+      table.getn(A.db.SentBox()))
+rec = A.db.SentBox()[1]
+check(rec.mails == 1, "and counts only the mail that actually went", rec.mails)
+check(table.getn(rec.items) == 1, "with only that item listed",
+      table.getn(rec.items))
+
+print("== sent box: the logEnabled setting is honoured ==")
 A.db.ClearLog()
 A.db.SetSetting("logEnabled", false)
 stockBags()
 send.Attach(0, 1)
 send.Start("Ann", "quiet", "", 0, false, false)
 pumpSend()
-check(table.getn(A.db.Log("sent")) == 0, "logging off records nothing")
+check(table.getn(A.db.SentBox()) == 0, "logging off records nothing")
 A.db.SetSetting("logEnabled", true)
+
+print("== sent box: pruning by age and by ceiling ==")
+A.db.ClearLog()
+local boxRef = A.db.SentBox()
+-- Append-ordered, oldest first, exactly as the real writer produces them.
+table.insert(boxRef, { t = time() - (31 * 86400), to = "Old", s = "a",
+    mails = 1, items = {} })
+table.insert(boxRef, { t = time() - (29 * 86400), to = "Recent", s = "b",
+    mails = 1, items = {} })
+table.insert(boxRef, { t = time(), to = "Now", s = "c", mails = 1, items = {} })
+local dropped = A.db.SentPrune()
+check(dropped == 1, "the 31-day-old record went", dropped)
+check(table.getn(A.db.SentBox()) == 2, "two survive",
+      table.getn(A.db.SentBox()))
+check(A.db.SentBox()[1].to == "Recent", "and the 29-day-old one stayed",
+      A.db.SentBox()[1].to)
+
+A.db.ClearLog()
+boxRef = A.db.SentBox()
+local seed = 1
+while seed <= A.db.SENT_MAX + 25 do
+    table.insert(boxRef, { t = time(), to = "R" .. seed, s = "x",
+        mails = 1, items = {} })
+    seed = seed + 1
+end
+A.db.SentPrune()
+check(table.getn(A.db.SentBox()) == A.db.SENT_MAX,
+      "the ceiling trims a box that is young but huge",
+      table.getn(A.db.SentBox()))
+check(A.db.SentBox()[1].to == "R26", "oldest go first", A.db.SentBox()[1].to)
+A.db.ClearLog()
+
+print("== tabs: Send is labelled Compose, but its KEY is unchanged ==")
+-- The key names the panel frame, the ui.panels entry, the comparison in
+-- SendAttachActive, and the remembered tab in db.char.ui.tab. Renaming it to
+-- relabel the tab would drop every player onto a different tab after updating.
+check(A.ui.subTabs["Send"] ~= nil, "the tab is still keyed Send")
+check(rawget(A.ui.subTabs["Send"].label, "text") == "Compose",
+      "but reads Compose", rawget(A.ui.subTabs["Send"].label, "text"))
+check(getglobal("AegisCourierPanelSend") ~= nil,
+      "the panel frame global is unchanged")
+check(A.ui.panels["Send"] ~= nil, "and so is the panels entry")
+A.ui.SelectSubTab("Send")
+check(A.ui.selectedSubTab == "Send", "selection still uses the key")
+check(A.ui.SendAttachActive() == true,
+      "and the bag hook still recognises the compose tab")
+
+check(A.ui.subTabs["Sent"] ~= nil, "Sent is a tab of its own")
+check(rawget(A.ui.subTabs["Sent"].label, "text") == "Sent",
+      "labelled plainly", rawget(A.ui.subTabs["Sent"].label, "text"))
+check(A.ui.panels["Sent"] ~= nil, "with its own panel")
+
+print("== tabs: the Log tab is received-only now ==")
+check(A.ui.logSentBtn == nil, "the Sent/Received toggle is gone")
+check(A.ui.logDir == "received", "and the log is fixed to received",
+      A.ui.logDir)
+
+print("== Sent tab: a batch is ONE row you can click ==")
+A.db.ClearLog()
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Sent")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Torchbank", "supplies", "letters and parcels", 0, false, false)
+pumpSend()
+A.ui.sentFind:SetText("")
+A.ui.sentMine:SetChecked(false)
+local srows = A.ui.SentRows()
+check(table.getn(srows) == 1, "three mails render as ONE row",
+      table.getn(srows))
+check(srows[1].rec.to == "Torchbank", "recipient", srows[1].rec.to)
+check(srows[1].rec.s == "supplies", "subject as typed", srows[1].rec.s)
+check(srows[1].rec.mails == 3, "and it cost three mails", srows[1].rec.mails)
+check(pcall(A.ui.RefreshSent) == true, "the list paints clean")
+
+-- The find box has to search the item list, or a sent box you cannot search
+-- is just a list you scroll.
+A.ui.sentFind:SetText("copper")
+check(table.getn(A.ui.SentRows()) == 1, "found by an item inside the batch")
+A.ui.sentFind:SetText("torchbank")
+check(table.getn(A.ui.SentRows()) == 1, "found by recipient")
+A.ui.sentFind:SetText("parcels")
+check(table.getn(A.ui.SentRows()) == 1, "found by body text")
+A.ui.sentFind:SetText("nonesuch")
+check(table.getn(A.ui.SentRows()) == 0, "and a miss is a miss")
+A.ui.sentFind:SetText("")
+
+print("== Sent tab: the reader replays what was recorded ==")
+check(A.ui.SentReaderOpen() == false, "the list shows first")
+check(A.ui.OpenSentRecord(1) == true, "clicking a send opens it")
+check(A.ui.SentReaderOpen(), "the reader is open")
+check(A.ui.sentReader.visible == true, "and visible")
+check(A.ui.sentRows[1].visible == false, "the list gave up the well")
+check(rawget(A.ui.sentTo, "text") == "Torchbank", "recipient shown",
+      rawget(A.ui.sentTo, "text"))
+check(rawget(A.ui.sentBody, "text") == "letters and parcels",
+      "the body was captured at send time and replays here",
+      rawget(A.ui.sentBody, "text"))
+check(A.util.Contains(rawget(A.ui.sentMeta, "text") or "", "3 mails"),
+      "the meta line says what the send actually cost",
+      rawget(A.ui.sentMeta, "text"))
+check(A.util.Contains(rawget(A.ui.sentItemsHead, "text") or "", "3 item"),
+      "and how many items went", rawget(A.ui.sentItemsHead, "text"))
+check(A.util.Contains(rawget(A.ui.sentItemRows[1].label, "text") or "",
+      "Silk Cloth"), "the first item is named",
+      rawget(A.ui.sentItemRows[1].label, "text"))
+check(A.ui.sentItemRows[3].visible == true, "all three item rows shown")
+check(A.ui.sentItemRows[4].visible == false, "and no more than that")
+-- The icon path is captured at attach time; nothing can recover it later.
+check(A.ui.sentItemRows[1].icon.visible == true, "the item icon is shown")
+check(rawget(A.ui.sentItemRows[1].icon, "texture") ~= nil,
+      "and it has a real texture",
+      tostring(rawget(A.ui.sentItemRows[1].icon, "texture")))
+check(A.util.Contains(rawget(A.ui.sentCompose, "text") or "", "Torchbank"),
+      "the compose action names the recipient",
+      rawget(A.ui.sentCompose, "text"))
+-- The one action that makes sense here: write to the same person again.
+A.ui.sentCompose.scripts.OnClick()
+check(A.ui.selectedSubTab == "Send", "it switches to the compose tab",
+      A.ui.selectedSubTab)
+check(A.ui.sendTo:GetText() == "Torchbank", "with the recipient filled in",
+      A.ui.sendTo:GetText())
+A.ui.SelectSubTab("Sent")
+A.ui.OpenSentRecord(1)
+A.ui.CloseSentRecord()
+check(A.ui.SentReaderOpen() == false, "Back returns to the list")
+check(A.ui.sentRows[1].visible == true, "and the rows come back")
+
+print("== Sent tab: there is nothing to Take or Return ==")
+-- A sent mail is GONE from the client -- vanilla has no API to read one back,
+-- so this reader replays Courier's own record and has nothing to act on.
+check(A.ui.sentTake == nil, "no Take button exists")
+check(A.ui.sentReturn == nil, "and no Return button")
+
+print("== Sent tab: old records without body or icons still render ==")
+-- Nothing captured before this release can be backfilled: the mail is gone.
+A.db.ClearSentBox()
+local legacy = A.db.SentBegin("Oldfriend", "legacy", 0, 0)   -- no body passed
+A.db.SentAdd(legacy, "Linen Cloth", 5)                       -- no texture
+check(A.ui.OpenSentRecord(1) == true, "a legacy record opens")
+check(pcall(A.ui.RefreshSent) == true, "and paints without erroring")
+check(A.util.Contains(rawget(A.ui.sentBody, "text") or "", "no message"),
+      "a missing body says so rather than showing an empty well",
+      rawget(A.ui.sentBody, "text"))
+check(A.ui.sentItemRows[1].visible == true, "the item still lists")
+check(A.ui.sentItemRows[1].icon.visible == false,
+      "with its icon simply absent")
+A.ui.CloseSentRecord()
+
+print("== Sent tab: the reader never outlives its record ==")
+A.db.ClearSentBox()
+local r1 = A.db.SentBegin("First", "one", 0, 0)
+A.db.SentAdd(r1, "Thing", 1)
+local r2 = A.db.SentBegin("Second", "two", 0, 0)
+A.db.SentAdd(r2, "Thing", 1)
+A.ui.OpenSentRecord(1)
+check(rawget(A.ui.sentTo, "text") == "First", "reading the first send")
+-- Remove the record being read. Index 1 STAYS VALID -- the second send slides
+-- into it -- so a nil check alone sails straight past this and the reader
+-- would quietly show a different send under the first one's heading.
+table.remove(A.db.SentBox(), 1)
+check(A.db.SentBox()[1] ~= nil, "index 1 is still a real record")
+check(A.db.SentBox()[1].to == "Second", "but a DIFFERENT one now",
+      A.db.SentBox()[1].to)
+A.ui.RefreshSent()
+check(A.ui.SentReaderOpen() == false,
+      "a record shifting under the index closes the reader")
+check(A.ui.sentRows[1].visible == true, "and the list is painted instead")
+
+-- And the simpler case: the box emptied entirely.
+A.db.ClearSentBox()
+local r3 = A.db.SentBegin("Third", "three", 0, 0)
+A.db.SentAdd(r3, "Thing", 1)
+A.ui.OpenSentRecord(1)
+check(A.ui.SentReaderOpen(), "reading again")
+A.db.ClearSentBox()
+A.ui.RefreshSent()
+check(A.ui.SentReaderOpen() == false,
+      "clearing the box drops the reader back to the list")
+
+print("== Sent tab: long batches summarise but stay searchable ==")
+A.db.ClearSentBox()
+local many = A.db.SentBegin("Torchbank", "big", 0, 0)
+local mi2 = 1
+while mi2 <= 9 do
+    A.db.SentAdd(many, "Thing " .. mi2, 1)
+    mi2 = mi2 + 1
+end
+local bigRow = A.ui.SentRow(A.db.SentBox()[1])
+check(A.util.Contains(bigRow.item, "Thing 1"), "the first items are named",
+      bigRow.item)
+check(A.util.Contains(bigRow.item, "+6 more"), "and the rest are counted",
+      bigRow.item)
+-- The label is truncated for width; SEARCH must not be. A bank-alt send is
+-- exactly where an item sits ninth in the list, and "I know I mailed it" is
+-- the whole reason to open a sent box.
+A.ui.sentFind:SetText("thing 9")
+check(table.getn(A.ui.SentRows()) == 1,
+      "an item past the visible ones is still findable",
+      table.getn(A.ui.SentRows()))
+A.ui.sentFind:SetText("")
+
+print("== Sent tab: Clear empties the box ==")
+A.db.ClearSentBox()
+check(table.getn(A.db.SentBox()) == 0, "the box is empty",
+      table.getn(A.db.SentBox()))
+check(table.getn(A.ui.SentRows()) == 0, "and so is the view")
+A.ui.SelectSubTab("Log")
+A.ui.logDir = "received"
 
 print("== log: filtering ==")
 A.db.ClearLog()

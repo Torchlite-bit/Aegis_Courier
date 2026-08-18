@@ -89,6 +89,19 @@ local function DefaultAccountDB()
         -- that on my bank alt?", which is the question people actually have,
         -- becomes answerable instead of structurally impossible.
         log        = { sent = {}, received = {} },
+        -- The sent box: one record per SEND, not per mail.
+        --
+        -- Vanilla mail carries one attachment, so mailing 12 items to a bank
+        -- alt is 12 separate mails and the server has no idea they belong
+        -- together. That grouping is ours to invent and can only be captured
+        -- at send time -- it cannot be read back afterwards. See db.SentBegin.
+        --
+        -- Keys are DELIBERATELY SHORT (`n`/`c` rather than `name`/`count`).
+        -- SavedVariables is written out as Lua SOURCE and re-parsed at every
+        -- login, so every key name is spelled out once per record; across a
+        -- month of bank-alt runs that is the difference between a tidy file
+        -- and a slow load.
+        sent       = {},
         -- Recipient autocomplete: realm|faction -> { name -> lastSeenEpoch }.
         -- Scoped that way because you cannot mail across a realm, and mailing
         -- the opposing faction is not possible either -- so a flat account-wide
@@ -198,6 +211,10 @@ function db.Init()
 
     PruneSeen()
     PruneContacts()
+    -- Age out the sent box here rather than on a timer: ADDON_LOADED is the
+    -- only moment the DB is guaranteed present, and it is also when a stale
+    -- box would otherwise be paid for in load time.
+    db.SentPrune()
 end
 
 -- ---------------------------------------------------------------------------
@@ -347,12 +364,131 @@ function db.LogAdd(dir, entry)
     return entry
 end
 
+-- ---------------------------------------------------------------------------
+-- The sent box
+-- ---------------------------------------------------------------------------
+-- Two bounds, not one. An age bound alone is unbounded for a heavy bank-alt
+-- user, and one runaway session should not leave a file that costs seconds to
+-- re-parse at every login. Whichever bites first wins.
+db.SENT_DAYS = 30
+db.SENT_MAX  = 500
+
+-- Drop records older than SENT_DAYS, then trim to SENT_MAX. Returns how many
+-- went. Called from db.Init and again whenever a record is opened.
+function db.SentPrune()
+    local box = db.account and db.account.sent
+    if not box then return 0 end
+    local n = table.getn(box)
+    if n == 0 then return 0 end
+
+    -- 30 days in seconds. No modulo and no integer division anywhere here --
+    -- Lua 5.0 has neither.
+    local cutoff = time() - (db.SENT_DAYS * 86400)
+
+    -- Records are appended in time order, so everything to drop is a PREFIX.
+    -- Find where the survivors start and rebuild ONCE: table.remove(box, 1) in
+    -- a loop shifts the whole array on every call, which goes quadratic on the
+    -- first login after a long absence -- precisely when the box is biggest.
+    local first = 1
+    while first <= n and (box[first].t or 0) < cutoff do
+        first = first + 1
+    end
+
+    local keep = n - first + 1
+    if keep > db.SENT_MAX then first = first + (keep - db.SENT_MAX) end
+    if first == 1 then return 0 end
+
+    local out = {}
+    local i = first
+    while i <= n do
+        table.insert(out, box[i])
+        i = i + 1
+    end
+    db.account.sent = out
+    return first - 1
+end
+
+-- Open a record for a batch. Called by the FIRST confirmed mail of a send, not
+-- by pressing Send: a batch the server never accepted anything from leaves no
+-- record behind, exactly as the ledger books nothing for a mail it never
+-- emptied.
+--
+-- Honours the same logEnabled setting as the correspondence log -- a user who
+-- turned logging off did not mean "except this".
+-- The message body is the one unbounded field in a record -- everything else
+-- is a name, a number or a short string. Capped so a single long letter cannot
+-- dominate a file that is re-parsed as Lua source at every login.
+db.SENT_BODY_MAX = 500
+
+function db.SentBegin(to, subject, money, cod, body)
+    if not db.account then return nil end
+    if not db.Setting("logEnabled") then return nil end
+    if not db.account.sent then db.account.sent = {} end
+    -- A monotonic id, because `t` is NOT an identity. time() has one-second
+    -- resolution, so two sends a moment apart share a timestamp -- and the
+    -- reader uses this to notice a record shifting under its index. A
+    -- timestamp-based check would silently pass for exactly the sends most
+    -- likely to be confused with each other.
+    db.account.sentSeq = (db.account.sentSeq or 0) + 1
+    local rec = {
+        id    = db.account.sentSeq,
+        t     = time(),
+        to    = to or "?",
+        s     = subject or "",
+        char  = (UnitName and UnitName("player")) or nil,
+        mails = 0,
+        money = money or 0,
+        cod   = cod or 0,
+        items = {},
+    }
+    -- Stored only if there is one. An empty body should not cost a key in
+    -- every record of a parcel-only sender's history.
+    if type(body) == "string" and body ~= "" then
+        if string.len(body) > db.SENT_BODY_MAX then
+            rec.body = string.sub(body, 1, db.SENT_BODY_MAX) .. "..."
+        else
+            rec.body = body
+        end
+    end
+    table.insert(db.account.sent, rec)
+    db.SentPrune()
+    return rec
+end
+
+-- Append one CONFIRMED mail to an open record. A batch abandoned halfway keeps
+-- whatever actually went out, rather than being recorded as complete or lost
+-- entirely.
+-- `texture` is the item's icon path, captured at attach time. Records written
+-- before it existed simply have no `x` field, and the reader falls back rather
+-- than showing a hole -- a sent mail cannot be re-read to fill it in.
+function db.SentAdd(rec, itemName, count, texture)
+    if not rec then return nil end
+    rec.mails = rec.mails + 1
+    if itemName then
+        table.insert(rec.items, { n = itemName, c = count or 1, x = texture })
+    end
+    return rec
+end
+
+function db.SentBox()
+    return (db.account and db.account.sent) or {}
+end
+
+function db.ClearSentBox()
+    if db.account then db.account.sent = {} end
+end
+
 function db.Log(dir)
     return LogBucket(dir) or {}
 end
 
+-- Clearing the "sent" direction clears the SENT BOX, because that is what the
+-- Sent view actually shows now -- leaving the box behind would make the Clear
+-- button look broken.
 function db.ClearLog(dir)
     if not db.account then return end
+    if dir == "sent" then db.ClearSentBox() end
+    if not dir then db.ClearSentBox() end
     if dir then
         local bucket = LogBucket(dir)
         if bucket then

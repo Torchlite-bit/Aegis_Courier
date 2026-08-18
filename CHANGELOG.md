@@ -9,6 +9,135 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.5.0]
+
+The window now matches Aegis: Exchange, the Sent reader gives the message room
+to breathe, and **Tab** moves between fields when composing. `/reload`.
+
+### Changed
+- **The window wears Exchange's frame.** Unskinned, Courier used a thin tooltip
+  border throughout while Exchange used the heavier ornamental dialog frame, so
+  running both looked like running two unrelated addons. Courier now uses the
+  same frame, title inset and title size. (With pfUI installed the two already
+  matched — that path is untouched.)
+- **The inbox shows 12 mails at a time, up from 10.** The window grew for the
+  heavier frame and the taller message area anyway, and the list is sized from
+  the window rather than the other way round.
+- **The Sent reader's message area is more than twice as tall** — 204px, up
+  from 92px. The item list moved from two columns of six to three of four,
+  which still shows every item a batch can hold (12 is the cap) while giving
+  132px back to the message. The mail count and item count now share one line
+  instead of two.
+
+### Added
+- **Tab moves to the next field when composing** — To → Subject → Body → Gold,
+  wrapping back to To. This is how the stock mail form behaves. Tab inside the
+  message no longer types a tab character.
+
+## [1.4.0]
+
+Sent mail gets its own tab with a reader, the Send tab is now **Compose**, and
+every batch reports how long it took. `/reload`.
+
+### Added
+- **A Sent tab.** Sent mail moves out of the Log tab into its own, and works
+  like the Inbox: a list of sends, click one to read it. The reader shows the
+  recipient, your subject, when it went, which character sent it, every item
+  with its icon and stack size, the gold or COD attached, the message body,
+  and how many mails the send actually cost you in postage.
+- **Compose to ‹recipient›** from inside a sent record, which switches to the
+  Compose tab with the name already filled in.
+- Every batch now reports its own elapsed time — `sent 12 mails to Torchbank
+  in 4.2s` — so "did that get faster?" has an answer instead of an impression.
+
+### Changed
+- **The Send tab is now called Compose.** "Send" and "Sent" side by side read
+  as two views of one thing, which they are not: one is the form you write in,
+  the other is what already went. Only the label changed — the tab you had
+  selected is still remembered correctly across the update.
+- **The Log tab is received-only.** It no longer carries a Sent/Received
+  toggle, so each kind of mail lives in exactly one place.
+
+### Notes
+- A sent mail is **gone from the client** — vanilla has no sent-items store and
+  no way to read back a mail you sent. So the Sent tab replays what Courier
+  recorded as you sent, and there is deliberately no Take or Return: there is
+  nothing left to act on.
+- For the same reason, sends recorded before this update have **no message
+  body and no item icons** — nothing can recover them. Those records still
+  open and read correctly, just without those two things.
+
+## [1.3.0]
+
+Mass sends are faster, and the Log tab's **Sent** side is now a proper sent
+box: one row per send, with the items it carried, kept for 30 days. `/reload`.
+
+### Changed
+- **Mass sending no longer pauses between mails.** Courier waited a fixed 0.3
+  seconds after every mail, which on a 12-item send is 3.6 seconds of pure
+  waiting. That pause was added when a single refusal threw the whole batch
+  away, so over-paying to avoid a race made sense. It no longer does: refusals
+  are retried per mail, and the attach path now waits for busy stacks and
+  re-finds moved ones instead of trusting a stale bag slot. Every batch now
+  starts at full speed and only slows down if the server actually refuses
+  something — and each send starts optimistic again rather than inheriting the
+  last one's caution.
+  - **How much faster in practice is not yet known.** An earlier draft of this
+    entry claimed "roughly three times faster"; that was arithmetic, not a
+    measurement, and it assumed a server round-trip we do not control. The
+    3.6 seconds is real and is gone, but each mail still costs a round-trip,
+    so on a short send the difference may be hard to notice at all. v1.4.0
+    makes every batch report its own elapsed time so this stops being a matter
+    of impression.
+
+### Added
+- **A sent box.** The Log tab's **Sent** side now shows one row per *send*
+  rather than one per mail, with the recipient, your subject, the items that
+  went, and how many mails it actually cost. Vanilla mail carries one
+  attachment, so mailing 12 items to a bank alt is 12 separate mails and the
+  game has no idea they belong together — that grouping is Courier's, recorded
+  as you send because it cannot be recovered afterwards.
+- Records are kept for **30 days**, with a 500-send ceiling as well, so a heavy
+  bank-alt week cannot quietly turn your SavedVariables into something that
+  takes seconds to load. Ageing out happens at login.
+- The find box searches **every** item in a send, not just the ones that fit on
+  the row — "did I mail that?" is the whole point of having this.
+- A send is recorded only once the server confirms a mail, so a batch that got
+  nothing out leaves no record, and one abandoned halfway records exactly what
+  actually went.
+
+## [1.2.0]
+
+Fixes mass sends halting partway with "could not attach". `/reload`.
+
+### Fixed
+- **A mass send stopped dead at the first item it could not attach**, printing
+  `could not attach [item] -- send stopped` and abandoning everything still
+  queued. Three separate faults were behind it.
+  - **We never read the slot's lock flag.** `GetContainerItemInfo` returns
+    `texture, itemCount, locked, …`, and Courier read only the first two.
+    `PickupContainerItem` on a slot the server has locked does *nothing at
+    all* — no error, no event — so the attach silently posted nothing and the
+    run gave up. The lock is normal: the previous mail's bag update simply had
+    not landed yet, which is why this hit long sends and bad connections
+    hardest. Courier now waits for the lock to clear instead of failing.
+  - **The bag coordinates were a snapshot.** An attachment remembers where it
+    was when you queued it, and on a twelve-item send that can be a minute and
+    eleven mails out of date. Anything that reshuffles your bags in between
+    invalidated it. Courier now re-finds a moved stack by name.
+  - **One bad item cost the whole queue.** Now it costs one item: the rest of
+    the batch goes out and you are told what was skipped, rather than the run
+    stopping and leaving you to rebuild a twelve-item list by hand.
+- **A mass send could post the WRONG item.** The old check asked only whether
+  *something* was attached, never whether it was the thing you queued. If a
+  different stack had moved into the remembered slot, that check passed and the
+  replacement went to the recipient silently — a worse outcome than the visible
+  failure that was actually being reported. Courier now compares the item on
+  the mail against the one you queued and refuses to send a mismatch.
+- A run that sends **nothing** no longer clears your attachment list. Every
+  item is still in your bags in that case, and wiping the list meant rebuilding
+  the whole selection to try again.
+
 ## [1.1.0]
 
 Adds a mail reader, and fixes a take-engine bug that stopped **Open All** dead

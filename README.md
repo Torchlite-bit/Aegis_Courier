@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.1.0)
+# Aegis: Courier (v1.5.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -149,24 +149,63 @@ and the cost line shows the **real** total postage rather than a single mail's.
 | **subject** | leave it blank and each mail is named after its item (`Silk Cloth (20)`); fill it in and a batch is numbered `subject [2/5]` |
 | **recipient** | starts suggesting names you have mailed or been mailed by, most recent first — the arrow button beside the box lists them all |
 | **gold** | type `12g 30s`, or a bare number for gold |
+| **Tab** | moves to the next field — To → Subject → Body → Gold, then back to To |
 | **C.O.D.** | charges the recipient instead of attaching gold — optionally on every mail of a batch, not just the first |
 
 Attached gold rides the **first** mail only, so a 10-item send does not send
-your gold ten times. If an item cannot be attached — moved, sold, soulbound —
-the batch stops before that mail goes out rather than posting an empty one.
+your gold ten times.
+
+A mass send does not give up on the whole queue because one item went wrong.
+If a stack is **busy** — the server is still moving it after the previous mail
+— Courier waits for it. If it has **moved** in your bags since you queued it,
+Courier finds it again by name. Only an item that has genuinely left your bags
+is skipped, and then just that one: the rest of the batch goes out and you are
+told what was left behind. Courier also checks that the item which actually
+landed on the mail is the one you queued, so a stack shifting underneath a send
+can never post the wrong thing to the recipient.
 
 If the server refuses a mail, that one is retried a few times before the batch
-gives up, and anything unsent stays on the attachment list so you can just
-press Send again.
+gives up. If a run gets nothing out at all, your attachment list is left exactly
+as it was so you can just press Send again.
+
+Batches run at full speed — the next mail goes the moment the server confirms
+the last one. Courier only slows down if the server actually refuses something,
+and each new send starts optimistic again rather than inheriting the caution.
+Each batch reports how long it took (`sent 12 mails to Torchbank in 4.2s`), so
+you can see the real number rather than guess at it.
 
 Right-click in your bags only attaches while the Send tab is actually open at
 a mailbox; everywhere else it keeps its normal meaning.
+
+## The Sent tab
+
+A record of mail you sent, grouped by *send* rather than by mail. Click one to
+read it, the same way you read your inbox: recipient, your subject, when it
+went, which character sent it, every item with its icon and stack size, the
+gold or COD attached, your message, and how many mails the send actually cost
+you in postage. **Compose to ‹recipient›** writes to the same person again.
+
+Vanilla carries one attachment per message, so shipping 12 items to a bank alt
+is 12 separate mails and the game has no idea they belong together. Courier
+records that grouping as you send.
+
+Two things follow from how vanilla works, and are worth knowing:
+
+- **A sent mail is gone from your client.** There is no sent-items store and no
+  way to read one back, so this tab replays what Courier wrote down at the
+  time — which is also why there is no Take or Return here. Nothing is left to
+  act on.
+- Sends recorded **before v1.4.0** have no message body and no item icons, and
+  nothing can recover them. They still open and read fine without those.
+
+Sends are kept for **30 days** (or 500 sends, whichever comes first), and the
+find box searches every item in a send, not just the ones that fit on the row.
 
 ## The log
 
 Separate from the ledger next door: the ledger is *money*, the log is
 *correspondence* — who wrote to whom, what was attached, on which character.
-Every mail Courier collects or sends is recorded, capped at 250 each way.
+It lists every mail Courier collected for you, one row each, capped at 250.
 
 It is stored **account-wide**, with the character on each entry, so a
 per-character view is a filter rather than a limitation. TurtleMail stores its
