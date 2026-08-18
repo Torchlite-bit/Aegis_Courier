@@ -350,6 +350,8 @@ function send.Start(to, subject, body, money, isCOD, codAll)
     send.total     = send.MailCount()
     send.sentCount = 0
     send.skipped   = 0
+    send.settle    = send.SETTLE_MIN
+    send.sentRec   = nil    -- opened by the first confirmed mail, not here
     send.retries   = 0
     send.inFlight  = nil
     send.sending   = true
@@ -607,7 +609,25 @@ local waited = 0
 -- root cause -- see the MAIL_FAILED handler, which is what actually makes a
 -- batch survive a rejection -- but it costs a few seconds on a 12-item send
 -- and removes a whole class of race.
-send.SETTLE = 0.3
+-- ADAPTIVE. Every batch starts optimistic -- next frame, which is the pacing
+-- TurtleMail uses and the reason it feels faster than a fixed pause. The delay
+-- is EARNED, one refusal at a time, and once earned it is kept for the rest of
+-- the batch: a server that refused once will refuse again, and re-learning
+-- that per mail is what makes a long send feel unreliable.
+--
+-- The fixed 0.3s this replaces was chosen when MAIL_FAILED abandoned the whole
+-- batch, so any race was catastrophic and worth over-paying to avoid. That
+-- handler now retries per mail with a budget that resets on success, and the
+-- attach path re-resolves and waits on locks rather than trusting a stale
+-- coordinate -- so the race it was insuring against is handled where it
+-- happens. On a 12-item send the old constant cost 3.6 seconds of pure
+-- waiting, paid by every user on every batch to guard the worst connection.
+send.SETTLE_MIN  = 0
+send.SETTLE_STEP = 0.3
+send.SETTLE_MAX  = 0.9
+
+-- The delay currently in force. Reset per batch in send.Start.
+send.settle = send.SETTLE_MIN
 
 -- Longer pause before re-attempting a mail the server just refused.
 send.RETRY_WAIT = 1.0
@@ -658,14 +678,25 @@ A.RegisterEvent("MAIL_SEND_SUCCESS", function()
     send.sentCount = send.sentCount + 1
     send.retries = 0            -- progress: the next mail gets a clean budget
     send.inFlight = nil         -- this one is the server's problem now
-    -- Logged on CONFIRMATION, matching the take engine: a mail the server
-    -- never accepted is not a mail you sent.
+    -- Recorded on CONFIRMATION, matching the take engine: a mail the server
+    -- never accepted is not a mail you sent. This is also why nothing hooks
+    -- SendMail itself -- the call returning tells you nothing, and MAIL_FAILED
+    -- can still arrive afterwards.
     if send.lastSent then
-        A.db.LogAdd("sent", send.lastSent)
+        -- The sent box groups a batch into ONE record. The record is opened by
+        -- the first mail the server confirms rather than by pressing Send, so
+        -- a batch that got nothing out leaves nothing behind, and one abandoned
+        -- halfway keeps exactly what actually went.
+        if not send.sentRec then
+            send.sentRec = A.db.SentBegin(send.to, send.subject,
+                (not send.isCOD) and send.money or 0,
+                send.isCOD and send.money or 0)
+        end
+        A.db.SentAdd(send.sentRec, send.lastSent.item, send.lastSent.count)
         send.lastSent = nil
     end
     if send.queue and table.getn(send.queue) > 0 then
-        send.Arm(send.SETTLE)   -- more items: next mail once things settle
+        send.Arm(send.settle)   -- more items: next mail at the earned pacing
     else
         send.Finish()
     end
@@ -684,6 +715,11 @@ end)
 -- capped globally; only a mail that fails repeatedly gives up.
 A.RegisterEvent("MAIL_FAILED", function()
     if not send.sending then return end
+
+    -- Back off and STAY backed off for the rest of this batch. See the
+    -- SETTLE_MIN note: the delay is earned, not assumed.
+    send.settle = send.settle + send.SETTLE_STEP
+    if send.settle > send.SETTLE_MAX then send.settle = send.SETTLE_MAX end
 
     send.retries = (send.retries or 0) + 1
     if send.retries <= send.MAX_RETRIES then

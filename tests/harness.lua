@@ -2215,33 +2215,93 @@ check(table.getn(INBOX) == 0, "mail was deleted")
 check(table.getn(A.db.Log("received")) == 0,
       "an already-empty mail carries nothing to log")
 
-print("== log: sent mail is logged per mail, on confirmation ==")
+print("== pacing: a batch starts at full speed and earns any delay ==")
+-- Courier used to pause a fixed 0.3s between every mail, which on a 12-item
+-- send is 3.6 seconds of pure waiting that TurtleMail does not pay -- it
+-- re-arms on the next frame. That constant was chosen when MAIL_FAILED threw
+-- the whole batch away; it now retries per mail, so the delay is earned rather
+-- than assumed.
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "quick", "", 0, false, false)
+check(send.settle == send.SETTLE_MIN,
+      "a fresh batch starts at the minimum", send.settle)
+pumpSend()
+check(send.settle == send.SETTLE_MIN,
+      "a clean run never slows itself down", send.settle)
+
+print("== pacing: a refusal backs off, and the backoff sticks ==")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)
+failSendCount = 1                  -- the server refuses the first mail once
+send.Start("Ann", "bumpy", "", 0, false, false)
+pumpSend()
+failSendCount = 0
+check(send.settle > send.SETTLE_MIN,
+      "the refusal bought a delay", send.settle)
+check(send.settle == send.SETTLE_MIN + send.SETTLE_STEP,
+      "of exactly one step", send.settle)
+check(table.getn(SENT) == 2, "and the batch still completed", table.getn(SENT))
+
+-- It must not creep past the ceiling however bad the connection is.
+send.settle = send.SETTLE_MAX
+local before = send.settle
+fire("MAIL_FAILED")                -- not sending, so this must be inert
+check(send.settle == before, "MAIL_FAILED outside a run changes nothing",
+      send.settle)
+
+stockBags()
+send.Attach(0, 1)
+failSendCount = 3
+send.Start("Ann", "rough", "", 0, false, false)
+pumpSend()
+failSendCount = 0
+check(send.settle <= send.SETTLE_MAX, "the backoff is capped", send.settle)
+
+-- And the next batch starts optimistic again rather than inheriting it.
+stockBags()
+send.Attach(0, 1)
+send.Start("Ann", "fresh", "", 0, false, false)
+check(send.settle == send.SETTLE_MIN,
+      "a new batch does not inherit the last one's penalty", send.settle)
+pumpSend()
+
+print("== sent box: a batch is ONE record carrying its items ==")
+-- Vanilla mail has one attachment per message, so mailing two items is two
+-- mails and the server has no notion they belong together. The grouping is
+-- ours, and it can only be captured at send time.
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 send.Start("Ann", "supplies", "", 5000, false, false)
 pumpSend()
-local sent = A.db.Log("sent")
-check(table.getn(sent) == 2, "one entry per mail", table.getn(sent))
-check(sent[1].who == "Ann", "recipient recorded")
-check(sent[1].subject == "supplies [1/2]", "the actual subject sent",
-      sent[1].subject)
-check(sent[1].item == "Silk Cloth", "item recorded")
-check(sent[1].count == 20, "stack count recorded", sent[1].count)
-check(sent[1].money == 5000, "gold on the first entry", sent[1].money)
-check(sent[2].money == 0, "not on the second", sent[2].money)
+local box = A.db.SentBox()
+check(table.getn(box) == 1, "two mails, ONE sent-box record", table.getn(box))
+local rec = box[1]
+check(rec.to == "Ann", "recipient recorded", rec.to)
+check(rec.s == "supplies", "the subject as TYPED, not the per-mail numbering",
+      rec.s)
+check(rec.mails == 2, "both mails counted", rec.mails)
+check(table.getn(rec.items) == 2, "both items listed",
+      table.getn(rec.items))
+check(rec.items[1].n == "Silk Cloth", "item name", rec.items[1].n)
+check(rec.items[1].c == 20, "stack count", rec.items[1].c)
+check(rec.items[2].n == "Copper Ore", "second item", rec.items[2].n)
+check(rec.money == 5000, "gold recorded once for the batch", rec.money)
+check(rec.char ~= nil, "and which character sent it", tostring(rec.char))
 
-print("== log: COD is logged as COD, not as gold ==")
+print("== sent box: COD is recorded as COD, not as gold ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1)
 send.Start("Ann", "cod parcel", "", 2500, true, false)
 pumpSend()
-sent = A.db.Log("sent")
-check(sent[1].cod == 2500, "cod recorded", sent[1].cod)
-check(sent[1].money == 0, "and not counted as attached gold", sent[1].money)
+rec = A.db.SentBox()[1]
+check(rec.cod == 2500, "cod recorded", rec.cod)
+check(rec.money == 0, "and not counted as attached gold", rec.money)
 
-print("== log: a mail the server rejected is not logged ==")
+print("== sent box: nothing is recorded until the server confirms ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
@@ -2249,24 +2309,145 @@ send.Start("Ann", "x", "", 0, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()      -- first mail issued, not yet confirmed
 arg1 = nil
-check(table.getn(A.db.Log("sent")) == 0, "nothing logged before confirmation")
+check(table.getn(A.db.SentBox()) == 0, "nothing recorded before confirmation")
 local guard2 = 0
 while send.sending and guard2 < 10 do
     fire("MAIL_FAILED")
     guard2 = guard2 + 1
 end
-check(table.getn(A.db.Log("sent")) == 0, "and nothing after a failure",
-      table.getn(A.db.Log("sent")))
+check(table.getn(A.db.SentBox()) == 0,
+      "and a batch that got NOTHING out leaves no record at all",
+      table.getn(A.db.SentBox()))
 
-print("== log: the logEnabled setting is honoured ==")
+print("== sent box: a batch abandoned halfway keeps what did go ==")
+-- The record is opened by the first confirmed mail and appended to per
+-- confirmation, so a run that dies partway is neither lost nor overstated.
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Ann", "partial", "", 0, false, false)
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+fire("MAIL_SEND_SUCCESS")       -- mail 1 lands
+arg1 = 5
+sdriver.scripts.OnUpdate()
+arg1 = nil
+local g3 = 0
+while send.sending and g3 < 12 do      -- the server then refuses forever
+    fire("MAIL_FAILED")
+    g3 = g3 + 1
+end
+check(table.getn(A.db.SentBox()) == 1, "the record exists",
+      table.getn(A.db.SentBox()))
+rec = A.db.SentBox()[1]
+check(rec.mails == 1, "and counts only the mail that actually went", rec.mails)
+check(table.getn(rec.items) == 1, "with only that item listed",
+      table.getn(rec.items))
+
+print("== sent box: the logEnabled setting is honoured ==")
 A.db.ClearLog()
 A.db.SetSetting("logEnabled", false)
 stockBags()
 send.Attach(0, 1)
 send.Start("Ann", "quiet", "", 0, false, false)
 pumpSend()
-check(table.getn(A.db.Log("sent")) == 0, "logging off records nothing")
+check(table.getn(A.db.SentBox()) == 0, "logging off records nothing")
 A.db.SetSetting("logEnabled", true)
+
+print("== sent box: pruning by age and by ceiling ==")
+A.db.ClearLog()
+local boxRef = A.db.SentBox()
+-- Append-ordered, oldest first, exactly as the real writer produces them.
+table.insert(boxRef, { t = time() - (31 * 86400), to = "Old", s = "a",
+    mails = 1, items = {} })
+table.insert(boxRef, { t = time() - (29 * 86400), to = "Recent", s = "b",
+    mails = 1, items = {} })
+table.insert(boxRef, { t = time(), to = "Now", s = "c", mails = 1, items = {} })
+local dropped = A.db.SentPrune()
+check(dropped == 1, "the 31-day-old record went", dropped)
+check(table.getn(A.db.SentBox()) == 2, "two survive",
+      table.getn(A.db.SentBox()))
+check(A.db.SentBox()[1].to == "Recent", "and the 29-day-old one stayed",
+      A.db.SentBox()[1].to)
+
+A.db.ClearLog()
+boxRef = A.db.SentBox()
+local seed = 1
+while seed <= A.db.SENT_MAX + 25 do
+    table.insert(boxRef, { t = time(), to = "R" .. seed, s = "x",
+        mails = 1, items = {} })
+    seed = seed + 1
+end
+A.db.SentPrune()
+check(table.getn(A.db.SentBox()) == A.db.SENT_MAX,
+      "the ceiling trims a box that is young but huge",
+      table.getn(A.db.SentBox()))
+check(A.db.SentBox()[1].to == "R26", "oldest go first", A.db.SentBox()[1].to)
+A.db.ClearLog()
+
+print("== sent view: the Log tab's Sent side shows BATCHES ==")
+A.db.ClearLog()
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Log")
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Torchbank", "supplies", "", 0, false, false)
+pumpSend()
+A.ui.logDir = "sent"
+A.ui.logFind:SetText("")
+A.ui.logMine:SetChecked(false)
+local srows = A.ui.LogRows()
+check(table.getn(srows) == 1, "three mails render as ONE row",
+      table.getn(srows))
+check(srows[1].who == "Torchbank", "recipient", srows[1].who)
+check(srows[1].subject == "supplies", "subject as typed", srows[1].subject)
+check(srows[1].mails == 3, "and it says how many mails it cost", srows[1].mails)
+check(A.util.Contains(srows[1].item or "", "Silk Cloth"),
+      "the items are named, not just counted", srows[1].item)
+check(A.util.Contains(srows[1].item or "", "Copper Ore"),
+      "all of them while they fit", srows[1].item)
+check(pcall(A.ui.RefreshLog) == true, "and the Sent view paints clean")
+
+-- The find box has to search the item list, or a sent box you cannot search
+-- is just a list you scroll.
+A.ui.logFind:SetText("copper")
+check(table.getn(A.ui.LogRows()) == 1, "found by an item inside the batch")
+A.ui.logFind:SetText("torchbank")
+check(table.getn(A.ui.LogRows()) == 1, "found by recipient")
+A.ui.logFind:SetText("nonesuch")
+check(table.getn(A.ui.LogRows()) == 0, "and a miss is a miss")
+A.ui.logFind:SetText("")
+
+-- Long batches summarise rather than running off the row.
+A.db.ClearLog()
+local many = A.db.SentBegin("Torchbank", "big", 0, 0)
+local mi2 = 1
+while mi2 <= 9 do
+    A.db.SentAdd(many, "Thing " .. mi2, 1)
+    mi2 = mi2 + 1
+end
+local bigRow = A.ui.SentRow(A.db.SentBox()[1])
+check(A.util.Contains(bigRow.item, "Thing 1"), "the first items are named",
+      bigRow.item)
+check(A.util.Contains(bigRow.item, "+6 more"), "and the rest are counted",
+      bigRow.item)
+-- The label is truncated for width; SEARCH must not be. A bank-alt send is
+-- exactly where an item sits ninth in the list, and "I know I mailed it" is
+-- the whole reason to open a sent box.
+A.ui.logFind:SetText("thing 9")
+check(table.getn(A.ui.LogRows()) == 1,
+      "an item past the visible ones is still findable",
+      table.getn(A.ui.LogRows()))
+A.ui.logFind:SetText("")
+
+print("== sent view: Clear empties the sent box ==")
+A.db.ClearLog("sent")
+check(table.getn(A.db.SentBox()) == 0, "the box is empty",
+      table.getn(A.db.SentBox()))
+check(table.getn(A.ui.LogRows()) == 0, "and so is the view")
+A.ui.logDir = "received"
 
 print("== log: filtering ==")
 A.db.ClearLog()

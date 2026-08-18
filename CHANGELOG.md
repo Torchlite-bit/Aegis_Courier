@@ -9,6 +9,38 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.3.0]
+
+Mass sends are faster, and the Log tab's **Sent** side is now a proper sent
+box: one row per send, with the items it carried, kept for 30 days. `/reload`.
+
+### Changed
+- **Mass sending is roughly three times faster.** Courier paused a fixed 0.3
+  seconds between every mail, which on a 12-item send is 3.6 seconds of pure
+  waiting. That pause was added when a single refusal threw the whole batch
+  away, so over-paying to avoid a race made sense. It no longer does: refusals
+  are retried per mail, and the attach path now waits for busy stacks and
+  re-finds moved ones instead of trusting a stale bag slot. Every batch now
+  starts at full speed and only slows down if the server actually refuses
+  something — and each send starts optimistic again rather than inheriting the
+  last one's caution.
+
+### Added
+- **A sent box.** The Log tab's **Sent** side now shows one row per *send*
+  rather than one per mail, with the recipient, your subject, the items that
+  went, and how many mails it actually cost. Vanilla mail carries one
+  attachment, so mailing 12 items to a bank alt is 12 separate mails and the
+  game has no idea they belong together — that grouping is Courier's, recorded
+  as you send because it cannot be recovered afterwards.
+- Records are kept for **30 days**, with a 500-send ceiling as well, so a heavy
+  bank-alt week cannot quietly turn your SavedVariables into something that
+  takes seconds to load. Ageing out happens at login.
+- The find box searches **every** item in a send, not just the ones that fit on
+  the row — "did I mail that?" is the whole point of having this.
+- A send is recorded only once the server confirms a mail, so a batch that got
+  nothing out leaves no record, and one abandoned halfway records exactly what
+  actually went.
+
 ## [1.2.0]
 
 Fixes mass sends halting partway with "could not attach". `/reload`.

@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.2.0)
+# Aegis: Courier (v1.3.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -167,14 +167,29 @@ If the server refuses a mail, that one is retried a few times before the batch
 gives up. If a run gets nothing out at all, your attachment list is left exactly
 as it was so you can just press Send again.
 
+Batches run at full speed — the next mail goes the moment the server confirms
+the last one. Courier only slows down if the server actually refuses something,
+and each new send starts optimistic again rather than inheriting the caution.
+
 Right-click in your bags only attaches while the Send tab is actually open at
 a mailbox; everywhere else it keeps its normal meaning.
 
-## The log
+## The log and the sent box
 
 Separate from the ledger next door: the ledger is *money*, the log is
 *correspondence* — who wrote to whom, what was attached, on which character.
-Every mail Courier collects or sends is recorded, capped at 250 each way.
+
+**Received** lists every mail Courier collected for you, one row each, capped
+at 250.
+
+**Sent** is a sent box, and it groups by *send* rather than by mail. Vanilla
+carries one attachment per message, so shipping 12 items to a bank alt is 12
+separate mails and the game has no idea they belong together — Courier records
+that grouping as you send, because it cannot be recovered afterwards. One row
+gives you the recipient, your subject, the items that went, and how many mails
+it actually cost you in postage. Sends are kept for **30 days** (or 500 sends,
+whichever comes first), and the find box searches every item in a send, not
+just the ones that fit on the row.
 
 It is stored **account-wide**, with the character on each entry, so a
 per-character view is a filter rather than a limitation. TurtleMail stores its

@@ -1590,9 +1590,69 @@ function ui.BuildLogPanel()
 end
 
 -- Entries for the current direction, newest first, after filtering.
+-- Flatten a sent-box batch into the same shape the row renderer already
+-- expects, so one paint path serves both directions.
+--
+-- A batch is one row, not one row per mail: mailing 12 items to a bank alt is
+-- 12 mails on the server, and listing them individually is what made the old
+-- sent log useless for exactly the case people care about.
+function ui.SentRow(rec)
+    local n = table.getn(rec.items or {})
+    -- Name the items outright while they fit; past that, lead with the first
+    -- and count the rest. "12 items" alone tells you nothing you wanted.
+    local label = ""
+    local allNames = ""
+    local ai = 1
+    while ai <= n do
+        allNames = allNames .. " " .. (rec.items[ai].n or "")
+        ai = ai + 1
+    end
+    local i = 1
+    while i <= n and i <= 3 do
+        if i > 1 then label = label .. ", " end
+        label = label .. rec.items[i].n
+        if rec.items[i].c and rec.items[i].c > 1 then
+            label = label .. " x" .. rec.items[i].c
+        end
+        i = i + 1
+    end
+    if n > 3 then label = label .. " +" .. (n - 3) .. " more" end
+
+    return {
+        t       = rec.t,
+        who     = rec.to,
+        subject = rec.s,
+        char    = rec.char,
+        money   = rec.money,
+        cod     = rec.cod,
+        -- Carried as `item` because that is the field the row renderer tints
+        -- and appends; the sent box's own list stays untouched.
+        item    = (label ~= "" and label) or nil,
+        mails   = rec.mails,
+        -- Every item name, for the find box only. The visible label is
+        -- truncated to fit the row, but SEARCH must not be: a bank-alt send is
+        -- exactly where the item you are looking for sits ninth in the list,
+        -- and "did I mail that?" is the whole reason to open a sent box.
+        searchExtra = allNames,
+    }
+end
+
 function ui.LogRows()
     local out = {}
-    local entries = db.Log(ui.logDir)
+    -- The Sent view IS the sent box. The per-mail correspondence log still
+    -- backs the Received side, which has no batching to do.
+    local entries
+    if ui.logDir == "sent" then
+        local box = db.SentBox()
+        entries = {}
+        local bi = 1
+        while bi <= table.getn(box) do
+            table.insert(entries, ui.SentRow(box[bi]))
+            bi = bi + 1
+        end
+    else
+        entries = db.Log(ui.logDir)
+    end
     local find = string.lower(util.Trim(ui.logFind:GetText() or ""))
     local mineOnly = ui.logMine:GetChecked() and true or false
     local me = UnitName and UnitName("player") or nil
@@ -1607,7 +1667,7 @@ function ui.LogRows()
             -- both the participant filter and the category filter.
             local hay = string.lower((e.who or "") .. " " .. (e.subject or "")
                 .. " " .. (e.item or "") .. " " .. (e.auction or "")
-                .. " " .. (e.char or ""))
+                .. " " .. (e.char or "") .. " " .. (e.searchExtra or ""))
             if not util.Contains(hay, find) then keep = false end
         end
         if keep then table.insert(out, e) end
@@ -1657,6 +1717,11 @@ function ui.RefreshLog()
                 subject = subject .. "  |cff8fd6a8" .. e.item ..
                     (e.count and e.count > 1 and (" x" .. e.count) or "") .. "|r"
             end
+            -- A batch says how many mails it actually cost, because postage is
+            -- per mail and "one send" is not one mail on this client.
+            if e.mails and e.mails > 1 then
+                subject = subject .. " |cff8c8573(" .. e.mails .. " mails)|r"
+            end
             SetClipped(row.subject, subject, 250)
 
             if e.cod and e.cod > 0 then
@@ -1675,8 +1740,15 @@ function ui.RefreshLog()
         i = i + 1
     end
 
-    local stored = table.getn(db.Log(ui.logDir))
-    local label = (ui.logDir == "sent") and "sent" or "received"
+    -- Count the same thing the rows came from, or the "3 of 12" summary lies
+    -- whenever a filter is on.
+    local stored
+    if ui.logDir == "sent" then
+        stored = table.getn(db.SentBox())
+    else
+        stored = table.getn(db.Log(ui.logDir))
+    end
+    local label = (ui.logDir == "sent") and "sends" or "received"
     if stored == 0 then
         ui.logSummary:SetText("Nothing logged yet. Mail is recorded as you " ..
             "collect and send it.")
@@ -1955,7 +2027,7 @@ function ui.RefreshCourier()
     ui.courierStats:SetText(
         "Ledger: " .. Plural(table.getn(db.Ledger()), "entry", "entries") ..
         "   |   Log: " .. table.getn(db.Log("received")) .. " received, " ..
-        table.getn(db.Log("sent")) .. " sent")
+        table.getn(db.SentBox()) .. " sent")
 end
 
 -- ---------------------------------------------------------------------------
