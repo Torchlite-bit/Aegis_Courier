@@ -392,6 +392,304 @@ end
 -- Sub-tabs
 -- ---------------------------------------------------------------------------
 
+-- ---------------------------------------------------------------------------
+-- PORTED VERBATIM FROM AEGIS: EXCHANGE (commit f84f423).
+--
+-- Colours, states, dimensions and behaviour are Exchange's, copied rather than
+-- re-derived, so the two addons' buttons are the SAME buttons rather than two
+-- interpretations of one screenshot. Only the field prefix changes
+-- (aegis* -> courier*). If Exchange's BTN_KIND is ever retuned, re-port it;
+-- do not hand-adjust these numbers here, or the two drift apart silently and
+-- nobody notices until they are side by side.
+--
+-- Note the values below are NOT Courier's own C palette. C.gold/C.border/
+-- C.tabOn are different numbers serving the window chrome; substituting them
+-- would defeat the entire point of the port.
+-- ---------------------------------------------------------------------------
+
+-- ---------------------------------------------------------------------------
+-- Buttons
+--
+-- We draw our own rather than inherit UIPanelButtonTemplate. The template's
+-- warm red-brown plate is vanilla's own art and there is nothing wrong with
+-- it -- ROADMAP 2l settled that explicitly -- but the design concept asks for
+-- flat dark plates with a thin border, and no vanilla template produces that.
+-- So the plate is a backdrop and we own all four visual states.
+--
+-- Two kinds, straight from the concept's stylesheet:
+--   * "primary" -- the deep red plate with a gold label (.btn). ONE per area:
+--     the thing the area exists to do (Search, Post, Full Scan).
+--   * "quiet"   -- the dark neutral plate with a tan label (.btn-quiet).
+--     Everything else. This is the common case, so it is the default.
+--
+-- What the template gave away for free and is hand-written below: the hover
+-- and pressed plates, the 1px label nudge on press (a button that does not
+-- move when clicked feels dead), and the disabled look. Note that a bare
+-- CreateFrame("Button") DOES have working Enable/Disable/IsEnabled -- they
+-- just have no appearance attached, which is exactly the trap that would ship
+-- a button that stops responding while still looking clickable.
+-- ---------------------------------------------------------------------------
+
+-- Borders are DARK, not warm. The concept edges both plates with #14120f --
+-- near black -- and the first pass instead used a warm brown on quiet and a
+-- bright red on primary, which is what made the unskinned buttons read as
+-- outlined-in-brown rather than as flat plates. Under pfUI they already
+-- looked right, because pfUI supplies its own dark edge; that difference
+-- between the two skins was the tell.
+--
+-- Not literally #14120f though. The concept's panel behind these is #3c3a36,
+-- lighter than the buttons, so a near-black edge makes them pop. Our panel is
+-- #211F1A -- DARKER than the plates -- so the same edge would erase the
+-- outline entirely. These sit a little above it: dark enough to read as the
+-- concept's crisp edge, light enough to still separate a plate from the panel.
+-- WHICH REFERENCE WINS, because the two disagree and this has now flipped
+-- once. `design/07-buy-tab.png` styles the primary button `#5a1414` -- deep
+-- red -- and 1.14.0 took its palette from there. The later "A - Default view"
+-- mockup (v1.9.0) draws Search and Buyout as a warm brown-gold plate and adds
+-- a PURPLE Advanced. **The mockup is newer and it wins.** Do not re-derive
+-- these from the older PNG.
+local BTN_KIND = {
+    primary = {
+        bg     = { 0.42, 0.31, 0.13 },
+        over   = { 0.52, 0.39, 0.17 },
+        down   = { 0.30, 0.22, 0.09 },
+        border = { 0.62, 0.49, 0.22 },
+        text   = { 1.00, 0.86, 0.48 },
+        font   = "GameFontNormal",
+    },
+    -- The Advanced button, and nothing else. It is the one control in the
+    -- default strip with no counterpart in the stock auction house, and the
+    -- mockup gives it its own colour to say so.
+    --
+    -- 1.14.0 removed a purple VERTEX TINT from this button, which is not the
+    -- same thing: a tint sat on top of another plate and read as a smudge.
+    -- This is a plate in its own right.
+    accent = {
+        bg     = { 0.36, 0.26, 0.56 },
+        over   = { 0.45, 0.33, 0.68 },
+        down   = { 0.26, 0.18, 0.40 },
+        border = { 0.58, 0.45, 0.80 },
+        text   = { 0.95, 0.92, 1.00 },
+        font   = "GameFontNormal",
+    },
+    quiet = {
+        bg     = { 0.17, 0.16, 0.15 },
+        over   = { 0.27, 0.25, 0.22 },
+        down   = { 0.11, 0.10, 0.09 },
+        border = { 0.13, 0.12, 0.10 },
+        text   = { 0.80, 0.71, 0.42 },
+        font   = "GameFontNormalSmall",
+    },
+}
+
+-- Disabled is DERIVED, not a fourth hand-picked row: the concept just drops
+-- the opacity. Deriving it means a palette edit can never leave the disabled
+-- colour behind pointing at the old plate.
+local BTN_DIM_BG, BTN_DIM_TEXT = 0.55, 0.45
+
+local function DimRGB(c, f)
+    return c[1] * f, c[2] * f, c[3] * f
+end
+
+-- Repaint `b` for its current state. Reads the state off the button rather
+-- than taking it as an argument so every script can just call Repaint(b).
+--
+-- The backdrop target is resolved HERE, every time, not cached at creation:
+-- under pfUI the visible plate is pfUI's own child frame (b.backdrop), and it
+-- does not exist until skin.Apply runs -- which is after the window is built.
+-- Same reason TintTab resolves it late for the sub-tabs.
+local function RepaintButton(b)
+    local k = BTN_KIND[b.courierKind] or BTN_KIND.quiet
+    local target = b
+    if b.backdrop and b.backdrop.SetBackdropColor then target = b.backdrop end
+
+    -- 1.12 returns 1/nil from IsEnabled(), not a boolean.
+    local enabled = true
+    if b.IsEnabled then
+        local ok, v = pcall(function() return b:IsEnabled() end)
+        if ok and not v then enabled = false end
+    end
+
+    local bg, br, tx = k.bg, k.border, k.text
+    if enabled then
+        if b.courierDown then
+            bg = k.down
+        elseif b.courierOver then
+            bg = k.over
+        end
+    end
+
+    if target.SetBackdropColor then
+        if enabled then
+            target:SetBackdropColor(bg[1], bg[2], bg[3], 1)
+        else
+            local r, g, bl = DimRGB(bg, BTN_DIM_BG)
+            target:SetBackdropColor(r, g, bl, 1)
+        end
+    end
+    if target.SetBackdropBorderColor then
+        if enabled then
+            target:SetBackdropBorderColor(br[1], br[2], br[3])
+        else
+            local r, g, bl = DimRGB(br, BTN_DIM_BG)
+            target:SetBackdropBorderColor(r, g, bl)
+        end
+    end
+
+    if b.label then
+        -- courierTextColor overrides the kind's text colour, and it has to be
+        -- read HERE rather than set once by the caller: this function runs on
+        -- every hover, press and enable, so anything that colours the label
+        -- from outside is wiped by the next mouseover. The Min Quality
+        -- dropdown uses it to show its selection in that quality's colour.
+        local tc = b.courierTextColor or tx
+        if enabled then
+            b.label:SetTextColor(tc[1], tc[2], tc[3])
+        else
+            local r, g, bl = DimRGB(tc, BTN_DIM_TEXT)
+            b.label:SetTextColor(r, g, bl)
+        end
+        -- Press nudge. Done by moving the label ourselves rather than via
+        -- SetPushedTextOffset, because that only fires for a font string
+        -- registered with SetFontString and we deliberately do not depend on
+        -- that call existing.
+        local dy = 0
+        if enabled and b.courierDown then dy = -1 end
+        b.label:ClearAllPoints()
+        b.label:SetPoint("CENTER", b, "CENTER", 0, dy)
+    end
+end
+
+-- Change a button's kind after creation and repaint it. This replaces what
+-- ui.TintButton did for the accent buttons: there are no template textures to
+-- vertex-colour any more, so "make this one stand out" means "make it
+-- primary".
+function ui.SetButtonKind(b, kind)
+    if not b or not b.courierButton then return end
+    b.courierKind = BTN_KIND[kind] and kind or "quiet"
+    RepaintButton(b)
+end
+
+-- Mark exactly one of a row of segmented buttons as the chosen one.
+-- `match(b)` answers true for it.
+--
+-- SIX loops used to do this with b:LockHighlight() / b:UnlockHighlight(), and
+-- every one of them was doing NOTHING. LockHighlight drives a TEMPLATE
+-- highlight texture; ui.MakeButton draws its own backdrop and has no such
+-- texture, so the chosen duration, sell mode, undercut mode, throttle mode,
+-- history period and post duration all looked identical to their neighbours.
+--
+-- This is the same bug that was found and fixed for the Advanced view tabs --
+-- see the note in ui.SetBuyView. It was fixed there in one place and left
+-- everywhere else, which is why this is now a shared function rather than a
+-- seventh copy of the loop.
+function ui.MarkChosen(btns, match)
+    local i = 1
+    while i <= table.getn(btns or {}) do
+        local b = btns[i]
+        if b then
+            -- The kind it had BEFORE we ever touched it. Restoring "quiet"
+            -- would be a guess, and a row of accent buttons would come back
+            -- wrong the first time one was deselected.
+            if not b.courierBaseKind then
+                b.courierBaseKind = b.courierKind or "quiet"
+            end
+            ui.SetButtonKind(b, match(b) and "primary" or b.courierBaseKind)
+        end
+        i = i + 1
+    end
+end
+
+-- Build an Aegis button. Drop-in for
+--     ui.MakeButton(parent, "quiet", name)
+-- -- the returned frame answers SetText/GetText/Enable/Disable/IsEnabled the
+-- same way, so existing call sites keep working after the constructor swap.
+function ui.MakeButton(parent, kind, name)
+    local b = CreateFrame("Button", name, parent)
+    b.courierButton = true
+    b.courierKind = BTN_KIND[kind] and kind or "quiet"
+    b:SetHeight(22)
+    b:SetBackdrop({
+        bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        tile = true, tileSize = 16, edgeSize = 10,
+        insets = { left = 2, right = 2, top = 2, bottom = 2 },
+    })
+
+    -- Recorded so ui/skin.lua can rebuild this font string on pfUI's backdrop
+    -- frame with the same font. SetButtonKind only ever changes colours, so
+    -- the font a button is born with is the font it keeps.
+    b.courierFont = (BTN_KIND[b.courierKind] or BTN_KIND.quiet).font
+    local fs = b:CreateFontString(nil, "OVERLAY", b.courierFont)
+    fs:SetPoint("CENTER", b, "CENTER", 0, 0)
+    b.label = fs
+
+    -- SetText/GetText are defined on the OBJECT, shadowing the widget
+    -- metatable for this frame only -- the same containment rule the tooltip
+    -- hook follows. Nothing else that draws a Button is affected.
+    b.SetText = function(self, t)
+        self.courierText = t or ""
+        self.label:SetText(self.courierText)
+    end
+    b.GetText = function(self) return self.courierText or "" end
+    -- Real 1.12 returns the font string REGISTERED with SetFontString, which
+    -- for a template-less button is nil. Two callers measure a button's label
+    -- through this to clip it (both dropdowns), and nil would error there, so
+    -- answer it properly rather than leaving a hole for the sweep to fall in.
+    b.GetFontString = function(self) return self.label end
+
+    -- Enable/Disable exist and work already; they just have no look. Wrap
+    -- them so the plate follows the state.
+    local origEnable, origDisable = b.Enable, b.Disable
+    b.Enable = function(self)
+        if origEnable then origEnable(self) end
+        RepaintButton(self)
+    end
+    b.Disable = function(self)
+        if origDisable then origDisable(self) end
+        self.courierDown = false
+        self.courierOver = false
+        RepaintButton(self)
+    end
+
+    -- These close over `b` rather than reading the global `this`. `this` is
+    -- the right mechanism for a handler SHARED across frames, but each button
+    -- already has itself in scope, and depending on the global means the
+    -- script only works when the CLIENT is the one invoking it. It is not:
+    -- the Filter Builder hides its action buttons from Lua the moment it
+    -- builds them, which fires OnHide with no `this` set.
+    b:SetScript("OnEnter", function()
+        b.courierOver = true
+        RepaintButton(b)
+    end)
+    -- A press that drags off the button never sends it an OnMouseUp, so the
+    -- pressed plate would stick until the next hover. OnLeave clears BOTH
+    -- flags for that reason, not just the hover one.
+    b:SetScript("OnLeave", function()
+        b.courierOver = false
+        b.courierDown = false
+        RepaintButton(b)
+    end)
+    b:SetScript("OnMouseDown", function()
+        b.courierDown = true
+        RepaintButton(b)
+    end)
+    b:SetScript("OnMouseUp", function()
+        b.courierDown = false
+        RepaintButton(b)
+    end)
+    -- Hiding mid-press leaves the same stuck plate waiting for the reshow.
+    b:SetScript("OnHide", function()
+        b.courierDown = false
+        b.courierOver = false
+        RepaintButton(b)
+    end)
+
+    b:SetText("")
+    RepaintButton(b)
+    return b
+end
+
 local function MakeSubTab(parent, name)
     local b = CreateFrame("Button", "AegisCourierSubTab" .. name, parent)
     b:SetHeight(24)
@@ -553,8 +851,7 @@ function ui.BuildWindow()
 
     -- Hand back to the stock mail UI. Mirrors the "Courier" button we put on
     -- the Blizzard frame, so the swap works in both directions.
-    local blizBtn = CreateFrame("Button", "AegisCourierBlizzButton", title,
-        "UIPanelButtonTemplate")
+    local blizBtn = ui.MakeButton(title, "quiet", "AegisCourierBlizzButton")
     blizBtn:SetWidth(84)
     blizBtn:SetHeight(19)
     blizBtn:SetPoint("RIGHT", close, "LEFT", -4, 0)
@@ -681,9 +978,11 @@ function ui.BuildInboxPanel()
     -- ---- action bar -----------------------------------------------------
     local take = A.take
 
-    local function ActionButton(name, label, width, onClick)
-        local b = CreateFrame("Button", "AegisCourierBtn" .. name, panel,
-            "UIPanelButtonTemplate")
+    -- `kind` follows Exchange's rule: ONE primary per area -- the thing the
+    -- area exists to do -- and quiet for everything else.
+    local function ActionButton(name, label, width, onClick, kind)
+        local b = ui.MakeButton(panel, kind or "quiet",
+            "AegisCourierBtn" .. name)
         b:SetWidth(width)
         b:SetHeight(21)
         b:SetText(label)
@@ -691,9 +990,10 @@ function ui.BuildInboxPanel()
         return b
     end
 
+    -- The Inbox's one primary: emptying the mailbox is what the tab is for.
     local openAll = ActionButton("OpenAll", "Open All", 76, function()
         take.Start(take.MODE_OPEN)
-    end)
+    end, "primary")
     openAll:SetPoint("TOPLEFT", panel, "TOPLEFT", 2, -16)
 
     -- No "Take All" button. It ran take.MODE_TAKE -- empty every mail but keep
@@ -813,8 +1113,8 @@ function ui.BuildInboxPanel()
         -- shown only for mail that can actually be returned -- see
         -- ui.RefreshInbox. A dead greyed button on every auction mail would be
         -- worse than an empty cell.
-        local ret = CreateFrame("Button", "AegisCourierInboxReturn" .. i, row,
-            "UIPanelButtonTemplate")
+        local ret = ui.MakeButton(row, "quiet",
+            "AegisCourierInboxReturn" .. i)
         ret:SetWidth(52)
         ret:SetHeight(18)
         ret:SetPoint("RIGHT", row, "RIGHT", -2, 0)
@@ -864,8 +1164,7 @@ function ui.BuildReader(well)
     r:Hide()
     ui.reader = r
 
-    local back = CreateFrame("Button", "AegisCourierReaderBack", r,
-        "UIPanelButtonTemplate")
+    local back = ui.MakeButton(r, "accent", "AegisCourierReaderBack")
     back:SetWidth(60)
     back:SetHeight(19)
     back:SetPoint("TOPLEFT", r, "TOPLEFT", 2, -2)
@@ -932,8 +1231,10 @@ function ui.BuildReader(well)
     -- Shown instead of the body for loaded mail, until the player accepts the
     -- three-day cost. The warning is on the button's own line so it cannot be
     -- missed by someone who clicks first and reads second.
-    local reveal = CreateFrame("Button", "AegisCourierReaderReveal", r,
-        "UIPanelButtonTemplate")
+    -- Quiet, not primary, despite being the panel's obvious verb: Take can be
+    -- visible at the same time on a loaded mail, and two primaries side by side
+    -- reads as two competing calls to action. Take is the consequential one.
+    local reveal = ui.MakeButton(r, "quiet", "AegisCourierReaderReveal")
     reveal:SetWidth(110)
     reveal:SetHeight(21)
     reveal:SetPoint("TOPLEFT", bodyWell, "TOPLEFT", 8, -8)
@@ -952,8 +1253,7 @@ function ui.BuildReader(well)
         "three-day expiry the game applies to read mail with attachments.")
     ui.readerWarn = warn
 
-    local takeBtn = CreateFrame("Button", "AegisCourierReaderTake", r,
-        "UIPanelButtonTemplate")
+    local takeBtn = ui.MakeButton(r, "primary", "AegisCourierReaderTake")
     takeBtn:SetWidth(70)
     takeBtn:SetHeight(20)
     takeBtn:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 2)
@@ -964,8 +1264,7 @@ function ui.BuildReader(well)
     end)
     ui.readerTake = takeBtn
 
-    local retBtn = CreateFrame("Button", "AegisCourierReaderReturn", r,
-        "UIPanelButtonTemplate")
+    local retBtn = ui.MakeButton(r, "quiet", "AegisCourierReaderReturn")
     retBtn:SetWidth(70)
     retBtn:SetHeight(20)
     retBtn:SetPoint("LEFT", takeBtn, "RIGHT", 6, 0)
@@ -1695,8 +1994,7 @@ function ui.BuildSendPanel()
     cost:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 6, 8)
     ui.sendCost = cost
 
-    local sendBtn = CreateFrame("Button", "AegisCourierBtnSend", panel,
-        "UIPanelButtonTemplate")
+    local sendBtn = ui.MakeButton(panel, "primary", "AegisCourierBtnSend")
     sendBtn:SetWidth(80)
     sendBtn:SetHeight(22)
     sendBtn:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -6, 4)
@@ -1704,8 +2002,7 @@ function ui.BuildSendPanel()
     sendBtn:SetScript("OnClick", function() ui.DoSend() end)
     ui.btnSend = sendBtn
 
-    local clearBtn = CreateFrame("Button", "AegisCourierBtnClearSend", panel,
-        "UIPanelButtonTemplate")
+    local clearBtn = ui.MakeButton(panel, "quiet", "AegisCourierBtnClearSend")
     clearBtn:SetWidth(70)
     clearBtn:SetHeight(22)
     clearBtn:SetPoint("RIGHT", sendBtn, "LEFT", -4, 0)
@@ -1996,8 +2293,7 @@ function ui.BuildLogPanel()
     summary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 6)
     ui.logSummary = summary
 
-    local clear = CreateFrame("Button", "AegisCourierBtnClearLog", panel,
-        "UIPanelButtonTemplate")
+    local clear = ui.MakeButton(panel, "quiet", "AegisCourierBtnClearLog")
     clear:SetWidth(90)
     clear:SetHeight(20)
     clear:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
@@ -2305,8 +2601,7 @@ function ui.BuildSentPanel()
     summary:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 6)
     ui.sentSummary = summary
 
-    local clear = CreateFrame("Button", "AegisCourierBtnClearSent", panel,
-        "UIPanelButtonTemplate")
+    local clear = ui.MakeButton(panel, "quiet", "AegisCourierBtnClearSent")
     clear:SetWidth(90)
     clear:SetHeight(20)
     clear:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
@@ -2330,8 +2625,7 @@ function ui.BuildSentReader(well)
     r:Hide()
     ui.sentReader = r
 
-    local back = CreateFrame("Button", "AegisCourierSentBack", r,
-        "UIPanelButtonTemplate")
+    local back = ui.MakeButton(r, "accent", "AegisCourierSentBack")
     back:SetWidth(60)
     back:SetHeight(19)
     back:SetPoint("TOPLEFT", r, "TOPLEFT", 2, -2)
@@ -2413,8 +2707,7 @@ function ui.BuildSentReader(well)
     body:SetJustifyV("TOP")
     ui.sentBody = body
 
-    local compose = CreateFrame("Button", "AegisCourierSentCompose", r,
-        "UIPanelButtonTemplate")
+    local compose = ui.MakeButton(r, "primary", "AegisCourierSentCompose")
     compose:SetWidth(150)
     compose:SetHeight(20)
     compose:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 2)
@@ -2832,8 +3125,7 @@ function ui.BuildCourierPanel()
     scaleLbl:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 2, -14)
     scaleLbl:SetText("Window scale")
 
-    local scaleDown = CreateFrame("Button", "AegisCourierScaleDown", panel,
-        "UIPanelButtonTemplate")
+    local scaleDown = ui.MakeButton(panel, "quiet", "AegisCourierScaleDown")
     scaleDown:SetWidth(24)
     scaleDown:SetHeight(20)
     scaleDown:SetPoint("LEFT", scaleLbl, "RIGHT", 12, 0)
@@ -2849,8 +3141,7 @@ function ui.BuildCourierPanel()
     scaleText:SetJustifyH("CENTER")
     ui.scaleText = scaleText
 
-    local scaleUp = CreateFrame("Button", "AegisCourierScaleUp", panel,
-        "UIPanelButtonTemplate")
+    local scaleUp = ui.MakeButton(panel, "quiet", "AegisCourierScaleUp")
     scaleUp:SetWidth(24)
     scaleUp:SetHeight(20)
     scaleUp:SetPoint("LEFT", scaleText, "RIGHT", 8, 0)
@@ -2860,8 +3151,7 @@ function ui.BuildCourierPanel()
     end)
     ui.btnScaleUp = scaleUp
 
-    local scaleReset = CreateFrame("Button", "AegisCourierScaleReset", panel,
-        "UIPanelButtonTemplate")
+    local scaleReset = ui.MakeButton(panel, "quiet", "AegisCourierScaleReset")
     scaleReset:SetWidth(56)
     scaleReset:SetHeight(20)
     scaleReset:SetPoint("LEFT", scaleUp, "RIGHT", 10, 0)
@@ -3077,8 +3367,7 @@ function ui.HookMailFrame()
     -- parenting gets that show/hide behaviour for free. Everything else
     -- Courier draws lives under UIParent.
     if not ui.swapBtn then
-        local b = CreateFrame("Button", "AegisCourierSwapButton", MailFrame,
-            "UIPanelButtonTemplate")
+        local b = ui.MakeButton(MailFrame, "quiet", "AegisCourierSwapButton")
         b:SetWidth(70)
         b:SetHeight(19)
         local blizClose = getglobal("MailFrameCloseButton")
