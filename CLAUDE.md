@@ -439,6 +439,14 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       v1.0.4 crash. Re-fit once, on mouse-up.
 - [ ] Geometry invariants are asserted across the SIZE RANGE (min / default /
       max), not at one height.
+- [ ] Buttons are built with `ui.MakeButton(parent, kind, name)`, never
+      `UIPanelButtonTemplate` — that template cannot be recoloured. Kinds are
+      `primary` (one per area), `accent` (Back), `quiet` (default), and the
+      colours are a VERBATIM port of Aegis: Exchange's `BTN_KIND`. Re-port if
+      Exchange retunes them; never hand-adjust one side.
+- [ ] `RepaintButton` resolves its paint target LIVE (`b.backdrop` when pfUI
+      made one), never cached at creation — pfUI's child does not exist until
+      `skin.Apply` runs, long after the button is built.
 - [ ] Layout numbers are DERIVED, never literal. A hardcoded row count or inset
       in a test stops testing anything the moment the window changes shape —
       read `ui.Geometry()` instead.

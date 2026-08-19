@@ -84,6 +84,26 @@ CreateFrame = function(kind, name, parent, template)
     -- returned nil -- which matters now that the row count is computed FROM
     -- the frame's height. A mock that cannot report a size cannot test a
     -- resizable window at all.
+    -- Backdrop colours, tracked for real. The button system is ENTIRELY
+    -- colour -- there are no textures to inspect -- so a mock that swallows
+    -- SetBackdropColor can only ever assert "it did not error", which is
+    -- exactly how a button that looks disabled but still clicks ships.
+    function f:SetBackdropColor(r, g, b, a)
+        rawset(self, "bdColor", { r, g, b, a })
+    end
+    function f:GetBackdropColor()
+        local c = rawget(self, "bdColor")
+        if not c then return nil end
+        return c[1], c[2], c[3], c[4]
+    end
+    function f:SetBackdropBorderColor(r, g, b, a)
+        rawset(self, "bdBorder", { r, g, b, a })
+    end
+    function f:GetBackdropBorderColor()
+        local c = rawget(self, "bdBorder")
+        if not c then return nil end
+        return c[1], c[2], c[3], c[4]
+    end
     function f:SetWidth(w) rawset(self, "w", w) end
     function f:SetHeight(h) rawset(self, "h", h) end
     function f:GetWidth() return rawget(self, "w") or 0 end
@@ -95,7 +115,13 @@ CreateFrame = function(kind, name, parent, template)
     function f:HasFocus() return focusedBox == self end
     function f:Enable() rawset(self, "enabled", true) end
     function f:Disable() rawset(self, "enabled", false) end
-    function f:IsEnabled() return rawget(self, "enabled") ~= false end
+    -- 1/nil, NOT true/false -- that is what the real 1.12 widget returns, and
+    -- RepaintButton branches on it. A mock answering `false` where the client
+    -- answers `nil` hides any caller that compares against one specifically.
+    function f:IsEnabled()
+        if rawget(self, "enabled") == false then return nil end
+        return 1
+    end
     function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
     function f:Show()
         self.visible = true
@@ -428,6 +454,18 @@ local files = { "core/init.lua", "core/util.lua", "core/db.lua",
 for _, f in ipairs(files) do assert(loadfile(f))() end
 
 local A = AegisCourier
+-- Click a button the way the CLIENT would. A real 1.12 Button does not
+-- dispatch OnClick while disabled -- the widget gates it, which is why
+-- ui.MakeButton (and Exchange's original) only wraps Enable/Disable for
+-- APPEARANCE and adds no Lua guard. Calling btn.scripts.OnClick() directly
+-- reaches past that gate and tests something the player cannot do.
+local function Click(btn)
+    if not btn or not btn.scripts or not btn.scripts.OnClick then return false end
+    if btn.IsEnabled and not btn:IsEnabled() then return false end
+    btn.scripts.OnClick()
+    return true
+end
+
 local function fire(e, a1)
     event, arg1 = e, a1
     A.Dispatch()
@@ -1656,21 +1694,21 @@ A.ui.sendTo:SetText("")
 A.ui.sendSubject:SetText("")
 A.ui.sendBody:SetText("")
 A.ui.RefreshSend()
-check(A.ui.btnSend:IsEnabled() == false, "an empty form cannot be sent")
+check(not A.ui.btnSend:IsEnabled(), "an empty form cannot be sent")
 
 A.ui.sendTo:SetText("Subtilizer")
 A.ui.RefreshSend()
-check(A.ui.btnSend:IsEnabled() == false, "a recipient alone is not enough")
+check(not A.ui.btnSend:IsEnabled(), "a recipient alone is not enough")
 
 A.ui.sendSubject:SetText("test")
 A.ui.RefreshSend()
-check(A.ui.btnSend:IsEnabled() == true,
+check(A.ui.btnSend:IsEnabled() and true,
       "recipient + subject, no attachment: the button is LIVE")
 
 A.ui.sendSubject:SetText("")
 A.ui.sendBody:SetText("hi")
 A.ui.RefreshSend()
-check(A.ui.btnSend:IsEnabled() == true,
+check(A.ui.btnSend:IsEnabled() and true,
       "recipient + body, no attachment: also live")
 
 -- And pressing it actually sends, rather than merely being enabled.
@@ -1694,16 +1732,16 @@ A.ui.sendCODAll:SetChecked(true)     -- stale state from a previous send
 A.ui.RefreshSend()
 check(A.ui.sendCODAll:GetChecked() == false,
       "a disabled COD-all cannot stay checked")
-check(A.ui.sendCODAll:IsEnabled() == false, "and is greyed out")
+check(not A.ui.sendCODAll:IsEnabled(), "and is greyed out")
 A.ui.sendCOD:SetChecked(true)
 A.ui.RefreshSend()
-check(A.ui.sendCODAll:IsEnabled() == true, "checking COD enables it")
+check(A.ui.sendCODAll:IsEnabled() and true, "checking COD enables it")
 A.ui.sendCODAll:SetChecked(true)
 A.ui.RefreshSend()
 check(A.ui.sendCODAll:GetChecked() == true, "and it stays checked while COD is on")
 A.ui.sendCOD:SetChecked(false)
 A.ui.RefreshSend()
-check(A.ui.sendCODAll:IsEnabled() == false, "unchecking COD greys it again")
+check(not A.ui.sendCODAll:IsEnabled(), "unchecking COD greys it again")
 check(A.ui.sendCODAll:GetChecked() == false, "and clears it")
 
 print("== send: UI refresh paths run clean ==")
@@ -2671,6 +2709,137 @@ check(table.getn(A.db.SentBox()) == A.db.SENT_MAX,
 check(A.db.SentBox()[1].to == "R26", "oldest go first", A.db.SentBox()[1].to)
 A.db.ClearLog()
 
+print("== buttons: the ported kind x state colour table ==")
+-- Ported verbatim from Aegis: Exchange (f84f423). These literals are the
+-- CONTRACT: if they drift, the two addons' buttons stop matching and nobody
+-- notices until they are side by side. Asserted against the numbers, not
+-- against "some colour changed".
+local KINDS = {
+    primary = { bg = {0.42,0.31,0.13}, over = {0.52,0.39,0.17},
+                down = {0.30,0.22,0.09}, border = {0.62,0.49,0.22},
+                text = {1.00,0.86,0.48} },
+    accent  = { bg = {0.36,0.26,0.56}, over = {0.45,0.33,0.68},
+                down = {0.26,0.18,0.40}, border = {0.58,0.45,0.80},
+                text = {0.95,0.92,1.00} },
+    quiet   = { bg = {0.17,0.16,0.15}, over = {0.27,0.25,0.22},
+                down = {0.11,0.10,0.09}, border = {0.13,0.12,0.10},
+                text = {0.80,0.71,0.42} },
+}
+local DIM_BG, DIM_TEXT = 0.55, 0.45
+
+local function near(a, b)
+    if a == nil or b == nil then return false end
+    local d = a - b
+    if d < 0 then d = -d end
+    return d < 0.0001
+end
+local function bgIs(btn, want, what)
+    local r, g, b = btn:GetBackdropColor()
+    check(near(r, want[1]) and near(g, want[2]) and near(b, want[3]),
+          what, tostring(r) .. "," .. tostring(g) .. "," .. tostring(b))
+end
+
+local kindNames = { "primary", "accent", "quiet" }
+local ki = 1
+while ki <= 3 do
+    local kind = kindNames[ki]
+    local spec = KINDS[kind]
+    local b = A.ui.MakeButton(A.ui.frame, kind)
+    b:SetText("X")
+
+    bgIs(b, spec.bg, kind .. ": normal plate")
+    local br, bgc, bbl = b:GetBackdropBorderColor()
+    check(near(br, spec.border[1]) and near(bgc, spec.border[2])
+          and near(bbl, spec.border[3]), kind .. ": border")
+
+    b.scripts.OnEnter()
+    bgIs(b, spec.over, kind .. ": hover plate")
+    b.scripts.OnMouseDown()
+    bgIs(b, spec.down, kind .. ": pressed plate")
+    b.scripts.OnMouseUp()
+    bgIs(b, spec.over, kind .. ": back to hover on release")
+    -- A press dragged OFF the button never gets an OnMouseUp, so OnLeave has
+    -- to clear BOTH flags or the pressed plate sticks until the next hover.
+    b.scripts.OnMouseDown()
+    b.scripts.OnLeave()
+    bgIs(b, spec.bg, kind .. ": leaving mid-press clears the pressed plate")
+
+    -- Disabled is DERIVED (bg * 0.55), not a fourth hand-picked row. Asserting
+    -- the arithmetic means a change to BTN_DIM_BG cannot silently stop being
+    -- covered.
+    b:Disable()
+    bgIs(b, { spec.bg[1]*DIM_BG, spec.bg[2]*DIM_BG, spec.bg[3]*DIM_BG },
+         kind .. ": disabled plate is the derived dim, not a literal")
+    b:Enable()
+    bgIs(b, spec.bg, kind .. ": enabling restores the plate")
+    ki = ki + 1
+end
+
+print("== buttons: disabled must BLOCK clicks, not just look disabled ==")
+-- The trap Exchange's own comment calls out: a bare CreateFrame("Button") has
+-- working Enable/Disable with no appearance attached. Get the wrapping wrong
+-- and you ship a button that either looks dead and still fires, or looks live
+-- and does nothing. Both are invisible in a screenshot.
+local fired = 0
+local cb = A.ui.MakeButton(A.ui.frame, "primary")
+cb:SetText("Go")
+cb:SetScript("OnClick", function() fired = fired + 1 end)
+check(Click(cb), "an enabled button dispatches")
+check(fired == 1, "and its handler ran", fired)
+cb:Disable()
+check(not cb:IsEnabled(), "it reports itself disabled")
+check(Click(cb) == false, "a DISABLED button does not dispatch at all")
+check(fired == 1, "so its handler did not run", fired)
+cb:Enable()
+check(Click(cb), "re-enabling restores dispatch")
+check(fired == 2, "and the handler runs again", fired)
+
+print("== buttons: text round-trips through the shadowed accessors ==")
+local tb = A.ui.MakeButton(A.ui.frame, "quiet")
+tb:SetText("Delete Read")
+check(tb:GetText() == "Delete Read", "GetText returns what SetText stored",
+      tb:GetText())
+-- GetFontString must answer the real label: a template-less button has none
+-- registered, and anything measuring a label to clip it would error on nil.
+check(tb:GetFontString() ~= nil, "GetFontString answers the label, not nil")
+check(rawget(tb:GetFontString(), "text") == "Delete Read",
+      "and that label carries the text")
+
+print("== buttons: every converted call site kept its intended kind ==")
+-- A sample across the areas rather than all 17: an action-bar button, a
+-- per-row button, both readers' Back, and the two primaries.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+local function kindIs(btn, want, what)
+    check(btn and btn.courierKind == want, what,
+          tostring(btn and btn.courierKind))
+end
+kindIs(A.ui.btnOpenAll, "primary", "Open All is the Inbox's primary")
+kindIs(A.ui.btnDeleteRead, "quiet", "Delete Read is quiet")
+kindIs(A.ui.btnStop, "quiet", "Stop is quiet")
+kindIs(A.ui.inboxRows[1].ret, "quiet", "the per-row Return is quiet")
+kindIs(A.ui.readerBack, "accent", "the mail reader's Back is accent")
+kindIs(A.ui.readerTake, "primary", "Take is the reader's primary")
+kindIs(A.ui.sentBack, "accent", "the Sent reader's Back is accent")
+kindIs(A.ui.sentCompose, "primary", "Compose-to is the Sent reader's primary")
+kindIs(A.ui.btnSend, "primary", "Send is the Compose tab's primary")
+kindIs(A.ui.blizBtn, "quiet", "the Blizzard UI toggle is quiet")
+
+print("== buttons: MarkChosen restores each button's OWN prior kind ==")
+-- Not a hardcoded "quiet": a row of accent buttons must come back accent.
+local m1 = A.ui.MakeButton(A.ui.frame, "quiet")
+local m2 = A.ui.MakeButton(A.ui.frame, "accent")
+m1.tag, m2.tag = "one", "two"
+local row = { m1, m2 }
+A.ui.MarkChosen(row, function(b) return b.tag == "one" end)
+check(m1.courierKind == "primary", "the chosen one goes primary", m1.courierKind)
+check(m2.courierKind == "accent", "the other keeps ITS kind, not quiet",
+      m2.courierKind)
+A.ui.MarkChosen(row, function(b) return b.tag == "two" end)
+check(m2.courierKind == "primary", "choosing the other swaps them")
+check(m1.courierKind == "quiet", "and the first returns to where it started",
+      m1.courierKind)
+
 print("== tabs: Send is labelled Compose, but its KEY is unchanged ==")
 -- The key names the panel frame, the ui.panels entry, the comparison in
 -- SendAttachActive, and the remembered tab in db.char.ui.tab. Renaming it to
@@ -2753,9 +2922,11 @@ check(A.ui.sentItemRows[1].icon.visible == true, "the item icon is shown")
 check(rawget(A.ui.sentItemRows[1].icon, "texture") ~= nil,
       "and it has a real texture",
       tostring(rawget(A.ui.sentItemRows[1].icon, "texture")))
-check(A.util.Contains(rawget(A.ui.sentCompose, "text") or "", "Torchbank"),
+-- Through GetText, not rawget: ui.MakeButton shadows SetText/GetText on the
+-- object, so the label no longer lands in the mock's own `text` field.
+check(A.util.Contains(A.ui.sentCompose:GetText() or "", "Torchbank"),
       "the compose action names the recipient",
-      rawget(A.ui.sentCompose, "text"))
+      A.ui.sentCompose:GetText())
 -- The one action that makes sense here: write to the same person again.
 A.ui.sentCompose.scripts.OnClick()
 check(A.ui.selectedSubTab == "Send", "it switches to the compose tab",
@@ -2942,7 +3113,7 @@ print("== skin: the option is greyed when pfUI is absent ==")
 A.ui.SelectSubTab("Courier")
 check(A.ui.checkPfSkin ~= nil, "the option exists in the Courier tab")
 check(A.ui.checkPfSkin:GetChecked() == true, "and reads as on")
-check(A.ui.checkPfSkin:IsEnabled() == false,
+check(not A.ui.checkPfSkin:IsEnabled(),
       "but is greyed out with no pfUI to match")
 
 print("== skin: applies when pfUI is present ==")
@@ -2952,7 +3123,17 @@ local calls = { backdrop = 0, button = 0, checkbox = 0, editbox = 0,
 pfUI = {
     GetEnvironment = function()
         return {
-            CreateBackdrop  = function() calls.backdrop = calls.backdrop + 1 end,
+            -- REAL pfUI builds a CHILD FRAME and hangs it on frame.backdrop.
+            -- Counting the call is not enough: the entire button cooperation
+            -- turns on that child existing, RepaintButton resolving to it, and
+            -- the label being re-homed onto it. A stub that only counts leaves
+            -- all three untested.
+            CreateBackdrop  = function(frame)
+                calls.backdrop = calls.backdrop + 1
+                if frame and not frame.backdrop then
+                    frame.backdrop = CreateFrame("Frame", nil, frame)
+                end
+            end,
             StripTextures   = function() calls.strip = calls.strip + 1 end,
             SkinButton      = function() calls.button = calls.button + 1 end,
             SkinCloseButton = function() calls.close = calls.close + 1 end,
@@ -2984,9 +3165,62 @@ skin.Apply()
 check(calls.backdrop == before, "a second Apply is idempotent",
       calls.backdrop .. " vs " .. before)
 
+print("== skin: pfUI plates are COLOURED by the button, not replaced ==")
+-- The point of the courierButton branch: pfUI supplies the plate's edge and
+-- corner art, and RepaintButton then paints THAT child with the same BTN_KIND
+-- colours it uses unskinned. Skip the branch and pfUI's generic SkinButton
+-- flattens every button to one look, losing primary/accent/quiet entirely.
+local pb = A.ui.btnOpenAll
+check(pb.courierButton == true, "Open All is one of our drawn buttons")
+check(pb.backdrop ~= nil, "pfUI gave it a backdrop child", tostring(pb.backdrop))
+check(pb.courierSkinned == true, "and the skin pass claimed it")
+
+-- The CHILD carries the colour now, not the button. This is what breaks if
+-- RepaintButton ever caches its target at creation instead of resolving live.
+local function childBg(btn)
+    if not btn.backdrop or not btn.backdrop.GetBackdropColor then return nil end
+    local r, g, b = btn.backdrop:GetBackdropColor()
+    return r, g, b
+end
+-- Enable it explicitly: Open All greys itself out when the inbox has no work,
+-- and an incidental disabled state would have this asserting the dimmed
+-- derivative instead of the plate colour.
+pb:Enable()
+local pr, pg, pbl = childBg(pb)
+check(pr ~= nil, "the backdrop child was painted at all", tostring(pr))
+local function close(a, b) local d = a - b if d < 0 then d = -d end return d < 0.0001 end
+check(close(pr, 0.42) and close(pg, 0.31) and close(pbl, 0.13),
+      "and painted with primary's own plate colour",
+      tostring(pr) .. "," .. tostring(pg) .. "," .. tostring(pbl))
+
+-- Hover still drives the child, not the now-invisible parent backdrop.
+pb.scripts.OnEnter()
+pr, pg, pbl = childBg(pb)
+check(close(pr, 0.52) and close(pg, 0.39) and close(pbl, 0.17),
+      "hover repaints the pfUI child too",
+      tostring(pr) .. "," .. tostring(pg) .. "," .. tostring(pbl))
+pb.scripts.OnLeave()
+
+-- An accent button keeps its purple under pfUI rather than being flattened.
+local ab = A.ui.readerBack
+ab:Enable()
+check(ab.courierKind == "accent", "the reader's Back is accent")
+local ar, ag, abl = childBg(ab)
+check(ar == nil or (close(ar, 0.36) and close(ag, 0.26) and close(abl, 0.56)),
+      "and if painted, painted purple -- not flattened to one plate",
+      tostring(ar) .. "," .. tostring(ag) .. "," .. tostring(abl))
+
+-- The label is re-homed onto the backdrop child: a FontString on the child's
+-- OVERLAY layer sits above that child's own textures whatever the frame
+-- levels around it are. Without it, buttons inside a scroll child came back
+-- as blank plates.
+check(pb.courierLabelLifted == true, "the label was lifted onto the child")
+check(pb:GetText() == "Open All", "and still answers GetText afterwards",
+      pb:GetText())
+
 print("== skin: the option is live when pfUI is present ==")
 A.ui.SelectSubTab("Courier")
-check(A.ui.checkPfSkin:IsEnabled() == true, "no longer greyed")
+check(A.ui.checkPfSkin:IsEnabled() and true, "no longer greyed")
 
 print("== skin: the user setting still wins ==")
 A.db.SetSetting("pfSkin", false)

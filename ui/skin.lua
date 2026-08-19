@@ -67,6 +67,73 @@ local function Backdrop(frame, alpha)
     pcall(function() env.CreateBackdrop(frame, nil, nil, alpha) end)
 end
 
+-- Push pfUI's backdrop BEHIND the frame it was made for.
+--
+-- CreateBackdrop builds a CHILD FRAME, and a child draws above ALL of its
+-- parent's regions whatever draw layer they are on -- the same rule that makes
+-- ui/frame.lua put the Filter Builder's text on a child rather than on the
+-- well. For a button that means the plate can cover the label, and a button
+-- with no text on it reads as a broken button rather than as a layering
+-- accident.
+--
+-- Dropping the backdrop one frame level below its parent puts the label back
+-- on top. Harmless where pfUI already does this; the point is that we no
+-- longer depend on whether it does.
+local function SinkBackdrop(frame)
+    if not frame or not frame.backdrop then return end
+    pcall(function()
+        local lvl = frame:GetFrameLevel()
+        if lvl and lvl > 0 then
+            frame.backdrop:SetFrameLevel(lvl - 1)
+        end
+    end)
+end
+
+-- Move an Aegis button's label ONTO pfUI's backdrop frame.
+--
+-- SinkBackdrop above was the first attempt and it is not enough on its own.
+-- Frame level orders SIBLINGS; the rule that a child frame draws over its
+-- parent's regions is separate, and how far a child's level may be pushed
+-- below its parent's is not something worth betting a button's text on --
+-- least of all for a button buried three frames deep inside a ScrollFrame's
+-- scroll child. The Aegis settings panel is exactly that (ui.BuildAegisSettings
+-- draws into its scroll child) and under pfUI its buttons came
+-- back as blank plates, while the scan strip's buttons -- one frame under the
+-- window -- kept their text with the same sink applied.
+--
+-- Re-homing the label removes the question. Inside ONE frame the draw layer is
+-- the whole ordering rule, so a FontString on the backdrop's OVERLAY layer is
+-- above that backdrop's own background and border textures no matter what the
+-- levels around it are.
+--
+-- Everything that reads the label goes through b.label (RepaintButton,
+-- SetText, GetFontString, the sub-tab tint), so swapping the field is the
+-- whole change -- there is no second reference to update.
+local function LiftLabel(f)
+    if not f or not f.backdrop or not f.label then return end
+    if f.courierLabelLifted then return end
+    pcall(function()
+        local old = f.label
+        -- Read everything we need off the old string BEFORE touching
+        -- anything, so a missing accessor aborts the lift with nothing
+        -- half-done rather than leaving a button with two labels.
+        local text = old:GetText() or ""
+        local r, g, b = old:GetTextColor()
+
+        local fs = f.backdrop:CreateFontString(nil, "OVERLAY",
+            f.courierFont or "GameFontNormalSmall")
+        fs:SetPoint("CENTER", f, "CENTER", 0, 0)
+        fs:SetText(text)
+        if r then fs:SetTextColor(r, g, b) end
+
+        f.label = fs
+        f.courierLabelLifted = true
+        old:SetText("")
+        old:Hide()
+    end)
+end
+
+
 local function Strip(frame)
     local env = Env()
     if not frame or not env or not env.StripTextures then return end
@@ -130,6 +197,29 @@ local function SkinWidget(f)
         -- Still worth a pfUI backdrop where we drew a vanilla one.
         if f.courierBackdrop then Backdrop(f) end
         return false
+    end
+
+    -- Our own backdrop-drawn buttons (ui.MakeButton). pfUI's SkinButton strips
+    -- TEMPLATE textures and applies its plate -- but these have no template
+    -- textures and already carry a backdrop, so the generic path below would
+    -- leave them double-bordered.
+    --
+    -- Crucially this is COOPERATION, not an opt-out: pfUI supplies the plate's
+    -- edge and corner art, and the button's own RepaintButton then colours it
+    -- from the same BTN_KIND table it uses unskinned. That is what keeps a
+    -- primary button the same warm gold in both states rather than two
+    -- different-looking buttons depending on whether pfUI is loaded.
+    -- RepaintButton re-resolves its target to f.backdrop, the child pfUI
+    -- creates here, which is why it must not cache that lookup.
+    if f.courierButton then
+        Backdrop(f, 1)
+        SinkBackdrop(f)
+        LiftLabel(f)
+        f.courierSkinned = true
+        if A.ui and A.ui.SetButtonKind then
+            A.ui.SetButtonKind(f, f.courierKind)
+        end
+        return true
     end
 
     if otype == "CheckButton" then

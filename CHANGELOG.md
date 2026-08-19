@@ -9,6 +9,37 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.7.0]
+
+Courier's buttons are now Aegis: Exchange's buttons — the same code, the same
+colours, the same three states. `/reload`.
+
+### Changed
+- **Every button is drawn by Courier rather than inherited from the game.**
+  Vanilla's `UIPanelButtonTemplate` produces a beveled tan plate and cannot be
+  recoloured; Exchange stopped using it some time ago in favour of drawing its
+  own flat plates, and Courier now uses that same system. Three kinds, exactly
+  as Exchange defines them:
+  - **primary** — warm gold, one per area, for the thing the area exists to do:
+    Open All, Send, Take, and Compose-to in the Sent reader.
+  - **accent** — purple, for going back: the mail reader's and Sent reader's
+    Back buttons, matching the Back and Build buttons in Exchange's Filter
+    Builder.
+  - **quiet** — dark neutral, everything else.
+- Buttons now have real hover, pressed and disabled states, including the 1px
+  label nudge on press that a button needs to feel like it was clicked.
+- **With pfUI installed the plates stay these colours.** Courier does not hand
+  its buttons to pfUI's generic button skin, which would flatten all three
+  kinds into one look; pfUI supplies the plate's edge and corner art and
+  Courier paints it from the same colour table it uses unskinned.
+
+### Notes
+- This is a **verbatim port** of Exchange's `ui.MakeButton` system, current as
+  of Exchange commit `f84f423`, not an independent design. The colours are
+  Exchange's own numbers rather than Courier's window palette — substituting
+  the latter would have defeated the point. If Exchange retunes its buttons,
+  re-port rather than hand-adjusting here.
+
 ## [1.6.1]
 
 ### Fixed
