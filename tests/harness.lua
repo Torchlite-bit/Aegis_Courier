@@ -80,6 +80,16 @@ CreateFrame = function(kind, name, parent, template)
     -- CamelCase no-op, so a Tab chain could be entirely broken and the suite
     -- would agree with it. Exactly one widget holds focus at a time, as on the
     -- client.
+    -- REAL size and frame level. Both were CamelCase no-ops, so GetHeight
+    -- returned nil -- which matters now that the row count is computed FROM
+    -- the frame's height. A mock that cannot report a size cannot test a
+    -- resizable window at all.
+    function f:SetWidth(w) rawset(self, "w", w) end
+    function f:SetHeight(h) rawset(self, "h", h) end
+    function f:GetWidth() return rawget(self, "w") or 0 end
+    function f:GetHeight() return rawget(self, "h") or 0 end
+    function f:SetFrameLevel(n) rawset(self, "level", n) end
+    function f:GetFrameLevel() return rawget(self, "level") or 1 end
     function f:SetFocus() focusedBox = self end
     function f:ClearFocus() if focusedBox == self then focusedBox = nil end end
     function f:HasFocus() return focusedBox == self end
@@ -1582,11 +1592,15 @@ print("== compose: Tab walks the form ==")
 A.ui.mailOpen = true
 A.ui.OpenWindow()
 A.ui.SelectSubTab("Send")
-local chain = { A.ui.sendTo, A.ui.sendSubject, A.ui.sendBody, A.ui.sendMoney }
-local names = { "To", "Subject", "Body", "Gold" }
+-- The money field is a THREE-box group now (gold/silver/copper), so the chain
+-- threads each of them rather than treating it as one stop.
+local chain = { A.ui.sendTo, A.ui.sendSubject, A.ui.sendBody,
+                A.ui.sendMoney.g, A.ui.sendMoney.s, A.ui.sendMoney.c }
+local names = { "To", "Subject", "Body", "Gold", "Silver", "Copper" }
+local nChain = table.getn(chain)
 
 local ci = 1
-while ci <= 4 do
+while ci <= nChain do
     check(chain[ci].scripts.OnTabPressed ~= nil,
           names[ci] .. " handles Tab")
     ci = ci + 1
@@ -1595,7 +1609,7 @@ end
 A.ui.sendTo:SetFocus()
 check(A.ui.sendTo:HasFocus(), "To has the keyboard")
 ci = 1
-while ci <= 3 do
+while ci <= nChain - 1 do
     chain[ci].scripts.OnTabPressed()
     check(chain[ci + 1]:HasFocus(),
           "Tab from " .. names[ci] .. " lands on " .. names[ci + 1])
@@ -1604,16 +1618,16 @@ while ci <= 3 do
     ci = ci + 1
 end
 
--- Gold is the last field. Wrapping means Tab never reads as a dead key.
-A.ui.sendMoney.scripts.OnTabPressed()
-check(A.ui.sendTo:HasFocus(), "Tab from Gold wraps back to To")
+-- Copper is the last field. Wrapping means Tab never reads as a dead key.
+chain[nChain].scripts.OnTabPressed()
+check(A.ui.sendTo:HasFocus(), "Tab from the last field wraps back to To")
 
 -- The multiline body is in the chain deliberately: handling OnTabPressed is
 -- also what stops Tab typing a literal tab into the message.
 A.ui.sendBody:SetFocus()
 A.ui.sendBody:SetText("hello")
 A.ui.sendBody.scripts.OnTabPressed()
-check(A.ui.sendMoney:HasFocus(), "Tab out of the multiline body works")
+check(A.ui.sendMoney.g:HasFocus(), "Tab out of the multiline body works")
 check(A.ui.sendBody:GetText() == "hello",
       "and does not type a tab character into it",
       A.ui.sendBody:GetText())
@@ -2113,22 +2127,144 @@ check(geom.panelTop >= geom.chromeH,
 -- And they must clear the dialog border's 10px art on the sides.
 check(geom.side >= 10, "panels clear the window border", geom.side)
 
+print("== resize: rows are derived from the live window height ==")
+-- The dependency used to run ROWS -> height. With a grip it must run the other
+-- way, or dragging taller leaves a blank gap instead of showing more mail.
+local gr = A.ui.Geometry()
+check(gr.minH < gr.defaultH and gr.defaultH < gr.maxH,
+      "min < default < max", gr.minH .. " / " .. gr.defaultH .. " / " .. gr.maxH)
+check(A.ui.Geometry(gr.minH).rows < A.ui.Geometry(gr.maxH).rows,
+      "a taller window shows more rows",
+      A.ui.Geometry(gr.minH).rows .. " -> " .. A.ui.Geometry(gr.maxH).rows)
+check(A.ui.Geometry(gr.maxH).rows <= gr.maxRows,
+      "and never more rows than there are frames built",
+      A.ui.Geometry(gr.maxH).rows .. " vs " .. gr.maxRows)
+check(A.ui.Geometry(gr.minH).rows >= gr.minRows,
+      "nor fewer than the floor", A.ui.Geometry(gr.minH).rows)
+-- Absurd heights must clamp rather than produce a negative or vast row count.
+check(A.ui.Geometry(10).rows == gr.minRows, "a tiny height clamps to the floor",
+      A.ui.Geometry(10).rows)
+check(A.ui.Geometry(99999).rows == gr.maxRows, "a huge one clamps to the ceiling",
+      A.ui.Geometry(99999).rows)
+
+-- The original clipping invariant still has to hold at EVERY size, not just
+-- the one the window happens to open at.
+local hs = { gr.minH, gr.defaultH, gr.maxH }
+local hn = { "minimum", "default", "maximum" }
+local ri = 1
+while ri <= 3 do
+    local g = A.ui.Geometry(hs[ri])
+    check(g.inbox >= g.need, "Inbox rows fit their well at " .. hn[ri],
+          g.inbox .. " have vs " .. g.need)
+    check(g.log >= g.need, "Log rows fit at " .. hn[ri], g.log)
+    check(g.ledger >= g.need, "Ledger rows fit at " .. hn[ri], g.ledger)
+    ri = ri + 1
+end
+
+check(A.ui.resizeGrip ~= nil, "the resize grip exists")
+check(A.ui.resizeGrip.courierNoSkin == true,
+      "and opts out of the pfUI skin, which would strip its texture")
+
+print("== resize: the size is remembered, clamped ==")
+A.db.SaveWindowSize(700, 600)
+local sw, sh = A.db.GetWindowSize()
+check(sw == 700 and sh == 600, "a size round-trips", tostring(sw) .. "x" .. tostring(sh))
+-- Storage is raw; the clamp happens on restore, because MIN/MAX can change
+-- between releases and a window smaller than its contents cannot be recovered
+-- from in-game.
+A.db.SaveWindowSize(10, 10)
+sw, sh = A.db.GetWindowSize()
+check(sw == 10, "storage does not clamp", sw)
+
+print("== scale: clamped, stepped, and independent of size ==")
+A.db.SaveWindowScale(nil)
+check(A.ui.WindowScale() == 1, "defaults to 1", A.ui.WindowScale())
+A.ui.StepWindowScale(0.05)
+check(A.ui.WindowScale() > 1, "a step up raises it", A.ui.WindowScale())
+A.ui.StepWindowScale(nil)
+check(A.ui.WindowScale() == 1, "reset returns to 1", A.ui.WindowScale())
+local si = 1
+while si <= 40 do A.ui.StepWindowScale(0.05) si = si + 1 end
+check(A.ui.WindowScale() <= 1.50, "cannot exceed the ceiling", A.ui.WindowScale())
+-- The STORED value must be clamped too, not just the value WindowScale hands
+-- back. Reading clamps as well, so asserting only on the reader passes even
+-- when the writer stores nonsense -- and a saved 3.0 is a latent surprise for
+-- anything that reads the DB directly.
+check(A.db.GetWindowScale() <= 1.50, "and the stored value is clamped, not just the read",
+      A.db.GetWindowScale())
+si = 1
+while si <= 60 do A.ui.StepWindowScale(-0.05) si = si + 1 end
+check(A.ui.WindowScale() >= 0.70, "nor drop below the floor", A.ui.WindowScale())
+check(A.db.GetWindowScale() >= 0.70, "stored value clamped at the floor too",
+      A.db.GetWindowScale())
+A.ui.StepWindowScale(nil)
+-- Scale is stored separately from size: someone who scaled but never dragged
+-- has no saved width, and restoring must not lose their scale on that account.
+A.db.SaveWindowScale(1.25)
+check(A.db.GetWindowScale() == 1.25, "scale persists on its own",
+      A.db.GetWindowScale())
+A.db.SaveWindowScale(nil)
+
+print("== money: the gold/silver/copper group ==")
+local mg = A.ui.sendMoney
+check(mg.g ~= nil and mg.s ~= nil and mg.c ~= nil, "three boxes exist")
+mg:SetText("12g 30s 5c")
+check(mg.g:GetText() == "12", "gold box", mg.g:GetText())
+check(mg.s:GetText() == "30", "silver box", mg.s:GetText())
+check(mg.c:GetText() == "5", "copper box", mg.c:GetText())
+check(A.util.ParseMoney(mg:GetText()) == 123005, "round-trips to copper",
+      A.util.ParseMoney(mg:GetText()))
+-- LEADING zeros blank, trailing ones shown. Exchange shipped [ ][0][11] for
+-- 11 copper, where the empty gold box beside a zero silver read as a missing
+-- value rather than "no silver".
+mg:SetText("11c")
+check(mg.g:GetText() == "", "no gold: blank, not 0", "[" .. mg.g:GetText() .. "]")
+check(mg.s:GetText() == "", "no silver: blank too", "[" .. mg.s:GetText() .. "]")
+check(mg.c:GetText() == "11", "copper shown", mg.c:GetText())
+mg:SetText("1g 0s 0c")
+check(mg.s:GetText() == "0", "an INNER zero is shown, not blanked",
+      "[" .. mg.s:GetText() .. "]")
+check(mg.c:GetText() == "0", "and so is a trailing one", "[" .. mg.c:GetText() .. "]")
+mg:SetText("")
+check(mg:GetText() == "", "empty round-trips as empty", "[" .. mg:GetText() .. "]")
+check(A.ui.SendMoneyValue() == 0, "and reads as zero copper",
+      A.ui.SendMoneyValue())
+
 print("== geometry: the Sent reader's blocks fit without overlapping ==")
 local sg = A.ui.SentGeometry()
 check(sg.slots >= send.MAX_ATTACHMENTS,
       "every item a batch can hold has a visible slot -- no scrolling needed",
       sg.slots .. " slots for " .. send.MAX_ATTACHMENTS .. " max items")
-check(sg.head + sg.items + sg.gap + sg.bodyH + sg.foot == sg.readerH,
-      "the blocks account for exactly the reader's height",
-      sg.readerH)
-check(sg.bodyH > 0, "the message well has real height", sg.bodyH)
--- The request was "twice as tall". Measured against the 92px it had before.
-check(sg.bodyH >= 92 * 2,
-      "the message well is at least double what it was",
-      sg.bodyH .. " vs 92 before")
--- And it must be tall enough to show the whole of a body, which is capped.
-check(sg.bodyH >= 140,
-      "tall enough to show a full-length message without scrolling", sg.bodyH)
+
+-- The window resizes now, so the reader is checked ACROSS THE RANGE rather
+-- than at one hand-picked height. The blocks must FIT -- they no longer sum to
+-- exactly the reader, because the message well is capped and anything past the
+-- cap is deliberately left blank.
+local gg = A.ui.Geometry()
+local heights = { gg.minH, gg.defaultH, gg.maxH }
+local hnames  = { "minimum", "default", "maximum" }
+local hi = 1
+while hi <= 3 do
+    local sgh = A.ui.SentGeometry(heights[hi])
+    check(sgh.head + sgh.items + sgh.gap + sgh.bodyH + sgh.foot <= sgh.readerH,
+          "reader blocks fit at " .. hnames[hi] .. " size",
+          sgh.head + sgh.items + sgh.gap + sgh.bodyH + sgh.foot ..
+          " into " .. sgh.readerH)
+    -- The floor exists because a 500-character message needs somewhere to go.
+    -- Before MIN_H was derived from the reader it collapsed to 36px here.
+    check(sgh.bodyH >= sgh.bodyMin,
+          "the message well stays usable at " .. hnames[hi] .. " size",
+          sgh.bodyH .. " vs floor " .. sgh.bodyMin)
+    -- And the ceiling exists because past it the well is empty space, not
+    -- more message. v1.5.0 let it reach 204px and it read as a huge blank box.
+    check(sgh.bodyH <= sgh.bodyMax,
+          "and never grows into empty space at " .. hnames[hi] .. " size",
+          sgh.bodyH .. " vs cap " .. sgh.bodyMax)
+    hi = hi + 1
+end
+check(A.ui.SentGeometry(gg.defaultH).bodyH < 204,
+      "the default message well is shorter than v1.5.0's",
+      A.ui.SentGeometry(gg.defaultH).bodyH)
 
 print("== clock: a step that skips a mail must re-arm itself ==")
 -- take.armed is set by nothing but MAIL_INBOX_UPDATE, and the server only

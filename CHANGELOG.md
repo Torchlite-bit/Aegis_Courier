@@ -9,6 +9,41 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.6.0]
+
+The window resizes and scales, sent mail sits on a recessed plate like
+Exchange's, gold is entered in three boxes with coin icons, and the Sent
+reader's message box is back to a sensible height. `/reload`.
+
+### Added
+- **Drag the bottom-right corner to resize the window.** A taller window shows
+  more mail — anywhere from 8 rows at the smallest to 25 at the largest — and
+  the size is remembered per character. Vanilla frames never reflow, so extra
+  height genuinely means extra rows rather than more empty space.
+- **Window scale**, in the Courier tab: minus, plus and reset between 70% and
+  150%, remembered per character. Scale and size answer different questions —
+  a bigger window shows *more*, scale makes the same window *larger* — and on
+  a big screen you want both.
+- **Gold is now three boxes with coin icons** instead of one box you type
+  `12g 30s` into, matching Exchange. Tab walks through them like any other
+  field.
+
+### Changed
+- **The panels sit on a recessed plate**, matching Exchange's content well.
+  With the outer frame already shared, this was the remaining reason the two
+  addons read as unrelated windows.
+- **The Sent reader's message box is shorter again** — 150px rather than the
+  204px of v1.5.0, which was too tall and read as a large empty box. It grows
+  with the window up to that point and no further, because a stored message is
+  capped at 500 characters and anything past ~150px is blank space rather than
+  more text.
+
+### Fixed
+- The window's minimum height is now derived from the **Sent reader**, not the
+  inbox list. The reader has a fixed header, item grid and button strip, so
+  sizing to the list alone left its message box 36px tall at the smallest
+  window — laid out correctly and completely unusable.
+
 ## [1.5.0]
 
 The window now matches Aegis: Exchange, the Sent reader gives the message room
