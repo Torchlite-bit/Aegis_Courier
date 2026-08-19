@@ -1,7 +1,7 @@
 ## Interface: 11200
 ## Title: Aegis: Courier
 ## Notes: Standalone mailbox companion for Turtle WoW
-## Version: 1.5.0
+## Version: 1.6.1
 ## SavedVariables: CourierDB
 ## SavedVariablesPerCharacter: CourierCharDB
 

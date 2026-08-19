@@ -600,6 +600,35 @@ function db.SaveWindowPoint(point, x, y)
     db.char.ui.y = y
 end
 
+-- Window SIZE, stored per character alongside the position. Separate from the
+-- scale below: a taller window shows MORE rows (vanilla frames never reflow,
+-- so that is all extra height can do), while scale makes the same window
+-- physically bigger. On a large screen you want both.
+function db.SaveWindowSize(w, h)
+    if not db.char then return end
+    if not db.char.ui then db.char.ui = {} end
+    db.char.ui.width  = math.floor(w or 0)
+    db.char.ui.height = math.floor(h or 0)
+end
+
+function db.GetWindowSize()
+    local u = db.char and db.char.ui
+    if not u then return nil end
+    return u.width, u.height
+end
+
+-- Window SCALE, also per character. Clamped by the UI; stored raw here.
+function db.SaveWindowScale(v)
+    if not db.char then return end
+    if not db.char.ui then db.char.ui = {} end
+    db.char.ui.scale = v
+end
+
+function db.GetWindowScale()
+    local u = db.char and db.char.ui
+    return u and u.scale or nil
+end
+
 function db.GetWindowPoint()
     local ui = db.char and db.char.ui
     if not ui or not ui.point then return nil end

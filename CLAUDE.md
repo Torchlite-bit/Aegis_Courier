@@ -431,6 +431,14 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       are asserted by the harness; 1.12 does not clip children, it just draws
       over the border. A panel must also CLEAR the chrome above it, not merely
       balance the arithmetic.
+- [ ] The window RESIZES: row counts come from `ui.InboxRowCount` and friends
+      at paint time, never from a constant, and row frames are built to
+      `MAX_ROWS` and shown/hidden rather than created on the fly.
+- [ ] Nothing repaints a list per-frame during a resize drag — a row count that
+      moves every frame re-enters `FauxScrollFrame_Update` and reproduces the
+      v1.0.4 crash. Re-fit once, on mouse-up.
+- [ ] Geometry invariants are asserted across the SIZE RANGE (min / default /
+      max), not at one height.
 - [ ] Layout numbers are DERIVED, never literal. A hardcoded row count or inset
       in a test stops testing anything the moment the window changes shape —
       read `ui.Geometry()` instead.

@@ -46,82 +46,6 @@ local C = {
 }
 
 local ROW_H         = 28
--- Twelve, not ten. The window grows for the heavier chrome and the taller Sent
--- reader regardless, and a list that shows more of a full mailbox at once was
--- already the point -- the geometry below resizes the window to match rather
--- than letting rows overflow their well.
-local ROWS          = 12
-
--- ---- window geometry -------------------------------------------------------
--- The window height is DERIVED from the list, not picked by eye. It used to be
--- a literal 440, which left the Inbox well 264px tall while its own ten rows
--- needed 4 + 10*28 + 4 = 288. Twenty pixels short -- and 1.12 frames do not
--- clip their children, so the last row simply drew straight through the well
--- border and over the hint line underneath it.
---
--- Every inset below is also used by the anchors themselves, so the arithmetic
--- and the layout cannot drift apart, and changing ROWS now resizes the window
--- to match instead of silently overflowing it again. ui.Geometry() exposes the
--- result and the harness asserts the rows fit.
-local LIST_PAD = 4                          -- well edge to first/last row
-
--- ---- window chrome ---------------------------------------------------------
--- The main window wears Aegis: Exchange's dialog frame rather than the thin
--- tooltip border the inner wells use (see WindowBackdrop). That art is 28px
--- deep with 10px insets, so everything inside has to be pushed clear of it --
--- these are the numbers that do it, and every anchor derives from them rather
--- than repeating a literal.
-local TITLE_INSET = 12                      -- title bar offset from the corner
-local TITLE_H     = 26
-local TAB_H       = 24                      -- sub-tab button height
-local GAP         = 6
-local PANEL_SIDE  = 12                      -- panel inset left/right
-
--- Panel top clears the border, the title bar and the tab row in turn.
-local PANEL_TOP    = TITLE_INSET + TITLE_H + GAP + TAB_H + GAP
-local PANEL_BOTTOM = 32                     -- clears the footer and the border
--- The Inbox is the tightest of the three panels: a summary line, an action bar
--- and a column header sit above its well, and the hint line sits below it.
-local INBOX_TOP,  INBOX_BOTTOM  = 58, 22
-local LOG_TOP,    LOG_BOTTOM    = 28, 26
-local LEDGER_TOP, LEDGER_BOTTOM = 22, 22
-
--- Height a list well must have to hold ROWS rows without overflowing.
-local LIST_NEED = LIST_PAD + ROWS * ROW_H + LIST_PAD
-
-local WIN_W = 660
-local WIN_H = PANEL_TOP + INBOX_TOP + LIST_NEED + INBOX_BOTTOM + PANEL_BOTTOM
-
--- Well heights the layout above actually produces. Reported by ui.Geometry so
--- the regression test reads the same numbers the anchors use.
-local PANEL_H     = WIN_H - PANEL_TOP - PANEL_BOTTOM
-local INBOX_WELL  = PANEL_H - INBOX_TOP  - INBOX_BOTTOM
-local LOG_WELL    = PANEL_H - LOG_TOP    - LOG_BOTTOM
-local LEDGER_WELL = PANEL_H - LEDGER_TOP - LEDGER_BOTTOM
-
--- Rows required vs. well available, per list. A list whose `need` exceeds its
--- `have` draws outside its well -- the bug above.
-function ui.Geometry()
-    return {
-        need   = LIST_NEED,
-        rows   = ROWS,
-        rowH   = ROW_H,
-        winH   = WIN_H,
-        panelH = PANEL_H,
-        panelTop    = PANEL_TOP,
-        panelBottom = PANEL_BOTTOM,
-        -- Chrome the panels have to start below. Reported so the harness can
-        -- assert the clearance rather than only the internal arithmetic: a
-        -- panelTop that is merely self-consistent can still sit on top of the
-        -- tab row, and 1.12 draws the overlap rather than clipping it.
-        chromeH     = TITLE_INSET + TITLE_H + GAP + TAB_H,
-        titleInset  = TITLE_INSET,
-        side        = PANEL_SIDE,
-        inbox  = INBOX_WELL,
-        log    = LOG_WELL,
-        ledger = LEDGER_WELL,
-    }
-end
 
 -- Tab KEYS. These are identity, not presentation: they name the panel frame
 -- (AegisCourierPanelSend), the ui.panels / ui.subTabs entries, the comparison
@@ -138,6 +62,258 @@ local SUBTAB_LABELS = { Send = "Compose" }
 local function SubTabLabel(key)
     return SUBTAB_LABELS[key] or key
 end
+
+
+-- ---- window geometry -------------------------------------------------------
+-- THE DEPENDENCY RUNS HEIGHT -> ROWS, and it used to run the other way.
+--
+-- Until the window could be resized, ROWS was a constant and WIN_H was derived
+-- from it. That is backwards once a grip exists: the player sets the height and
+-- the list has to work out how many rows fit. Everything below is therefore a
+-- function of the LIVE frame height, and the only constant left is the default
+-- the window opens at.
+--
+-- The original bug this arithmetic exists to prevent is still the point: a well
+-- 20px shorter than the rows it draws does not clip on 1.12, it draws straight
+-- through its own border and over whatever is beneath. ui.Geometry() reports
+-- the live numbers and the harness asserts the fit at minimum, default and
+-- maximum size rather than at one hand-picked one.
+local LIST_PAD = 4                          -- well edge to first/last row
+
+-- ---- window chrome ---------------------------------------------------------
+-- The main window wears Aegis: Exchange's dialog frame rather than the thin
+-- tooltip border the inner wells use (see WindowBackdrop). That art is 28px
+-- deep with 10px insets, so everything inside has to be pushed clear of it --
+-- these are the numbers that do it, and every anchor derives from them rather
+-- than repeating a literal.
+local TITLE_INSET = 12                      -- title bar offset from the corner
+local TITLE_H     = 26
+local TAB_H       = 24                      -- sub-tab button height
+local GAP         = 6
+
+-- ---- content well ----------------------------------------------------------
+-- A recessed region holding every panel, matching Exchange's ui.content. The
+-- outer dialog frame alone left the panels floating on the window background;
+-- this is the sunken plate they sit on, and it is the remaining structural
+-- difference between the two addons once the frames matched.
+local CONTENT_SIDE   = 14                   -- inset from the window edge
+
+-- The footer ("At mailbox | linked to Aegis: Exchange") lives BELOW the content
+-- well, on the window itself. The well's bottom therefore has to clear it, and
+-- it did not: the well ended 16px from the bottom while the footer occupied
+-- 14..26, so the recessed plate drew straight over the text. Derive the well's
+-- bottom from where the footer actually is rather than picking a number that
+-- happens to look close.
+local FOOTER_INSET = 12                     -- footer baseline from window bottom
+local FOOTER_H     = 12                     -- GameFontNormalSmall line height
+local CONTENT_BOTTOM = FOOTER_INSET + FOOTER_H + GAP
+local CONTENT_TOP    = TITLE_INSET + TITLE_H + GAP + TAB_H + GAP
+local PANEL_PAD      = 6                    -- panel inset inside the content well
+
+-- Panels are children of the content well now, so their inset from the WINDOW
+-- is the sum of both. Reported by ui.Geometry for the clearance assertions.
+local PANEL_SIDE   = CONTENT_SIDE + PANEL_PAD
+local PANEL_TOP    = CONTENT_TOP + PANEL_PAD
+local PANEL_BOTTOM = CONTENT_BOTTOM + PANEL_PAD
+
+-- The Inbox is the tightest of the panels: a summary line, an action bar and a
+-- column header sit above its well, and the hint line sits below it.
+local INBOX_TOP,  INBOX_BOTTOM  = 58, 22
+local LOG_TOP,    LOG_BOTTOM    = 28, 26
+local LEDGER_TOP, LEDGER_BOTTOM = 22, 22
+
+-- ---- Sent reader geometry --------------------------------------------------
+-- THREE columns of four rather than two of six. A batch cannot exceed
+-- MAX_ATTACHMENTS (12), so 3 x 4 still shows every possible item without
+-- scrolling -- but in four rows instead of six, which hands 32px straight to
+-- the message below it. Widening beats lengthening here: the reader is far
+-- wider than it is tall, and item labels are short.
+--
+-- Every offset below derives from these; ui.SentGeometry() reports the result
+-- and the harness asserts the blocks fit without overlapping.
+local SENT_ITEM_COLS = 3
+local SENT_ITEM_ROWS = 4                    -- x COLS = 12 = MAX_ATTACHMENTS
+local SENT_ITEM_H    = 16
+
+-- Header block: Back/recipient, subject, then one line carrying both the mail
+-- count and the item count. Merging those two lines is where another 18px for
+-- the message came from.
+local SENT_HEAD_H = 60
+local SENT_FOOT_H = 26                      -- the Compose button strip
+local SENT_GAP    = 8
+
+local SENT_ITEMS_H = SENT_ITEM_ROWS * SENT_ITEM_H
+local SENT_BODY_TOP = SENT_HEAD_H + SENT_ITEMS_H + SENT_GAP
+
+-- The message well is BOUNDED AT BOTH ENDS, and both numbers come from the
+-- same fact: a stored body cannot exceed db.SENT_BODY_MAX (500 characters),
+-- which at this font and width is about seven lines, call it 110px.
+--
+--   MIN -- below this a message is scrolling for no reason, so the window's
+--          own minimum height is derived from it rather than from the inbox
+--          list alone. See MIN_H.
+--   MAX -- above this the well is mostly empty. v1.5.0 let it stretch to the
+--          full reader and it reached 204px, which read as a huge blank box;
+--          reported, fairly, as "too long". A record view does not have to
+--          fill the screen the way a list does.
+local SENT_BODY_MIN = 110
+local SENT_BODY_MAX = 150
+
+-- ---- size limits -----------------------------------------------------------
+-- DEFAULT_ROWS only sets the height the window first opens at; after that the
+-- grip decides. MIN keeps the shortest window still usable as a mailbox, MAX
+-- keeps the tallest inside a 1024-high screen.
+local DEFAULT_ROWS = 12
+local MIN_ROWS     = 6
+
+-- Height needed for a given inbox row count -- the inverse of RowsForHeight.
+local function HeightForRows(n)
+    return PANEL_TOP + INBOX_TOP + (LIST_PAD + n * ROW_H + LIST_PAD)
+        + INBOX_BOTTOM + PANEL_BOTTOM
+end
+
+local WIN_W = 660
+local WIN_H = HeightForRows(DEFAULT_ROWS)   -- the DEFAULT, no longer a ceiling
+
+-- The floor is whichever panel runs out of room FIRST. That used to be the
+-- inbox list; with the Sent reader's fixed header, item grid and button strip
+-- it is now the reader, which needs 268px of panel before its message well
+-- reaches a usable height. Taking only the list into account left the message
+-- box 36px tall at minimum size -- technically laid out, functionally useless.
+local SENT_READER_MIN = SENT_HEAD_H + SENT_ITEMS_H + SENT_GAP
+    + SENT_BODY_MIN + SENT_FOOT_H
+local MIN_H_FOR_READER = SENT_READER_MIN + (LIST_PAD * 2)
+    + LOG_TOP + LOG_BOTTOM + PANEL_TOP + PANEL_BOTTOM
+local MIN_H_FOR_LIST = HeightForRows(MIN_ROWS)
+
+local MIN_W = WIN_W
+local MIN_H = MIN_H_FOR_LIST
+if MIN_H_FOR_READER > MIN_H then MIN_H = MIN_H_FOR_READER end
+local MAX_W, MAX_H = 1100, 900
+
+-- Row frames are BUILT to this many and then shown or hidden per paint.
+-- CreateFrame mid-resize is not viable, so the tallest window the player can
+-- ever drag to decides how many exist.
+local MAX_ROWS = math.floor(
+    ((MAX_H - PANEL_TOP - PANEL_BOTTOM - INBOX_TOP - INBOX_BOTTOM)
+        - (LIST_PAD * 2)) / ROW_H)
+
+-- ---- window scale ----------------------------------------------------------
+-- Scale and size answer different questions. Extra height shows MORE rows --
+-- vanilla frames never reflow, so that is all it can do -- while scale makes
+-- the same window physically larger. On a big screen you want both.
+--
+-- Clamped: below ~0.7 the fonts stop being legible, above ~1.5 a maximum-height
+-- window no longer fits a 1024-tall screen.
+local SCALE_MIN, SCALE_MAX, SCALE_STEP = 0.70, 1.50, 0.05
+
+function ui.WindowScale()
+    local v = db.GetWindowScale and db.GetWindowScale()
+    if not v or v < SCALE_MIN then return 1 end
+    if v > SCALE_MAX then return SCALE_MAX end
+    return v
+end
+
+function ui.ApplyWindowScale()
+    if not ui.frame or not ui.frame.SetScale then return end
+    ui.frame:SetScale(ui.WindowScale())
+end
+
+-- Nudge by `delta`; nil resets to 1.0.
+function ui.StepWindowScale(delta)
+    local v = 1
+    if delta then
+        v = ui.WindowScale() + delta
+        -- Round to the step so repeated nudges cannot drift off it.
+        v = math.floor(v * 100 + 0.5) / 100
+        if v < SCALE_MIN then v = SCALE_MIN end
+        if v > SCALE_MAX then v = SCALE_MAX end
+    end
+    db.SaveWindowScale(v)
+    ui.ApplyWindowScale()
+    if ui.RefreshCourier then ui.RefreshCourier() end
+    return v
+end
+
+-- Live frame height, falling back to the default before the window exists.
+local function FrameH()
+    if ui.frame and ui.frame.GetHeight then
+        local h = ui.frame:GetHeight()
+        if h and h > 0 then return h end
+    end
+    return WIN_H
+end
+
+local function PanelH(frameH)
+    return (frameH or FrameH()) - PANEL_TOP - PANEL_BOTTOM
+end
+
+-- How many rows a list well of this height can hold. Clamped both ways: a
+-- window dragged to its minimum still shows a usable page, and one dragged
+-- taller than we built frames for stops at MAX_ROWS rather than indexing nil.
+local function RowsForWell(wellH)
+    local n = math.floor((wellH - (LIST_PAD * 2)) / ROW_H)
+    if n < MIN_ROWS then n = MIN_ROWS end
+    if n > MAX_ROWS then n = MAX_ROWS end
+    return n
+end
+
+-- Rows currently paintable in each list, from the live height.
+function ui.InboxRowCount(frameH)
+    local h = PanelH(frameH)
+    return RowsForWell(h - INBOX_TOP - INBOX_BOTTOM)
+end
+
+function ui.LogRowCount(frameH)
+    local h = PanelH(frameH)
+    return RowsForWell(h - LOG_TOP - LOG_BOTTOM)
+end
+
+function ui.LedgerRowCount(frameH)
+    local h = PanelH(frameH)
+    return RowsForWell(h - LEDGER_TOP - LEDGER_BOTTOM)
+end
+
+-- Live geometry. Every value is computed from the CURRENT frame height (or a
+-- height you pass in, which is how the harness checks minimum and maximum
+-- without actually resizing anything). A list whose `need` exceeds its `have`
+-- draws outside its well.
+function ui.Geometry(frameH)
+    local h = frameH or FrameH()
+    local panelH = PanelH(h)
+    local rows = ui.InboxRowCount(h)
+    return {
+        rows   = rows,
+        maxRows = MAX_ROWS,
+        minRows = MIN_ROWS,
+        need   = LIST_PAD + rows * ROW_H + LIST_PAD,
+        rowH   = ROW_H,
+        winH   = h,
+        panelH = panelH,
+        panelTop    = PANEL_TOP,
+        panelBottom = PANEL_BOTTOM,
+        -- Chrome the panels have to start below. Asserted rather than merely
+        -- balanced: a panelTop that is self-consistent can still sit on top of
+        -- the tab row, and 1.12 draws the overlap rather than clipping it.
+        chromeH     = TITLE_INSET + TITLE_H + GAP + TAB_H,
+        titleInset  = TITLE_INSET,
+        side        = PANEL_SIDE,
+        contentSide = CONTENT_SIDE,
+        contentBottom = CONTENT_BOTTOM,
+        footerInset = FOOTER_INSET,
+        footerH     = FOOTER_H,
+        footerTop   = FOOTER_INSET + FOOTER_H,
+        inbox  = panelH - INBOX_TOP  - INBOX_BOTTOM,
+        log    = panelH - LOG_TOP    - LOG_BOTTOM,
+        ledger = panelH - LEDGER_TOP - LEDGER_BOTTOM,
+        minH   = MIN_H,
+        maxH   = MAX_H,
+        minW   = MIN_W,
+        maxW   = MAX_W,
+        defaultH = WIN_H,
+    }
+end
+
 
 -- ---------------------------------------------------------------------------
 -- Small helpers
@@ -176,14 +352,6 @@ local function Backdrop(frame, bg, border)
     end
 end
 
--- The MAIN WINDOW's frame, deliberately different from the thin tooltip border
--- every inner well uses. These values are Aegis: Exchange's, copied so the two
--- addons read as one suite when neither is skinned:
---   * UI-DialogBox-Border is ornamental 9-slice art with a much heavier edge
---     (28 vs the tooltip border's 12), so it needs insets of 10 to keep content
---     off the frame rather than the wells' 3.
---   * The border colour stays WHITE. Tinting it, which the tooltip border wants
---     to look right, muddies the dialog art's own gold ornamentation.
 local function WindowBackdrop(frame, bg)
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -303,6 +471,25 @@ function ui.BuildWindow()
     WindowBackdrop(f, C.panelBG)
     f:Hide()
 
+    -- Scale FIRST and unconditionally: it is stored independently of the size,
+    -- so someone who scaled the window but never dragged it bigger has no saved
+    -- width to restore -- and an early return below would lose their scale on
+    -- every login.
+    ui.ApplyWindowScale()
+
+    -- Restore the saved size, clamped: the stored value predates any change to
+    -- MIN/MAX and a window smaller than its own contents is not recoverable
+    -- from in-game.
+    local sw, sh = db.GetWindowSize()
+    if sw and sh then
+        if sw < MIN_W then sw = MIN_W end
+        if sh < MIN_H then sh = MIN_H end
+        if sw > MAX_W then sw = MAX_W end
+        if sh > MAX_H then sh = MAX_H end
+        f:SetWidth(sw)
+        f:SetHeight(sh)
+    end
+
     -- Restore the saved position, defaulting to centre-ish.
     local point, x, y = db.GetWindowPoint()
     if point then
@@ -375,6 +562,64 @@ function ui.BuildWindow()
     blizBtn:SetScript("OnClick", function() ui.ShowBlizzardMail() end)
     ui.blizBtn = blizBtn
 
+    -- ---- resize grip ----------------------------------------------------
+    -- Everything inside anchors to its panel's edges, so widening or
+    -- heightening the frame carries the panels and their scroll frames along
+    -- for free. The one thing that does NOT follow on its own is how many rows
+    -- each list draws -- ui.InboxRowCount and friends recompute that from the
+    -- live height, so dragging taller genuinely shows more mail rather than
+    -- leaving a blank gap.
+    f:SetResizable(true)
+    if f.SetMinResize then f:SetMinResize(MIN_W, MIN_H) end
+    if f.SetMaxResize then f:SetMaxResize(MAX_W, MAX_H) end
+
+    -- On the OUTER border, not inside the content well: a grip tucked into the
+    -- recessed area reads as part of the content rather than as a handle.
+    local grip = CreateFrame("Button", "AegisCourierResizeGrip", f)
+    grip:SetWidth(14)
+    grip:SetHeight(14)
+    grip:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -2, 2)
+    grip:SetFrameLevel(f:GetFrameLevel() + 12)
+    -- The pfUI skin replaces a button's textures with a flat backdrop, which on
+    -- an icon button erases the icon -- the same fault that made the recipient
+    -- dropdown render as an empty box in v1.1.0.
+    grip.courierNoSkin = true
+    local gripTex = grip:CreateTexture(nil, "OVERLAY")
+    gripTex:SetAllPoints(grip)
+    gripTex:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\ResizeGrip")
+    grip.tex = gripTex
+    grip:SetScript("OnMouseDown", function()
+        ui.sizing = true
+        f:StartSizing("BOTTOMRIGHT")
+    end)
+    grip:SetScript("OnMouseUp", function()
+        ui.sizing = false
+        f:StopMovingOrSizing()
+        db.SaveWindowSize(f:GetWidth(), f:GetHeight())
+        ui.Refresh()
+    end)
+    -- DELIBERATELY NO PER-FRAME REPAINT WHILE DRAGGING. Repainting mid-drag
+    -- calls FauxScrollFrame_Update with a row count that changes every frame,
+    -- which moves the scrollbar's range, which fires OnVerticalScroll, which
+    -- calls the update function again. That is precisely the mutual recursion
+    -- that killed the client at 11+ mails in v1.0.4 -- it only terminates
+    -- because the range normally holds still, and while resizing it does not.
+    -- The lists re-fit once, on release.
+    grip:SetScript("OnEnter", function() gripTex:SetVertexColor(1, 0.9, 0.4) end)
+    grip:SetScript("OnLeave", function() gripTex:SetVertexColor(1, 1, 1) end)
+    ui.resizeGrip = grip
+
+    -- ---- content well ---------------------------------------------------
+    -- The recessed plate every panel sits on, matching Exchange's ui.content.
+    -- Without it the panels float directly on the window background and the
+    -- two addons read differently even with the same outer frame.
+    local content = CreateFrame("Frame", "AegisCourierContent", f)
+    content:SetPoint("TOPLEFT", f, "TOPLEFT", CONTENT_SIDE, -CONTENT_TOP)
+    content:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT",
+        -CONTENT_SIDE, CONTENT_BOTTOM)
+    Backdrop(content, C.well, true)
+    ui.content = content
+
     -- ---- sub-tab strip --------------------------------------------------
     ui.subTabs = {}
     ui.panels  = {}
@@ -392,9 +637,10 @@ function ui.BuildWindow()
         ui.subTabs[name] = b
         prev = b
 
-        local panel = CreateFrame("Frame", "AegisCourierPanel" .. name, f)
-        panel:SetPoint("TOPLEFT", f, "TOPLEFT", PANEL_SIDE, -PANEL_TOP)
-        panel:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -PANEL_SIDE, PANEL_BOTTOM)
+        local panel = CreateFrame("Frame", "AegisCourierPanel" .. name, content)
+        panel:SetPoint("TOPLEFT", content, "TOPLEFT", PANEL_PAD, -PANEL_PAD)
+        panel:SetPoint("BOTTOMRIGHT", content, "BOTTOMRIGHT",
+            -PANEL_PAD, PANEL_PAD)
         panel:Hide()
         ui.panels[name] = panel
 
@@ -403,7 +649,7 @@ function ui.BuildWindow()
 
     -- ---- footer ---------------------------------------------------------
     local footer = Label(f, "GameFontNormalSmall", C.dim)
-    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, 14)
+    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, FOOTER_INSET)
     ui.footer = footer
 
     ui.BuildInboxPanel()
@@ -519,7 +765,7 @@ function ui.BuildInboxPanel()
 
     ui.inboxRows = {}
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = CreateFrame("Button", "AegisCourierInboxRow" .. i, well)
         row:SetHeight(ROW_H)
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 4, -LIST_PAD - (i - 1) * ROW_H)
@@ -945,7 +1191,7 @@ end
 -- reused rather than destroyed, so this is just visibility.
 function ui.HideInboxRows()
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = ui.inboxRows[i]
         if row then
             row.ret:Hide()
@@ -983,6 +1229,11 @@ function ui.RefreshInbox()
     if ui.reader then ui.reader:Hide() end
     if ui.inboxScroll then ui.inboxScroll:Show() end
 
+    -- How many rows actually fit RIGHT NOW. Frames exist up to MAX_ROWS; the
+    -- ones past `rows` are hidden rather than destroyed, because CreateFrame
+    -- during a resize is not viable.
+    local rows = ui.InboxRowCount()
+
     local mails = inbox.All()
     local total = table.getn(mails)
 
@@ -995,13 +1246,14 @@ function ui.RefreshInbox()
     end
     ui.inboxSummary:SetText(parts)
 
-    FauxScrollFrame_Update(ui.inboxScroll, total, ROWS, ROW_H)
+    FauxScrollFrame_Update(ui.inboxScroll, total, rows, ROW_H)
     local offset = FauxScrollFrame_GetOffset(ui.inboxScroll) or 0
 
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = ui.inboxRows[i]
-        local h = mails[offset + i]
+        local h = nil
+        if i <= rows then h = mails[offset + i] end
         if h then
             row.icon:SetTexture(inbox.Icon(h))
             -- Read mail is dimmed, matching the stock inbox's convention.
@@ -1103,6 +1355,85 @@ local function SetToggleEnabled(toggle, enabled)
             toggle.labelText:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
         end
     end
+end
+
+-- A gold / silver / copper money input, matching Aegis: Exchange's.
+--
+-- TWO 1.12 GOTCHAS, both learned the hard way in Exchange and carried over
+-- rather than rediscovered:
+--
+--   1. There are NO per-denomination icon files on this client. There is ONE
+--      sprite sheet -- Interface\\MoneyFrame\\UI-MoneyIcons -- holding gold,
+--      silver and copper side by side, and you pick one with SetTexCoord.
+--      "UI-GoldIcon", which is how later clients do it, resolves to nothing
+--      at all, so the coins render INVISIBLE rather than wrong.
+--   2. Blank LEADING zeros only. Exchange shipped a version where gold blanked
+--      its zero and silver did not, so 11 copper drew as [ ][0][11] -- an empty
+--      box beside a zero reads as a missing value rather than "no silver".
+--
+-- The group exposes GetText/SetText returning and parsing a money STRING, so
+-- it drops straight into the places that previously held one edit box.
+local function MakeMoneyGSC(name, parent, onChange)
+    local grp = {}
+    local COIN_U = { gold = 0, silver = 0.25, copper = 0.5 }
+
+    local function mk(suffix, w, coin)
+        local e = CreateFrame("EditBox", "AegisCourierEdit" .. name .. suffix,
+            parent, "InputBoxTemplate")
+        e:SetWidth(w)
+        e:SetHeight(18)
+        e:SetAutoFocus(false)
+        e:SetNumeric(true)
+        e:SetJustifyH("RIGHT")
+        e:SetFontObject("GameFontHighlightSmall")
+        e:SetScript("OnEnterPressed", function() e:ClearFocus() end)
+        e:SetScript("OnEscapePressed", function() e:ClearFocus() end)
+        e:SetScript("OnTextChanged", function()
+            if grp.quiet then return end     -- our own SetText, not the user
+            if onChange then onChange() end
+        end)
+        local tag = parent:CreateTexture(nil, "OVERLAY")
+        tag:SetTexture("Interface\\MoneyFrame\\UI-MoneyIcons")
+        local u = COIN_U[coin] or 0
+        tag:SetTexCoord(u, u + 0.25, 0, 1)
+        tag:SetWidth(13)
+        tag:SetHeight(13)
+        tag:SetPoint("LEFT", e, "RIGHT", 2, 0)
+        e.tag = tag
+        e.coin = coin
+        return e
+    end
+
+    grp.g = mk("Gold", 34, "gold")
+    grp.s = mk("Silver", 22, "silver")
+    grp.c = mk("Copper", 22, "copper")
+
+    grp.GetText = function(self)
+        local gg = tonumber(self.g:GetText()) or 0
+        local ss = tonumber(self.s:GetText()) or 0
+        local cc = tonumber(self.c:GetText()) or 0
+        local total = gg * 10000 + ss * 100 + cc
+        if total <= 0 then return "" end
+        return util.FormatMoney(total, false)
+    end
+
+    grp.SetText = function(self, txt)
+        local copper = nil
+        if txt and txt ~= "" then copper = util.ParseMoney(txt) end
+        self.quiet = true
+        if not copper or copper <= 0 then
+            self.g:SetText(""); self.s:SetText(""); self.c:SetText("")
+        else
+            local gg, ss, cc = util.MoneyParts(copper)
+            -- Leading zeros blank, trailing ones shown -- see gotcha 2.
+            self.g:SetText(gg > 0 and tostring(gg) or "")
+            self.s:SetText((gg > 0 or ss > 0) and tostring(ss) or "")
+            self.c:SetText(tostring(cc))
+        end
+        self.quiet = false
+    end
+
+    return grp
 end
 
 local function MakeEditBox(name, parent, width, multiline)
@@ -1317,10 +1648,14 @@ function ui.BuildSendPanel()
         0, -6 - (ATTACH_SIZE + 4))
     moneyLbl:SetText("Gold")
 
-    local moneyBox = MakeEditBox("Money", panel, 90)
-    moneyBox:SetPoint("LEFT", moneyLbl, "RIGHT", 10, 0)
-    moneyBox:SetScript("OnTextChanged", function() ui.RefreshSend() end)
-    ui.sendMoney = moneyBox
+    -- Three boxes with coin icons, matching Exchange, rather than one box you
+    -- type "12g 30s" into. The group answers GetText/SetText the same way the
+    -- single box did, so ui.SendMoneyValue and ClearSendForm are unchanged.
+    local money = MakeMoneyGSC("Money", panel, function() ui.RefreshSend() end)
+    money.g:SetPoint("LEFT", moneyLbl, "RIGHT", 10, 0)
+    money.s:SetPoint("LEFT", money.g, "RIGHT", 18, 0)
+    money.c:SetPoint("LEFT", money.s, "RIGHT", 18, 0)
+    ui.sendMoney = money
 
     -- ---- Tab moves to the next field ------------------------------------
     -- The stock mail form chains its own Name/Subject/Body boxes this way and
@@ -1335,7 +1670,9 @@ function ui.BuildSendPanel()
     -- cyclable, and a Tab that silently does nothing reads as a broken key.
     -- Note the multiline body is included -- handling OnTabPressed is also
     -- what stops Tab inserting a literal tab character into the message.
-    ui.SetTabChain({ toBox, subjBox, bodyBox, moneyBox })
+    -- The money group is THREE boxes, so the chain threads all of them rather
+    -- than treating it as one field.
+    ui.SetTabChain({ toBox, subjBox, bodyBox, money.g, money.s, money.c })
 
     local moneyHint = Label(panel, "GameFontNormalSmall", C.dim)
     moneyHint:SetPoint("LEFT", moneyBox, "RIGHT", 8, 0)
@@ -1628,7 +1965,7 @@ function ui.BuildLogPanel()
 
     ui.logRows = {}
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = CreateFrame("Frame", nil, well)
         row:SetHeight(ROW_H)
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
@@ -1754,17 +2091,19 @@ function ui.RefreshLog()
     if ui.logRefreshing then return end
     ui.logRefreshing = true
 
+    local visible = ui.LogRowCount()
     local rows = ui.LogRows()
     local total = table.getn(rows)
 
-    FauxScrollFrame_Update(ui.logScroll, total, ROWS, ROW_H)
+    FauxScrollFrame_Update(ui.logScroll, total, visible, ROW_H)
     local offset = FauxScrollFrame_GetOffset(ui.logScroll) or 0
     local now = time()
 
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = ui.logRows[i]
-        local e = rows[offset + i]
+        local e = nil
+        if i <= visible then e = rows[offset + i] end
         if e then
             row.when:SetText(util.FormatAgo(now - (e.t or now)))
             SetClipped(row.who, e.who or "?", 108)
@@ -1860,35 +2199,21 @@ end
 -- someone else; there is nothing to act on. The one useful action is to write
 -- to the same person again, which is what the Compose button does.
 
--- ---- Sent reader geometry --------------------------------------------------
--- THREE columns of four rather than two of six. A batch cannot exceed
--- MAX_ATTACHMENTS (12), so 3 x 4 still shows every possible item without
--- scrolling -- but in four rows instead of six, which hands 32px straight to
--- the message below it. Widening beats lengthening here: the reader is far
--- wider than it is tall, and item labels are short.
---
--- Every offset below derives from these; ui.SentGeometry() reports the result
--- and the harness asserts the blocks fit without overlapping.
-local SENT_ITEM_COLS = 3
-local SENT_ITEM_ROWS = 4                    -- x COLS = 12 = MAX_ATTACHMENTS
-local SENT_ITEM_H    = 16
-
--- Header block: Back/recipient, subject, then one line carrying both the mail
--- count and the item count. Merging those two lines is where another 18px for
--- the message came from.
-local SENT_HEAD_H = 60
-local SENT_FOOT_H = 26                      -- the Compose button strip
-local SENT_GAP    = 8
-
-local SENT_ITEMS_H = SENT_ITEM_ROWS * SENT_ITEM_H
-local SENT_BODY_TOP = SENT_HEAD_H + SENT_ITEMS_H + SENT_GAP
-
 -- The Sent reader's vertical budget, reported so the harness can assert the
 -- blocks actually fit. 1.12 does not clip children -- an overflowing block
 -- just draws over whatever is beneath it -- which is the same trap the Inbox
 -- list hit in v1.1.0, and the reason this is asserted rather than eyeballed.
-function ui.SentGeometry()
-    local readerH = PANEL_H - LOG_TOP - LOG_BOTTOM - (LIST_PAD * 2)
+-- The message well's height at a given window height: it grows with the
+-- window up to SENT_BODY_MAX and then stops, because past that it is empty
+-- space rather than more message.
+local function SentBodyH(readerH)
+    local avail = readerH - SENT_BODY_TOP - SENT_FOOT_H
+    if avail > SENT_BODY_MAX then return SENT_BODY_MAX end
+    return avail
+end
+
+function ui.SentGeometry(frameH)
+    local readerH = PanelH(frameH) - LOG_TOP - LOG_BOTTOM - (LIST_PAD * 2)
     return {
         readerH = readerH,
         head    = SENT_HEAD_H,
@@ -1896,7 +2221,9 @@ function ui.SentGeometry()
         gap     = SENT_GAP,
         foot    = SENT_FOOT_H,
         bodyTop = SENT_BODY_TOP,
-        bodyH   = readerH - SENT_BODY_TOP - SENT_FOOT_H,
+        bodyH   = SentBodyH(readerH),
+        bodyMin = SENT_BODY_MIN,
+        bodyMax = SENT_BODY_MAX,
         cols    = SENT_ITEM_COLS,
         rows    = SENT_ITEM_ROWS,
         slots   = SENT_ITEM_COLS * SENT_ITEM_ROWS,
@@ -1942,7 +2269,7 @@ function ui.BuildSentPanel()
 
     ui.sentRows = {}
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = CreateFrame("Button", "AegisCourierSentRow" .. i, well)
         row:SetHeight(ROW_H)
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
@@ -2060,9 +2387,13 @@ function ui.BuildSentReader(well)
         n = n + 1
     end
 
+    -- Anchored by its TOP edge with an explicit height, not stretched between
+    -- top and bottom: the height is capped (see SENT_BODY_MAX), so it cannot
+    -- simply follow the reader's bottom edge. ui.RefitSentReader sets it.
     local bodyWell = CreateFrame("Frame", nil, r)
     bodyWell:SetPoint("TOPLEFT", r, "TOPLEFT", 0, -SENT_BODY_TOP)
-    bodyWell:SetPoint("BOTTOMRIGHT", r, "BOTTOMRIGHT", 0, SENT_FOOT_H)
+    bodyWell:SetPoint("TOPRIGHT", r, "TOPRIGHT", 0, -SENT_BODY_TOP)
+    bodyWell:SetHeight(SENT_BODY_MAX)
     Backdrop(bodyWell, C.well, true)
     ui.sentBodyWell = bodyWell
 
@@ -2177,7 +2508,7 @@ function ui.RefreshSent()
     if ui.sentIndex then
         if ui.RefreshSentReader() then
             local h = 1
-            while h <= ROWS do ui.sentRows[h]:Hide() h = h + 1 end
+            while h <= MAX_ROWS do ui.sentRows[h]:Hide() h = h + 1 end
             ui.sentScroll:Hide()
             ui.sentReader:Show()
             ui.sentSummary:SetText("")
@@ -2191,17 +2522,19 @@ function ui.RefreshSent()
     ui.sentReader:Hide()
     ui.sentScroll:Show()
 
+    local visible = ui.LogRowCount()   -- Sent shares the Log panel's insets
     local rows = ui.SentRows()
     local total = table.getn(rows)
 
-    FauxScrollFrame_Update(ui.sentScroll, total, ROWS, ROW_H)
+    FauxScrollFrame_Update(ui.sentScroll, total, visible, ROW_H)
     local offset = FauxScrollFrame_GetOffset(ui.sentScroll) or 0
     local now = time()
 
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = ui.sentRows[i]
-        local entry = rows[offset + i]
+        local entry = nil
+        if i <= visible then entry = rows[offset + i] end
         if entry then
             local rec = entry.rec
             local flat = ui.SentRow(rec)
@@ -2250,9 +2583,17 @@ end
 
 -- Paint the open record. Returns false when it is no longer there, so the
 -- caller drops back to the list instead of showing the wrong send.
+-- Re-fit the message well to the current window height. Called from the
+-- reader's paint and after a resize; cheap enough to do on both.
+function ui.RefitSentReader()
+    if not ui.sentBodyWell then return end
+    ui.sentBodyWell:SetHeight(ui.SentGeometry().bodyH)
+end
+
 function ui.RefreshSentReader()
     local rec = ui.SentRecord()
     if not rec then return false end
+    ui.RefitSentReader()
 
     ui.sentTo:SetText(rec.to or "?")
     ui.sentWhen:SetText(util.FormatAgo(time() - (rec.t or time())))
@@ -2336,7 +2677,7 @@ function ui.BuildLedgerPanel()
 
     ui.ledgerRows = {}
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = CreateFrame("Frame", nil, well)
         row:SetHeight(ROW_H)
         row:SetPoint("TOPLEFT", well, "TOPLEFT", 6, -LIST_PAD - (i - 1) * ROW_H)
@@ -2371,6 +2712,7 @@ function ui.RefreshLedger()
     if ui.ledgerRefreshing then return end
     ui.ledgerRefreshing = true
 
+    local visible = ui.LedgerRowCount()
     local led = db.Ledger()
     local total = table.getn(led)
     local income, spend, count = db.LedgerTotals(nil)
@@ -2385,15 +2727,16 @@ function ui.RefreshLedger()
             "  |  cut " .. util.FormatMoney(cut, true))
     end
 
-    FauxScrollFrame_Update(ui.ledgerScroll, total, ROWS, ROW_H)
+    FauxScrollFrame_Update(ui.ledgerScroll, total, visible, ROW_H)
     local offset = FauxScrollFrame_GetOffset(ui.ledgerScroll) or 0
     local now = time()
 
     local i = 1
-    while i <= ROWS do
+    while i <= MAX_ROWS do
         local row = ui.ledgerRows[i]
         -- Newest first: walk the array backwards.
-        local e = led[total - (offset + i) + 1]
+        local e = nil
+        if i <= visible then e = led[total - (offset + i) + 1] end
         if e then
             row.when:SetText(util.FormatAgo(now - (e.t or now)))
             SetClipped(row.item, e.item or "?", 300)
@@ -2480,12 +2823,63 @@ function ui.BuildCourierPanel()
     ui.checkLog = logOn
     ui.checkPfSkin = pfSkin
 
+    -- ---- window scale ----------------------------------------------------
+    -- BUTTONS, NOT A SLIDER, deliberately: a slider that rescales the window it
+    -- sits on moves itself out from under the cursor mid-drag, and the thumb
+    -- then tracks to a value the player did not choose. Discrete steps have no
+    -- such feedback loop and are easier to land on a round number.
+    local scaleLbl = Label(panel, "GameFontNormalSmall", C.text)
+    scaleLbl:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 2, -14)
+    scaleLbl:SetText("Window scale")
+
+    local scaleDown = CreateFrame("Button", "AegisCourierScaleDown", panel,
+        "UIPanelButtonTemplate")
+    scaleDown:SetWidth(24)
+    scaleDown:SetHeight(20)
+    scaleDown:SetPoint("LEFT", scaleLbl, "RIGHT", 12, 0)
+    scaleDown:SetText("-")
+    scaleDown:SetScript("OnClick", function()
+        ui.StepWindowScale(-SCALE_STEP)
+    end)
+    ui.btnScaleDown = scaleDown
+
+    local scaleText = Label(panel, "GameFontHighlightSmall", C.text)
+    scaleText:SetPoint("LEFT", scaleDown, "RIGHT", 8, 0)
+    scaleText:SetWidth(44)
+    scaleText:SetJustifyH("CENTER")
+    ui.scaleText = scaleText
+
+    local scaleUp = CreateFrame("Button", "AegisCourierScaleUp", panel,
+        "UIPanelButtonTemplate")
+    scaleUp:SetWidth(24)
+    scaleUp:SetHeight(20)
+    scaleUp:SetPoint("LEFT", scaleText, "RIGHT", 8, 0)
+    scaleUp:SetText("+")
+    scaleUp:SetScript("OnClick", function()
+        ui.StepWindowScale(SCALE_STEP)
+    end)
+    ui.btnScaleUp = scaleUp
+
+    local scaleReset = CreateFrame("Button", "AegisCourierScaleReset", panel,
+        "UIPanelButtonTemplate")
+    scaleReset:SetWidth(56)
+    scaleReset:SetHeight(20)
+    scaleReset:SetPoint("LEFT", scaleUp, "RIGHT", 10, 0)
+    scaleReset:SetText("Reset")
+    scaleReset:SetScript("OnClick", function() ui.StepWindowScale(nil) end)
+    ui.btnScaleReset = scaleReset
+
+    local scaleHint = Label(panel, "GameFontNormalSmall", C.dim)
+    scaleHint:SetPoint("TOPLEFT", scaleLbl, "BOTTOMLEFT", 0, -6)
+    scaleHint:SetText("Scale resizes the whole window; drag the corner to " ..
+        "show more mail at once.")
+
     -- A rule between the two groups. Without it -- and with the Integration
     -- heading previously anchored to `push` rather than to the last checkbox --
     -- the heading was drawn straight on top of the log option.
     local divider = panel:CreateTexture(nil, "ARTWORK")
     divider:SetHeight(1)
-    divider:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 0, -14)
+    divider:SetPoint("TOPLEFT", scaleHint, "BOTTOMLEFT", 0, -14)
     divider:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
     divider:SetTexture(C.goldDim[1], C.goldDim[2], C.goldDim[3], 0.35)
 
@@ -2521,6 +2915,11 @@ function ui.RefreshCourier()
     ui.checkPush:SetChecked(db.Setting("pushToAegis") and true or false)
     ui.checkLog:SetChecked(db.Setting("logEnabled") and true or false)
     ui.checkPfSkin:SetChecked(db.Setting("pfSkin") and true or false)
+
+    if ui.scaleText then
+        -- Shown as a percentage: "85%" is easier to reason about than "0.85".
+        ui.scaleText:SetText(math.floor(ui.WindowScale() * 100 + 0.5) .. "%")
+    end
 
     -- Grey the pfUI option out when pfUI is not there to match. The setting
     -- itself stays on, so installing pfUI later just works.
