@@ -9,6 +9,16 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.6.1]
+
+### Fixed
+- **The status line at the bottom of the window was drawn over.** The recessed
+  plate the panels sit on ended 16px from the bottom edge while the footer text
+  sat at 14 — so the plate covered the top half of "At mailbox | linked to
+  Aegis: Exchange". The plate's bottom is now derived from where the footer
+  actually is rather than from a number that looked about right, and the test
+  suite asserts the two cannot overlap again.
+
 ## [1.6.0]
 
 The window resizes and scales, sent mail sits on a recessed plate like

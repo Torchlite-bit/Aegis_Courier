@@ -2127,6 +2127,19 @@ check(geom.panelTop >= geom.chromeH,
 -- And they must clear the dialog border's 10px art on the sides.
 check(geom.side >= 10, "panels clear the window border", geom.side)
 
+-- The footer sits BELOW the content well, on the window itself, so the well's
+-- bottom edge has to clear it. It did not: the well ended 16px up while the
+-- footer occupied 14..26, and the recessed plate drew straight over the text.
+-- Reported from live play as clipping at "At mailbox | linked to Aegis".
+check(geom.contentBottom >= geom.footerTop,
+      "the content well clears the footer text",
+      geom.contentBottom .. " well bottom vs " .. geom.footerTop ..
+      " footer top")
+-- The footer itself has to clear the dialog border's 10px of art, or it is
+-- drawn half-underneath the frame instead of half-underneath the well.
+check(geom.footerInset >= 10, "and the footer clears the window border",
+      geom.footerInset)
+
 print("== resize: rows are derived from the live window height ==")
 -- The dependency used to run ROWS -> height. With a grip it must run the other
 -- way, or dragging taller leaves a blank gap instead of showing more mail.

@@ -97,7 +97,16 @@ local GAP         = 6
 -- this is the sunken plate they sit on, and it is the remaining structural
 -- difference between the two addons once the frames matched.
 local CONTENT_SIDE   = 14                   -- inset from the window edge
-local CONTENT_BOTTOM = 16
+
+-- The footer ("At mailbox | linked to Aegis: Exchange") lives BELOW the content
+-- well, on the window itself. The well's bottom therefore has to clear it, and
+-- it did not: the well ended 16px from the bottom while the footer occupied
+-- 14..26, so the recessed plate drew straight over the text. Derive the well's
+-- bottom from where the footer actually is rather than picking a number that
+-- happens to look close.
+local FOOTER_INSET = 12                     -- footer baseline from window bottom
+local FOOTER_H     = 12                     -- GameFontNormalSmall line height
+local CONTENT_BOTTOM = FOOTER_INSET + FOOTER_H + GAP
 local CONTENT_TOP    = TITLE_INSET + TITLE_H + GAP + TAB_H + GAP
 local PANEL_PAD      = 6                    -- panel inset inside the content well
 
@@ -290,6 +299,10 @@ function ui.Geometry(frameH)
         titleInset  = TITLE_INSET,
         side        = PANEL_SIDE,
         contentSide = CONTENT_SIDE,
+        contentBottom = CONTENT_BOTTOM,
+        footerInset = FOOTER_INSET,
+        footerH     = FOOTER_H,
+        footerTop   = FOOTER_INSET + FOOTER_H,
         inbox  = panelH - INBOX_TOP  - INBOX_BOTTOM,
         log    = panelH - LOG_TOP    - LOG_BOTTOM,
         ledger = panelH - LEDGER_TOP - LEDGER_BOTTOM,
@@ -636,7 +649,7 @@ function ui.BuildWindow()
 
     -- ---- footer ---------------------------------------------------------
     local footer = Label(f, "GameFontNormalSmall", C.dim)
-    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, 14)
+    footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", PANEL_SIDE + 4, FOOTER_INSET)
     ui.footer = footer
 
     ui.BuildInboxPanel()
