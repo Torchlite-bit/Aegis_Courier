@@ -204,6 +204,18 @@ section, which is Courier's equivalent hazard surface.
     all.
 21. **COD and GM mail are never taken automatically**, in any mode, and this is
     not a user setting. Paying a COD by accident is unrecoverable.
+    - **"Automatically" is the whole of the rule.** Open All, Delete Read and
+      right-click step over every COD; the player may still pay one
+      DELIBERATELY, and must be able to — Courier's takeover keeps the Blizzard
+      mailbox hidden, so a Courier with no COD path leaves users disabling the
+      addon to collect their mail. That shipped. The reader's Pay button
+      (`take.PayCOD`) is the only route, and it is two clicks: the first arms,
+      the second commits.
+    - The permission is `take.codIndex`, ONE absolute index, compared against
+      the index the engine is standing on. It is not a mode and not a flag —
+      a run must never be able to drift onto a second COD and pay it. Clear it
+      wherever a run starts or ends.
+    - **GM mail has no equivalent exception**, deliberately.
 
 ### Sending mail (1.12)
 
@@ -245,6 +257,22 @@ section, which is Courier's equivalent hazard surface.
       and blames the item. Locks are routine — the previous mail's `BAG_UPDATE`
       simply has not landed. **Wait** for it (`send.LOCK_WAIT`, bounded by
       `send.MAX_LOCK_WAITS`); never treat it as failure.
+    - **`locked` is the CLIENT'S CACHED view, so reading it is not enough.**
+      The server can be holding a stack the cache still reports as free, and
+      the pickup is a silent no-op just the same — with `locked` clear, so no
+      amount of reading that flag predicts it. **`CursorHasItem()` after the
+      pickup is the only honest answer**, and skipping that check shipped the
+      field bug "skipped Light Feather — the game would not attach it" on an
+      item plainly in the player's bags. Treat a pickup that did not land as
+      the same transient condition as a declared lock and put it on the SAME
+      budget — an item that alternated between the two would otherwise never
+      exhaust either and would hang the run.
+    - **Tell "busy" and "unmailable" apart, and say which.** A mail that
+      refuses an item leaves it **on the cursor**; a pickup that never landed
+      leaves the cursor empty. The first cannot be fixed by retrying (soulbound,
+      quest, conjured) and must be skipped at once; the second is routine and
+      must be waited for. One catch-all message for both is what made a
+      transient lock look like a broken item.
     - **Empty the mail's attachment slot BEFORE resolving anything.** A mail the
       server refused leaves its item in that slot rather than in the bags, so
       resolving first concludes the stack vanished and skips every
@@ -461,6 +489,16 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       its name to the queued item**; bag coordinates are re-resolved at use;
       `locked` (3rd return of `GetContainerItemInfo`) is read and waited on;
       postage multiplied per mail; gold only on the first mail.
+- [ ] The attach path checks `CursorHasItem()` after the pickup, waits on the
+      shared lock budget when it did not land, and reports an item still held
+      on the cursor as unmailable rather than as a failed attach.
+- [ ] COD is reachable ONLY through the reader's two-click Pay button; every
+      automatic path still skips it, and `take.codIndex` names one index and is
+      compared against `take.index`.
+- [ ] A mock that cannot express a failure cannot test it. Before trusting a
+      new test, SABOTAGE the code it covers — a test that still passes is
+      testing nothing. Both the pickup-no-op and the refused-attach fixes had
+      vacuous tests until the mock modelled the client behaviour they live in.
 - [ ] A rule the UI *gates a button on* is asserted against the **button**, not
       only against the function. `send.Validate` is called twice — once by
       `send.Start` and once by `ui.RefreshSend` to enable the Send button — and

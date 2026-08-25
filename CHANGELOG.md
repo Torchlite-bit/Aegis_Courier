@@ -9,6 +9,58 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.7.1]
+
+Two bugs from the field: COD mail could not be collected at all, and an item
+sitting plainly in your bags could be refused with "the game would not attach
+it". `/reload`.
+
+### Fixed
+- **COD mail can be collected again.** There was no way to pay a COD anywhere
+  in the addon: every automatic path refuses one by design, the reader hid its
+  Take button, and Courier's takeover keeps the Blizzard mailbox hidden — so
+  the only way out was to disable Courier and reopen the mailbox. Opening a COD
+  mail now offers a **Pay** button showing the amount owed.
+  - It takes **two clicks**. The first arms the button and relabels it
+    "Confirm <amount>"; the second pays. A COD cannot be unpaid, so one click
+    is never enough, and the armed state is dropped the moment you close the
+    reader or move to another mail.
+  - A COD you cannot afford shows the button greyed with the reason, rather
+    than letting you start something the server will refuse.
+  - **Nothing else changed about COD.** Open All, Delete Read and right-click
+    still step over every COD mail, and GM mail is still never collected by
+    anything. The permission is granted for one named mail and checked against
+    the mail the engine is actually standing on, so a run cannot drift onto a
+    second COD and pay that one too.
+  - The correspondence log now records what a COD cost, which the ledger's
+    sale entries would never show — it is money leaving, not arriving.
+- **An item the server is briefly holding is waited for, not blamed.** Sends
+  were failing with `skipped <item> -- the game would not attach it` on items
+  plainly present in the player's bags, twice in a row on the same stack.
+  `GetContainerItemInfo`'s `locked` flag is the *client's cached* view: the
+  server can be holding a stack the cache still reports as free, which is
+  routine in the moments after a bag update. The pickup is then a silent no-op
+  — no error, no event, nothing on the cursor — and Courier went straight on to
+  the attach, found nothing there, and gave up on the item for the rest of the
+  run. It now checks whether the pickup actually landed and waits, on the same
+  budget it already used for a declared lock.
+- **"The game would not attach it" now means what it says.** That message used
+  to cover both the transient case above and an item the mail genuinely will
+  not carry. The two are told apart by whether the item is still on the cursor
+  afterwards, and an item that cannot be posted at all — soulbound, quest,
+  conjured — is now reported as **"this item cannot be mailed"** and skipped at
+  once instead of being retried.
+
+### Notes
+- The test harness gained the two client behaviours these bugs lived in: a
+  pickup that no-ops while the cached `locked` flag reads clear, and a refused
+  attach leaving the item on the cursor. Without the second, the two failure
+  messages are indistinguishable and the fix cannot be tested at all.
+- It also gained real anchor tracking and a fix to its own mail builder, which
+  could not express unreturnable mail: `canReply = t.canReply == false and nil
+  or 1` always yields `1`, because the `and nil` arm is itself falsy. Tests
+  that needed auction mail had been clearing the field by hand afterwards.
+
 ## [1.7.0]
 
 Courier's buttons are now Aegis: Exchange's buttons — the same code, the same

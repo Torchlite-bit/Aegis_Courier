@@ -415,6 +415,32 @@ local function SkipAttachment(att, why)
     end
 end
 
+-- The stack is busy: put it back at the head of the queue and look again in a
+-- moment, within a budget, rather than blaming the item.
+--
+-- Shared by the two ways a busy stack shows itself. The cached `locked` flag
+-- is one of them; a pickup that quietly does nothing is the other, and it is
+-- the one that reached users as "the game would not attach it". Both are the
+-- same transient condition and both deserve the same patience, so they share
+-- one budget -- otherwise an item could alternate between them and wait
+-- forever.
+--
+-- Returns true when the caller should return immediately (still waiting), and
+-- false once the budget is spent and the attachment has been skipped.
+local function WaitForBusySlot(attachment)
+    attachment.lockWaits = (attachment.lockWaits or 0) + 1
+    if attachment.lockWaits <= send.MAX_LOCK_WAITS then
+        table.insert(send.queue, 1, attachment)
+        send.inFlight = nil
+        send.Arm(send.LOCK_WAIT)
+        return true
+    end
+    -- Busy for two solid seconds. Treat it as unreachable rather than hold the
+    -- rest of the batch hostage to one stack.
+    SkipAttachment(attachment, "your bags are busy with it.")
+    return false
+end
+
 function send.Step()
     if not send.sending then return end
 
@@ -446,18 +472,8 @@ function send.Step()
         if status == send.SLOT_LOCKED then
             -- The server has this stack. Do NOT pick it up: on a locked slot
             -- PickupContainerItem does nothing at all, no error and no event,
-            -- and the attach that follows would silently post nothing. Put it
-            -- back at the head and look again in a moment.
-            attachment.lockWaits = (attachment.lockWaits or 0) + 1
-            if attachment.lockWaits <= send.MAX_LOCK_WAITS then
-                table.insert(send.queue, 1, attachment)
-                send.inFlight = nil
-                send.Arm(send.LOCK_WAIT)
-                return
-            end
-            -- Locked for two solid seconds. Treat it as unreachable rather
-            -- than hold the rest of the batch hostage to one stack.
-            SkipAttachment(attachment, "your bags are busy with it.")
+            -- and the attach that follows would silently post nothing.
+            WaitForBusySlot(attachment)
             return
         end
 
@@ -471,6 +487,29 @@ function send.Step()
         else
             PickupContainerItem(attachment.bag, attachment.slot)
         end
+
+        -- DID THE PICKUP ACTUALLY LAND?
+        --
+        -- ResolveSlot cleared this slot a moment ago, but what it read was
+        -- GetContainerItemInfo's `locked` -- and that is the CLIENT'S CACHED
+        -- view, not the server's. The cache can still read clear while the
+        -- server is holding the stack, which is routine in the moments after a
+        -- BAG_UPDATE and therefore commonplace in the middle of a batch. The
+        -- pickup is then a silent no-op: no error, no event, nothing on the
+        -- cursor (CLAUDE.md rule 24).
+        --
+        -- CursorHasItem is the only honest answer to "did that work", and not
+        -- asking is what shipped the reported bug: a routine, transient lock
+        -- came out as "skipped Light Feather -- the game would not attach it"
+        -- and the item was abandoned for the rest of the run. A stack the
+        -- server is briefly holding is exactly what the lock budget above
+        -- exists to wait for, so wait for it here too rather than blaming the
+        -- item for the client's stale cache.
+        if CursorHasItem and not CursorHasItem() then
+            WaitForBusySlot(attachment)
+            return
+        end
+
         ClickSendMailItemButton()
 
         -- Verify the attach landed AND that it landed with the RIGHT item.
@@ -490,9 +529,18 @@ function send.Step()
                     -- posted, and put it back where it came from.
                     ClickSendMailItemButton()
                 end
+                -- The pickup DID land -- we just checked -- so anything still
+                -- on the cursor means the mail refused it. That is the game
+                -- saying the item cannot be posted at all (soulbound, quest,
+                -- conjured), which no amount of retrying will change. Say so
+                -- plainly instead of the old catch-all, which blamed this for
+                -- every failure including the transient one above.
+                local stillHeld = CursorHasItem and CursorHasItem()
                 if ClearCursor then ClearCursor() end
                 if wrong then
                     SkipAttachment(attachment, "it moved in your bags mid-send.")
+                elseif stillHeld then
+                    SkipAttachment(attachment, "this item cannot be mailed.")
                 else
                     SkipAttachment(attachment, "the game would not attach it.")
                 end
