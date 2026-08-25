@@ -1133,7 +1133,7 @@ function ui.BuildInboxPanel()
     local note = Label(panel, "GameFontNormalSmall", C.dim)
     note:SetPoint("BOTTOMLEFT", panel, "BOTTOMLEFT", 4, 4)
     note:SetText("Left-click to read, right-click to take. Return sends it " ..
-        "back unopened. COD and GM mail are always skipped.")
+        "back unopened. COD is only ever paid from the reader, by hand.")
     ui.inboxNote = note
 
     ui.BuildReader(well)
@@ -1264,6 +1264,32 @@ function ui.BuildReader(well)
     end)
     ui.readerTake = takeBtn
 
+    -- COD mail. Never shown at the same time as Take -- Take is refused for
+    -- COD everywhere -- so it occupies the same corner.
+    --
+    -- Two-step on purpose: paying a COD is unrecoverable, so the first click
+    -- only ARMS the button and relabels it, and a second, deliberate click
+    -- commits. ui.readerPayArmed holds the index it was armed for, so
+    -- navigating anywhere at all disarms it rather than leaving a live
+    -- one-click payment sitting under the cursor.
+    local payBtn = ui.MakeButton(r, "accent", "AegisCourierReaderPay")
+    payBtn:SetWidth(132)
+    payBtn:SetHeight(20)
+    payBtn:SetPoint("BOTTOMLEFT", r, "BOTTOMLEFT", 2, 2)
+    payBtn:SetText("Pay COD")
+    payBtn:SetScript("OnClick", function()
+        local idx = ui.readerIndex
+        if not idx then return end
+        if ui.readerPayArmed == idx then
+            ui.readerPayArmed = nil
+            A.take.PayCOD(idx)
+        else
+            ui.readerPayArmed = idx
+        end
+        ui.RefreshInbox()
+    end)
+    ui.readerPay = payBtn
+
     local retBtn = ui.MakeButton(r, "quiet", "AegisCourierReaderReturn")
     retBtn:SetWidth(70)
     retBtn:SetHeight(20)
@@ -1297,6 +1323,7 @@ function ui.OpenReader(index)
     -- silently rendered as though it were the one that was clicked.
     ui.readerSig = h.sender .. "|" .. h.subject
     ui.readerWantBody = inbox.ReadIsFree(h)
+    ui.readerPayArmed = nil
     ui.RefreshInbox()
     return true
 end
@@ -1305,6 +1332,7 @@ function ui.CloseReader()
     ui.readerIndex = nil
     ui.readerSig = nil
     ui.readerWantBody = nil
+    ui.readerPayArmed = nil
     ui.RefreshInbox()
 end
 
@@ -1392,19 +1420,65 @@ function ui.RefreshReader()
     end
 
     -- Actions. Take is refused for COD and GM mail everywhere in this addon,
-    -- so the button is not offered rather than offered and rejected.
+    -- so the button is not offered rather than offered and rejected. COD mail
+    -- gets the Pay button in its place instead -- see below.
     local canTake = (h.money > 0 or h.hasItem) and h.cod == 0 and not h.isGM
         and not A.take.running
     if canTake then ui.readerTake:Show() else ui.readerTake:Hide() end
 
+    -- The COD button. "busy" only means a run is in progress -- the mail is
+    -- still a payable COD -- so the button hides for the run rather than
+    -- appearing broken.
+    local isPayable = h.cod > 0 and not h.isGM and not A.take.running
+    -- Asked of the engine rather than derived here: the affordability rule
+    -- belongs to take.PayCOD, and a button that re-derives the condition it
+    -- gates on is how a button and the thing it triggers drift apart. Only
+    -- asked for COD mail -- it costs a header read, and every other mail
+    -- already knows the answer.
+    local canPay, payWhy = false, nil
+    if isPayable then canPay, payWhy = A.take.CanPayCOD(idx) end
+
+    if isPayable then
+        ui.readerPay:Show()
+        if ui.readerPayArmed == idx and canPay then
+            ui.readerPay:SetText("Confirm " .. util.FormatMoney(h.cod, false))
+        else
+            ui.readerPay:SetText("Pay " .. util.FormatMoney(h.cod, false))
+        end
+        if canPay then ui.readerPay:Enable() else ui.readerPay:Disable() end
+    else
+        ui.readerPay:Hide()
+        ui.readerPayArmed = nil
+    end
+
+    -- Whichever button is actually occupying the bottom-left corner. Pay is
+    -- nearly twice Take's width, so anything trailing it has to follow the
+    -- live one rather than a fixed anchor -- a hidden frame keeps its last
+    -- position, and trailing THAT puts the status text through the button.
+    local corner = isPayable and ui.readerPay or ui.readerTake
+
     if h.canReply and not h.isGM and not A.take.running then
         ui.readerReturn:Show()
+        ui.readerReturn:ClearAllPoints()
+        ui.readerReturn:SetPoint("LEFT", corner, "RIGHT", 6, 0)
+        corner = ui.readerReturn
     else
         ui.readerReturn:Hide()
     end
 
+    ui.readerStatus:ClearAllPoints()
+    ui.readerStatus:SetPoint("LEFT", corner, "RIGHT", 10, 0)
+
     if h.cod > 0 then
-        ui.readerStatus:SetText("COD mail is never collected automatically.")
+        if not canPay and payWhy and payWhy ~= "busy" then
+            ui.readerStatus:SetText("|cffd05050" .. payWhy .. ".|r")
+        elseif ui.readerPayArmed == idx then
+            ui.readerStatus:SetText("|cffd05050Click again to pay. " ..
+                "This cannot be undone.|r")
+        else
+            ui.readerStatus:SetText("COD is never paid automatically \226\128\148 " ..
+                "only by this button.")
+        end
     elseif h.isGM then
         ui.readerStatus:SetText("GM mail is never collected automatically.")
     else

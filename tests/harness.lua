@@ -38,6 +38,20 @@ end
 local function newRegion()
     local r = { visible = true }
     setmetatable(r, { __index = MockIndex })
+    -- Regions get the same anchor tracking frames do. A font string that
+    -- trails a button is exactly the case this exists to check, so leaving it
+    -- to the CamelCase no-op would have made those assertions unanswerable.
+    function r:SetPoint(pt, rel, relPt, x, y)
+        local pts = rawget(self, "points")
+        if not pts then pts = {}; rawset(self, "points", pts) end
+        table.insert(pts, { point = pt, rel = rel, relPoint = relPt, x = x, y = y })
+    end
+    function r:ClearAllPoints() rawset(self, "points", {}) end
+    function r:AnchorTarget()
+        local pts = rawget(self, "points")
+        if not pts or table.getn(pts) == 0 then return nil end
+        return pts[table.getn(pts)].rel
+    end
     function r:SetText(t) rawset(self, "text", t) end
     function r:GetText() return rawget(self, "text") end
     function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
@@ -88,6 +102,23 @@ CreateFrame = function(kind, name, parent, template)
     -- colour -- there are no textures to inspect -- so a mock that swallows
     -- SetBackdropColor can only ever assert "it did not error", which is
     -- exactly how a button that looks disabled but still clicks ships.
+    -- REAL anchor tracking, enough to answer "what is this pinned to". The
+    -- CamelCase no-op swallowed SetPoint, so a widget could be anchored to a
+    -- HIDDEN frame -- which keeps its last position on 1.12 and therefore
+    -- silently draws the follower through whatever is really there -- and the
+    -- suite would have nothing to say about it.
+    function f:SetPoint(pt, rel, relPt, x, y)
+        local pts = rawget(self, "points")
+        if not pts then pts = {}; rawset(self, "points", pts) end
+        table.insert(pts, { point = pt, rel = rel, relPoint = relPt, x = x, y = y })
+    end
+    function f:ClearAllPoints() rawset(self, "points", {}) end
+    -- Which frame this is currently pinned to, or nil.
+    function f:AnchorTarget()
+        local pts = rawget(self, "points")
+        if not pts or table.getn(pts) == 0 then return nil end
+        return pts[table.getn(pts)].rel
+    end
     function f:SetBackdropColor(r, g, b, a)
         rawset(self, "bdColor", { r, g, b, a })
     end
@@ -302,6 +333,14 @@ TakeInboxItem = function(i)
     serverCalls = serverCalls + 1
     local m = INBOX[i]
     if not m or failTakeItem then return end
+    -- Taking the item off a COD mail is what PAYS the COD -- the money leaves
+    -- the player at that moment. Modelled because "the mail went away" is not
+    -- evidence a COD was paid: a COD mail carrying no item at all is simply
+    -- deleted as empty, which passed a test that only counted mails.
+    if (m.cod or 0) > 0 then
+        playerMoney = playerMoney - m.cod
+        m.cod = 0
+    end
     m.itemName = nil
     m.hasItem = nil
 end
@@ -389,6 +428,14 @@ PickupContainerItem = function(bag, slot)
     -- cursor -- this silent no-op is what produced "could not attach" in the
     -- field, and a mock that ignored the flag could never reproduce it.
     if it.locked then return end
+    -- ...and `locked` is only the CLIENT'S CACHED view. The server can be
+    -- holding a stack the cache still reports as free, which is routine right
+    -- after a BAG_UPDATE. The pickup is a silent no-op just the same, and
+    -- since GetContainerItemInfo reports it as UNLOCKED, no amount of reading
+    -- that flag can predict it -- only CursorHasItem afterwards can see it.
+    -- This is the field bug "skipped Light Feather -- the game would not
+    -- attach it", and a mock without it cannot reproduce that report.
+    if it.serverHolds then return end
     cursor = { bag = bag, slot = slot, item = it }
 end
 SplitContainerItem = function() end
@@ -397,11 +444,17 @@ UseContainerItem = function() useContainerCalls = useContainerCalls + 1 end
 
 ClickSendMailItemButton = function()
     if cursor then
-        if not failAttach then
-            attachSlot = cursor
-            -- NOW it leaves the bag: it is committed to the mail.
-            BAGS[cursor.bag][cursor.slot] = nil
+        if failAttach then
+            -- A MAIL THAT REFUSES AN ITEM LEAVES IT ON THE CURSOR. Nothing
+            -- moves, nothing errors, and the item is still held -- which is
+            -- the only signal telling "the mail will not carry this" apart
+            -- from "the pickup never landed". A mock that quietly dropped the
+            -- cursor here made the two indistinguishable.
+            return
         end
+        attachSlot = cursor
+        -- NOW it leaves the bag: it is committed to the mail.
+        BAGS[cursor.bag][cursor.slot] = nil
         cursor = nil
     elseif attachSlot then
         -- Empty cursor takes the attachment back off: it returns to the slot
@@ -797,7 +850,12 @@ local function mail(t)
              daysLeft = t.daysLeft or 20, hasItem = t.item and 1 or nil,
              itemName = t.item, wasRead = t.read and 1 or nil,
              wasReturned = nil, textCreated = nil,
-             canReply = t.canReply == false and nil or 1,
+             -- `x == false and nil or 1` is the classic Lua and/or trap: the
+             -- `and nil` arm is itself falsy, so `or 1` always fires and the
+             -- helper could never express UNRETURNABLE mail. Auction and
+             -- system mail have canReply unset, and every test that needed
+             -- that had to reach in and clear the field by hand afterwards.
+             canReply = (t.canReply ~= false) and 1 or nil,
              isGM = t.gm and 1 or nil,
              body = t.body, invoice = t.invoice, bodyDelay = t.bodyDelay }
 end
@@ -987,6 +1045,124 @@ print("== take: COD is never taken by right-click either ==")
 INBOX = { mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 } }
 check(take.Single(1) == false, "single take refuses COD")
 check(INBOX[1].money == 100, "COD mail untouched")
+
+print("== take: a COD can be paid deliberately, by index, once ==")
+-- THE FIELD BUG: there was no way to pay a COD at all. Every automatic path
+-- refuses one (rule 21, and rightly), the reader hid its Take button, and
+-- Courier's takeover keeps the Blizzard mailbox hidden -- so users were
+-- DISABLING THE ADDON to collect COD mail. Rule 21 bars paying one
+-- AUTOMATICALLY; it does not bar the player from paying one on purpose.
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", cod = 5000,
+          item = "Black Lotus" },
+    mail{ sender = "Bob", subject = "hi", money = 300 },
+}
+playerMoney = 10000000
+check(take.CanPayCOD(1), "the COD mail is payable")
+check(take.PayCOD(1), "paying it started a run")
+pump()
+check(not take.running, "the run finished")
+check(table.getn(INBOX) == 1, "the COD mail was collected", table.getn(INBOX))
+check(INBOX[1].sender == "Bob", "and the OTHER mail was left alone",
+      INBOX[1].sender)
+-- The mail going away proves nothing on its own: an empty COD mail is simply
+-- deleted. The money leaving is the only evidence the COD was actually PAID.
+check(playerMoney == 10000000 - 5000, "the COD was actually paid", playerMoney)
+check(take.codIndex == nil, "and the permission did not outlive the run")
+
+print("== take: a COD you cannot afford is refused before anything happens ==")
+INBOX = { mail{ sender = "Ann", subject = "pay up", cod = 5000,
+                item = "Black Lotus" } }
+playerMoney = 100                    -- 50s short
+local okPay, whyPay = take.CanPayCOD(1)
+check(okPay == false, "CanPayCOD says no")
+check(A.util.Contains(whyPay or "", "afford"), "and says why", whyPay)
+check(take.PayCOD(1) == false, "PayCOD refuses to start")
+check(table.getn(INBOX) == 1, "the mail is untouched")
+check(INBOX[1].cod == 5000, "and still owes its COD")
+playerMoney = 10000000
+
+print("== take: the COD permission is ONE index, not a mode ==")
+-- take.codIndex is compared against the index the engine is STANDING ON, so a
+-- permission granted for one mail cannot pay a different one. The comparison
+-- is what makes it a permission rather than a mode.
+--
+-- Driven through take.Step directly and deliberately: take.PayCOD always sets
+-- take.single, which stops the run after one mail, so a black-box run can
+-- never walk onto a second COD and therefore can never tell the two apart. A
+-- test that ran PayCOD and checked the next mail survived passed just as
+-- happily with the index comparison deleted.
+INBOX = {
+    mail{ sender = "Ann", subject = "first", cod = 5000,
+          item = "Black Lotus" },
+    mail{ sender = "Bob", subject = "second", cod = 7000,
+          item = "Arcanite Bar" },
+}
+local moneyBeforePair = playerMoney
+-- Permission for mail 1, engine standing on mail 2.
+take.running  = true
+take.mode     = take.MODE_OPEN
+take.codIndex = 1
+take.index    = 2
+take.attempts = 0
+take.lastSig  = nil
+take.pending  = nil
+take.logSnap  = nil
+take.Step()
+check(take.index == 3, "the engine stepped OVER the COD it had no permission for",
+      take.index)
+check(playerMoney == moneyBeforePair, "paying nothing", playerMoney)
+check(INBOX[2].cod == 7000, "and left it owing", INBOX[2].cod)
+take.Stop(true)
+
+-- ...and the same engine, standing on the mail it DOES have permission for,
+-- goes through with it. Both halves matter: the first alone passes if the
+-- guard simply refuses everything.
+INBOX = {
+    mail{ sender = "Ann", subject = "first", cod = 5000,
+          item = "Black Lotus" },
+}
+local moneyBeforeOne = playerMoney
+check(take.PayCOD(1), "paid the one it was pointed at")
+pump()
+check(playerMoney == moneyBeforeOne - 5000, "the money left the player",
+      playerMoney)
+check(table.getn(INBOX) == 0, "and the mail was collected", table.getn(INBOX))
+
+print("== take: Open All still refuses every COD, permission or not ==")
+-- The whole point of the narrow exception. Open All never sets codIndex, so a
+-- COD sitting in the middle of an inbox is stepped over exactly as before.
+-- TWO COD mails, and the ordinary one FIRST so that after it is taken and
+-- deleted the run stands on index 1 and then index 2 with a COD under each.
+-- A single COD tucked at one index proves nothing: a leaked permission naming
+-- a different index would sail past it unnoticed, which is exactly what an
+-- earlier version of this test did.
+INBOX = {
+    mail{ sender = "Ann", subject = "sale", money = 500 },
+    mail{ sender = "Bob", subject = "pay up", cod = 5000,
+          item = "Black Lotus" },
+    mail{ sender = "Cid", subject = "pay up too", cod = 7000,
+          item = "Arcanite Bar" },
+}
+local moneyBeforeOpen = playerMoney
+check(take.Start(take.MODE_OPEN), "Open All started")
+check(take.codIndex == nil, "with no COD permission granted")
+pump()
+check(not take.running, "and finished rather than stalling on the COD")
+check(table.getn(INBOX) == 2, "the ordinary mail was taken, both CODs left",
+      table.getn(INBOX))
+check(INBOX[1].cod == 5000 and INBOX[2].cod == 7000,
+      "neither COD was paid",
+      tostring(INBOX[1].cod) .. "/" .. tostring(INBOX[2].cod))
+check(playerMoney == moneyBeforeOpen, "and no money left the player",
+      playerMoney)
+
+print("== take: GM mail has no such exception ==")
+INBOX = { mail{ sender = "GM", subject = "ticket", cod = 5000,
+                item = "Thing", gm = true } }
+check(take.CanPayCOD(1) == false, "a GM COD is not payable")
+check(take.PayCOD(1) == false, "and PayCOD refuses it")
+check(table.getn(INBOX) == 1, "the mail is untouched")
 
 print("== take: pushes to Aegis when the seam is live ==")
 A.db.ClearLedger()
@@ -1340,6 +1516,70 @@ check(table.getn(SENT) == 0, "NOTHING was sent -- no empty mail went out",
 check(send.skipped == 2, "both were skipped rather than aborting the batch",
       send.skipped)
 check(send.Count() == 2, "attachments kept so the user can retry", send.Count())
+
+print("== send: a pickup the server silently ignores is WAITED for ==")
+-- THE FIELD BUG: "skipped Light Feather -- the game would not attach it",
+-- twice in a row, on an item plainly sitting in the player's bags.
+--
+-- GetContainerItemInfo's `locked` is the CLIENT'S CACHED view. The server can
+-- be holding a stack the cache still reports free -- routine in the moments
+-- after a BAG_UPDATE -- and PickupContainerItem is then a silent no-op. The
+-- run used to go straight on to the attach, find nothing there, and blame the
+-- item permanently. It is the same transient condition as a plain lock, so it
+-- gets the same patience.
+stockBags()
+BAGS[0][1].serverHolds = true         -- cache says free; the server disagrees
+send.Attach(0, 1)
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(8)
+check(send.sending, "the run is still alive rather than blaming the item")
+check((send.skipped or 0) == 0, "and nothing has been skipped", send.skipped)
+check(table.getn(SENT) == 0, "nothing went out yet", table.getn(SENT))
+BAGS[0][1].serverHolds = nil          -- the server lets go, as it always does
+pumpSend()
+check(not send.sending, "the run completes once the stack is free")
+check(table.getn(SENT) == 1, "the item was sent, not abandoned", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "and it was the right one", SENT[1].item)
+check((send.skipped or 0) == 0, "with nothing skipped", send.skipped)
+
+print("== send: a pickup that never lands still costs one item, not the batch ==")
+-- The budget is shared with the lock wait on purpose: an item that alternated
+-- between the two would otherwise never exhaust either and would hang the run.
+stockBags()
+BAGS[0][1].serverHolds = true         -- stuck forever
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend(400)
+check(not send.sending, "the run finished rather than hanging")
+check(send.skipped == 1, "the unreachable stack was skipped", send.skipped)
+check(table.getn(SENT) == 1, "the other item still went out", table.getn(SENT))
+check(SENT[1].item == "Copper Ore", "and it was the reachable one", SENT[1].item)
+check(BAGS[0][1] ~= nil, "the stuck item is still in the player's bag")
+
+print("== send: an item the mail REFUSES is named as unmailable ==")
+-- Distinct from the case above and it must read differently: the pickup landed,
+-- so the item is not busy -- the mail itself will not carry it (soulbound,
+-- quest, conjured). Retrying that forever would be pointless, so it is skipped
+-- at once, and the message says why rather than blaming the client.
+stockBags()
+send.Attach(0, 1)
+failAttach = true
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+failAttach = false
+check(not send.sending, "run ended")
+check(send.skipped == 1, "the item was skipped", send.skipped)
+local saidUnmailable = false
+local ui2 = 1
+while ui2 <= table.getn(DEFAULT_CHAT_FRAME.messages) do
+    if A.util.Contains(DEFAULT_CHAT_FRAME.messages[ui2], "cannot be mailed") then
+        saidUnmailable = true
+    end
+    ui2 = ui2 + 1
+end
+check(saidUnmailable,
+      "and was reported as unmailable, not as a failed attach")
 
 print("== send: MAIL_FAILED aborts the batch ==")
 stockBags()
@@ -2123,7 +2363,115 @@ check(A.util.Contains(rawget(A.ui.readerStatus, "text") or "", "COD"),
 A.ui.CloseReader()
 A.ui.OpenReader(2)
 check(A.ui.readerTake.visible == false, "no Take button on GM mail")
+check(A.ui.readerPay.visible == false, "and no Pay button either -- GM COD is barred")
 A.ui.CloseReader()
+
+print("== reader UI: paying a COD takes TWO deliberate clicks ==")
+-- The manual path that had to exist: with no way to pay a COD, and the
+-- Blizzard mailbox hidden by our takeover, users were disabling the addon.
+-- One click must never be enough -- a COD cannot be unpaid.
+INBOX = { mail{ sender = "Ann", subject = "pay up", cod = 5000,
+                item = "Black Lotus" } }
+playerMoney = 10000000
+A.ui.OpenReader(1)
+check(A.ui.readerPay.visible == true, "the Pay button is offered on COD mail",
+      tostring(A.ui.readerPay.visible))
+check(A.util.Contains(A.ui.readerPay:GetText(), "Pay"),
+      "and it is labelled Pay", A.ui.readerPay:GetText())
+check(A.util.Contains(A.ui.readerPay:GetText(), "50"),
+      "with the amount owed on it", A.ui.readerPay:GetText())
+local moneyBeforeClick = playerMoney
+A.ui.readerPay.scripts.OnClick()          -- FIRST click: arms only
+check(playerMoney == moneyBeforeClick, "the first click pays nothing",
+      playerMoney)
+check(not take.running, "and starts nothing")
+check(A.util.Contains(A.ui.readerPay:GetText(), "Confirm"),
+      "the button now asks for confirmation", A.ui.readerPay:GetText())
+A.ui.readerPay.scripts.OnClick()          -- SECOND click: commits
+pump()
+check(playerMoney == moneyBeforeClick - 5000, "the second click paid it",
+      playerMoney)
+check(table.getn(INBOX) == 0, "and the mail was collected", table.getn(INBOX))
+
+print("== reader UI: the confirmation does not survive navigation ==")
+-- An armed one-click payment left sitting under the cursor is exactly the
+-- accident the two-step exists to prevent.
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", cod = 5000, item = "Black Lotus" },
+    mail{ sender = "Bob", subject = "also pay", cod = 900, item = "Copper Ore" },
+}
+A.ui.OpenReader(1)
+A.ui.readerPay.scripts.OnClick()          -- armed on mail 1
+check(A.ui.readerPayArmed == 1, "armed")
+A.ui.CloseReader()
+check(A.ui.readerPayArmed == nil, "closing the reader disarms it")
+A.ui.OpenReader(1)
+A.ui.readerPay.scripts.OnClick()
+check(A.ui.readerPayArmed == 1, "armed again")
+A.ui.OpenReader(2)                        -- walk to a different COD mail
+check(A.ui.readerPayArmed == nil, "opening another mail disarms it")
+check(not A.util.Contains(A.ui.readerPay:GetText(), "Confirm"),
+      "and the button is back to asking, not confirming",
+      A.ui.readerPay:GetText())
+local moneyBeforeNav = playerMoney
+A.ui.readerPay.scripts.OnClick()          -- one click on the NEW mail
+check(playerMoney == moneyBeforeNav,
+      "so a single click on the new mail still pays nothing", playerMoney)
+A.ui.CloseReader()
+
+print("== reader UI: what trails the corner button follows the LIVE one ==")
+-- Pay is nearly twice Take's width. A hidden frame keeps its last position on
+-- 1.12, so anything pinned to a fixed one of the two ends up drawn straight
+-- through the other whenever the wrong button is showing.
+INBOX = {
+    mail{ sender = "Ann", subject = "pay up", cod = 5000, item = "Black Lotus" },
+    mail{ sender = "Bob", subject = "sale", money = 400 },
+}
+playerMoney = 10000000
+A.ui.OpenReader(1)                              -- COD: Pay occupies the corner
+check(A.ui.readerPay.visible == true, "Pay is the corner button here")
+check(A.ui.readerTake.visible == false, "and Take is hidden")
+check(A.ui.readerReturn:AnchorTarget() == A.ui.readerPay,
+      "Return follows Pay, not the hidden Take")
+check(A.ui.readerStatus:AnchorTarget() == A.ui.readerReturn,
+      "and the status line follows Return")
+A.ui.CloseReader()
+A.ui.OpenReader(2)                              -- ordinary: Take is back
+check(A.ui.readerTake.visible == true, "Take is the corner button here")
+check(A.ui.readerPay.visible == false, "and Pay is hidden")
+check(A.ui.readerReturn:AnchorTarget() == A.ui.readerTake,
+      "Return follows Take, not the hidden Pay")
+A.ui.CloseReader()
+
+-- ...and with Return absent entirely, the status must fall back to the corner
+-- button rather than trailing a Return frame parked wherever it last was.
+INBOX = { mail{ sender = AH, subject = "pay up", cod = 5000,
+                item = "Black Lotus", canReply = false } }
+A.ui.OpenReader(1)
+check(A.ui.readerReturn.visible == false, "auction COD cannot be returned")
+check(A.ui.readerStatus:AnchorTarget() == A.ui.readerPay,
+      "so the status trails Pay directly")
+A.ui.CloseReader()
+
+print("== reader UI: a COD you cannot afford is shown, greyed, with the reason ==")
+INBOX = { mail{ sender = "Ann", subject = "pay up", cod = 5000,
+                item = "Black Lotus" } }
+playerMoney = 100
+A.ui.OpenReader(1)
+check(A.ui.readerPay.visible == true, "the button is still shown",
+      tostring(A.ui.readerPay.visible))
+check(not A.ui.readerPay:IsEnabled(), "but greyed out")
+check(A.util.Contains(rawget(A.ui.readerStatus, "text") or "", "afford"),
+      "and the status says why", rawget(A.ui.readerStatus, "text"))
+local pooooor = playerMoney
+A.ui.readerPay.scripts.OnClick()
+A.ui.readerPay.scripts.OnClick()
+pump()
+check(playerMoney == pooooor, "and clicking it twice still pays nothing",
+      playerMoney)
+check(table.getn(INBOX) == 1, "the mail is untouched")
+A.ui.CloseReader()
+playerMoney = 10000000
 
 print("== ui: the Take All button is gone ==")
 check(A.ui.btnTakeAll == nil, "no Take All button is built")
@@ -2416,8 +2764,8 @@ INBOX = {
           item = "Silk Cloth" },
     mail{ sender = "GMBob", subject = "ticket", gm = true },
 }
--- canReply is what FrameXML itself gates its Reply button on. The mail helper
--- sets it for every mail, so clear it on the ones the server would not.
+-- canReply is what FrameXML itself gates its Reply button on, and the server
+-- leaves it unset on auction and GM mail.
 INBOX[2].canReply = nil
 INBOX[3].canReply = nil
 

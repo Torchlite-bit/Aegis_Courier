@@ -564,7 +564,14 @@ function take.Step()
     -- Never auto-pay COD, and never touch GM mail. Both are skipped in every
     -- mode -- this is not a setting, because paying a COD by accident is not
     -- recoverable.
-    if h.cod > 0 or h.isGM then
+    --
+    -- take.codIndex is the single exception and it is deliberately narrow: it
+    -- is set by take.PayCOD alone, names ONE absolute index, and is compared
+    -- against the index the engine is actually standing on. A run cannot drift
+    -- onto a different COD mail and pay it, and Open All -- which never sets
+    -- it -- still cannot pay anything at all. GM mail has no exception.
+    local codAllowed = take.codIndex ~= nil and take.codIndex == take.index
+    if (h.cod > 0 and not codAllowed) or h.isGM then
         take.Advance()
         return
     end
@@ -589,6 +596,11 @@ function take.Step()
             count   = attached and attached.count or nil,
             auction = h.auctionKind,
             returned = h.wasReturned,
+            -- What this mail COST, if anything. Only ever non-zero on the
+            -- confirmed COD path -- nothing else in the addon reaches a COD
+            -- mail -- and worth recording because it is money leaving the
+            -- player, which the ledger's sale entries would never show.
+            cod     = (h.cod > 0) and h.cod or nil,
         }
     end
 
@@ -692,6 +704,7 @@ function take.Start(mode)
     if not inbox.NumItems or inbox.NumItems() == 0 then return false end
     take.running  = true
     take.mode     = mode or take.MODE_OPEN
+    take.codIndex = nil   -- Open All can never pay a COD. See take.Step.
     take.index    = 1
     take.attempts = 0
     take.lastSig  = nil
@@ -710,6 +723,7 @@ function take.Stop(quiet)
     take.Confirm()
     take.running = false
     take.pending = nil
+    take.codIndex = nil
     inbox.Flush()
     if not quiet then take.Report() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
@@ -718,6 +732,7 @@ end
 function take.Finish()
     take.running = false
     take.pending = nil
+    take.codIndex = nil
     -- The inbox just changed shape for the last time; refresh now so
     -- inbox.lastUnread is current if the user closes the mailbox immediately
     -- (ui.SettleMailIcon reads it after the session is already gone).
@@ -759,7 +774,64 @@ function take.Single(index)
     if h.money == 0 and not h.hasItem then return false end
     take.running  = true
     take.mode     = take.MODE_OPEN
+    take.codIndex = nil
     take.index    = index
+    take.attempts = 0
+    take.lastSig  = nil
+    take.pending  = nil
+    take.logSnap  = nil
+    ResetCounters()
+    take.single   = true
+    take.armed    = true
+    if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+    return true
+end
+
+-- Is this mail one the player could pay a COD on, and can they afford it?
+--
+-- Returns ok, reason. Split out from take.PayCOD so the UI can answer "should
+-- the button be offered, and if not why" without starting anything -- the same
+-- shape as send.Validate, and for the same reason: a rule the UI gates a
+-- button on has to be askable without side effects, or the button and the
+-- engine drift apart.
+function take.CanPayCOD(index)
+    if take.running then return false, "busy" end
+    local h = inbox.Header(index)
+    if not h then return false, "no such mail" end
+    if h.isGM then return false, "GM mail" end
+    if h.cod <= 0 then return false, "not COD" end
+    if GetMoney and (GetMoney() or 0) < h.cod then
+        return false, "you cannot afford this COD (" ..
+            util.FormatMoney(h.cod, false) .. " needed)"
+    end
+    return true, nil
+end
+
+-- Pay a COD and collect the mail.
+--
+-- THE ONLY path in this addon that pays a COD, and the only caller is the
+-- reader's two-step confirmation -- one click arms, a second click commits.
+-- CLAUDE.md rule 21 bars COD from being taken AUTOMATICALLY, which is what
+-- Open All, Delete Read and right-click still obey; it does not bar the player
+-- from deliberately paying one they are looking at. Before this existed there
+-- was no way to pay a COD at all while Courier's takeover held the Blizzard
+-- mailbox hidden, and users were disabling the addon to collect their mail.
+--
+-- Runs on the same single-mail machine as take.Single so there is exactly one
+-- code path that mutates mail; the ONLY difference is that it names its index
+-- in take.codIndex, which take.Step consults before skipping a COD.
+function take.PayCOD(index)
+    local ok, why = take.CanPayCOD(index)
+    if not ok then
+        if why and why ~= "busy" and why ~= "not COD" then
+            A.Print(why .. ".")
+        end
+        return false
+    end
+    take.running  = true
+    take.mode     = take.MODE_OPEN
+    take.index    = index
+    take.codIndex = index
     take.attempts = 0
     take.lastSig  = nil
     take.pending  = nil
