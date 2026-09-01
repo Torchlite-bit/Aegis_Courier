@@ -9,6 +9,72 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.8.2]
+
+The send loop is now TurtleMail's, down to which frame each mail leaves on.
+`/reload`.
+
+### Changed
+- **The first mail of a batch goes out immediately**, not on the next frame.
+  TurtleMail's send button calls `sendmail_send()` straight from the click
+  handler; Courier armed a timer and waited. Nothing about the first mail needs
+  a frame boundary.
+- **The send driver stays awake for the whole batch.** A hidden frame runs no
+  `OnUpdate`, and a frame shown during this frame's work does not run one until
+  the next — so a driver that went to sleep between mails cost a frame every
+  time an acknowledgement had to wake it. With a real server there are always
+  frames of latency in between, so it slept on every single mail. TurtleMail's
+  update frame is simply always live while the mailbox is open.
+
+### Notes
+- Measured under a modelled four-frame server latency, three mails: **11 frames
+  now, 13 before** — one wasted frame per mail, plus one more at the start of
+  every batch. The harness had been unable to see any of this, because its mock
+  ticked hidden frames and treated `Show()` as taking effect immediately;
+  it now models both, which is what makes these changes testable at all.
+- With this, Courier's send loop matches TurtleMail call for call and frame for
+  frame: same five-call attach sequence, no pre-emptive bag inspection, no
+  settle, first mail synchronous, one frame per mail thereafter. The measured
+  Lua cost of a twelve-mail batch is **0.1 ms** — there is nothing left to win
+  on this side without changing what the client itself does.
+
+## [1.8.1]
+
+Speed, measured properly this time. `/reload`.
+
+### Changed
+- **A mail's gold and its item are now collected in ONE round trip.** A server
+  call is a full latency wait, and that — not Lua time — is what you actually
+  wait on: an entire twelve-mail send is under a millisecond of Lua. Courier
+  spent one trip on the money, waited, then another on the item, so a mail
+  holding both cost three trips including the delete. Measured over a 70-mail
+  mailbox: **210 waits before, 140 after**.
+  - Issuing both together is safe in a way folding the *delete* in is not:
+    neither call can destroy anything. A refused take leaves the mail as it
+    was, and the next step finds the remainder and asks again.
+  - Money and item are now confirmed **separately**, which the combined step
+    makes necessary: a full bag rejects the item while the gold arrives
+    anyway, and booking them together would credit an item still sitting in
+    the mail — then count it again when the next step took it properly.
+- **One refused mail no longer taxes the rest of the batch.** Every
+  `MAIL_FAILED` used to add 0.3s to the gap between mails and *keep* it for the
+  remaining ones, on the theory that a server which refused once will refuse
+  again. On a twelve-item send one hiccup on mail two cost nearly nine seconds
+  across the other ten. TurtleMail has no such delay and does not need one —
+  what makes a batch survive a refusal is the per-mail retry, which resets on
+  success. The pause before retrying **the refused mail itself** is also down
+  from 1.0s to 0.3s.
+
+### Notes
+- Courier still spends **2 round trips per mail** collecting, against
+  TurtleMail's 1. The difference is the delete: TurtleMail fires
+  `TakeInboxItem` and `DeleteInboxItem` back to back without checking, so a bag
+  that fills mid-run loses the item it could not take. Courier verifies the
+  mail is empty first (rule 14), and that verification is what costs the second
+  trip. Closing the remaining gap safely means walking the inbox **backwards**
+  — deleting index *i* does not shift anything below it — which is a change to
+  index discipline, not a constant, and is not in this release.
+
 ## [1.8.0]
 
 Sending now follows TurtleMail's path, unmailable items are caught when you add
