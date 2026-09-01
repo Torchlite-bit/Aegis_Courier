@@ -9,6 +9,53 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.8.0]
+
+Sending now follows TurtleMail's path, unmailable items are caught when you add
+them, and the Inbox gains a **Take Sold** button. `/reload`.
+
+### Added
+- **Take Sold.** Collects auction **sales** and leaves everything else exactly
+  where it is — expired and cancelled auctions with goods still attached,
+  outbid refunds, and mail from real people. For the bank alt whose mailbox is
+  a hundred auction mails and four letters, where Open All is too blunt.
+  - "Sold" means the client's own localized *"Auction successful"* subject, not
+    "anything from an auction house". Outbid mail also carries money — your own
+    returned bid — and expired mail carries the goods back; neither is a sale.
+
+### Changed
+- **The send loop now matches TurtleMail's, call for call.** Courier used to
+  re-resolve every attachment's bag coordinate and poll its `locked` flag
+  *before* picking it up. That is correct, but it was paid on every item
+  whether or not anything was wrong — and `locked` is the client's *cached*
+  view, routinely still set on a stack the server has already released in the
+  frames after the previous mail's `BAG_UPDATE`. So Courier kept waiting
+  `LOCK_WAIT` on locks that were not really there.
+  - Measured over three items with the flag stuck for three polls: **45 frames
+    before, 3 frames after** — roughly 0.24s per item of pure waiting, gone. On
+    a clean batch the bag is now not inspected at all (asserted as zero).
+  - **The careful path is not gone, it is demoted.** A stack that genuinely
+    moved is still relocated by name, and a stack the server genuinely holds is
+    still waited for — that work now happens only when an attach actually
+    fails, which is what makes it free the rest of the time.
+  - The one thing Courier still does that TurtleMail does not is **compare the
+    attached item's name to the one queued**. "Is something attached?" is not
+    "is the thing I queued attached?", and getting that wrong mails the wrong
+    item to the recipient silently.
+- **An item the mail will not carry is now refused when you attach it**, naming
+  the item, instead of being discovered mid-batch. Ported from TurtleMail's
+  `sendmail_pickup_mailable`: with no "can this be mailed" flag anywhere in the
+  1.12 API, the only way to know is to try it against the real attachment slot
+  and put it straight back.
+
+### Fixed
+- **"this item cannot be mailed" fired on items that were perfectly
+  mailable.** 1.7.1 drew that conclusion inside the send loop from the item
+  still being on the cursor — but an attach can fail there for transient
+  reasons too, so a Formula that had merely lost a race was condemned. The
+  verdict now comes only from the attach-time probe, which asks the question
+  directly and can actually answer it.
+
 ## [1.7.1]
 
 Two bugs from the field: COD mail could not be collected at all, and an item

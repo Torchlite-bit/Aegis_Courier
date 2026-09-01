@@ -220,6 +220,51 @@ function send.IndexOf(bag, slot)
     return nil
 end
 
+-- Is this stack something the mail will actually carry?
+--
+-- Ported from TurtleMail's `sendmail_pickup_mailable`, and the technique is
+-- the only one 1.12 offers: there is no "can this be mailed" flag anywhere in
+-- the API, so the only way to find out is to TRY it and put it straight back.
+-- Five calls, no server round trip, no event -- the attachment slot is client
+-- state until SendMail is called.
+--
+--     empty the slot -> pick the stack up -> attach -> look -> take it back off
+--
+-- This is asked when the user ADDS an item to the list, which is the whole
+-- point. Courier used to discover it mid-batch and report "this item cannot be
+-- mailed" from inside the send loop, where it was both too late to act on and
+-- wrong: the same message fired on a perfectly mailable Formula whose attach
+-- had merely lost a race. A question with a definite answer belongs where the
+-- user can still do something about it.
+function send.IsMailable(bag, slot)
+    -- Needs a LIVE mail session. Without one the attach silently does nothing
+    -- and GetSendMailItem answers nil for everything -- which would condemn
+    -- every item in the game as unmailable. Away from a mailbox, say yes and
+    -- let the send loop find out.
+    if not send.atMailbox then return true end
+    if not ClickSendMailItemButton or not GetSendMailItem then return true end
+    -- Never while a batch is in flight: this moves the attachment slot.
+    if send.sending then return true end
+
+    if ClearCursor then ClearCursor() end
+    ClickSendMailItemButton()
+    if ClearCursor then ClearCursor() end
+
+    if orig_PickupContainerItem then
+        orig_PickupContainerItem(bag, slot)
+    else
+        PickupContainerItem(bag, slot)
+    end
+    ClickSendMailItemButton()
+    local ok = GetSendMailItem() and true or false
+    -- Take it back off whatever the answer was, and put the cursor down. The
+    -- slot must be left exactly as it was found -- this is a probe, not a
+    -- send, and anything left attached here would be posted by the next mail.
+    ClickSendMailItemButton()
+    if ClearCursor then ClearCursor() end
+    return ok
+end
+
 function send.Attach(bag, slot)
     if send.sending then return false end
     if send.Count() >= send.MAX_ATTACHMENTS then
@@ -229,6 +274,10 @@ function send.Attach(bag, slot)
     if send.IndexOf(bag, slot) then return false end
     local info = send.SlotInfo(bag, slot)
     if not info then return false end
+    if not send.IsMailable(bag, slot) then
+        A.Print((info.name or "that item") .. " cannot be mailed.")
+        return false
+    end
     table.insert(send.attachments, info)
     if A.ui and A.ui.RefreshSend then A.ui.RefreshSend() end
     return true
@@ -453,99 +502,90 @@ function send.Step()
     send.inFlight = attachment
 
     if attachment then
-        -- EMPTY THE MAIL'S ATTACHMENT SLOT FIRST, before judging where
-        -- anything is. A mail the server refused leaves its item sitting in
-        -- that slot rather than back in the bags, and resolving the coordinate
-        -- while it is parked there concludes the stack has vanished -- which
-        -- would skip every MAIL_FAILED retry instead of performing it.
+        -- THE FAST PATH, and it is TurtleMail's, call for call:
         --
-        -- ClearCursor on either side so a stray cursor item cannot be posted
-        -- by mistake, and so the item this click lifts off goes home.
+        --     ClearCursor(); ClickSendMailItemButton(); ClearCursor()
+        --     PickupContainerItem(bag, slot)
+        --     ClickSendMailItemButton()
+        --     if not GetSendMailItem() then ... end
+        --
+        -- Nothing is inspected BEFORE the pickup. Courier used to re-resolve
+        -- the coordinate and poll `locked` on every item first, which is
+        -- correct but expensive: relocating costs a full walk of five bags
+        -- with a link read and a pattern match per slot, and a `locked` slot
+        -- costs a 0.1s wait -- and `locked` reads set right after the previous
+        -- mail's BAG_UPDATE constantly. Paid per item, that is most of the gap
+        -- users measured against TurtleMail side by side.
+        --
+        -- The insight is that the check is only worth paying for when
+        -- something actually went wrong, and the attach VERIFICATION below
+        -- already detects that for free. So: charge ahead like TurtleMail, and
+        -- fall back to the careful path only on failure. A healthy item now
+        -- costs exactly what it costs TurtleMail; a problem item still gets
+        -- every bit of the relocating and lock-waiting it used to.
+        --
+        -- The FIRST click still has to happen, and before anything else: a
+        -- mail the server refused leaves its item sitting in the attachment
+        -- slot rather than back in the bags, and the attach below cannot land
+        -- while it is parked there. ClearCursor on either side so a stray
+        -- cursor item cannot be posted by mistake, and so the item this click
+        -- lifts off goes home.
         if ClearCursor then ClearCursor() end
         ClickSendMailItemButton()
         if ClearCursor then ClearCursor() end
-
-        -- Only now is the coordinate meaningful. See the "Locating an
-        -- attachment at send time" note above.
-        local status = send.ResolveSlot(attachment)
-
-        if status == send.SLOT_LOCKED then
-            -- The server has this stack. Do NOT pick it up: on a locked slot
-            -- PickupContainerItem does nothing at all, no error and no event,
-            -- and the attach that follows would silently post nothing.
-            WaitForBusySlot(attachment)
-            return
-        end
-
-        if status == send.SLOT_GONE then
-            SkipAttachment(attachment, "it is no longer in your bags.")
-            return
-        end
 
         if orig_PickupContainerItem then
             orig_PickupContainerItem(attachment.bag, attachment.slot)
         else
             PickupContainerItem(attachment.bag, attachment.slot)
         end
-
-        -- DID THE PICKUP ACTUALLY LAND?
-        --
-        -- ResolveSlot cleared this slot a moment ago, but what it read was
-        -- GetContainerItemInfo's `locked` -- and that is the CLIENT'S CACHED
-        -- view, not the server's. The cache can still read clear while the
-        -- server is holding the stack, which is routine in the moments after a
-        -- BAG_UPDATE and therefore commonplace in the middle of a batch. The
-        -- pickup is then a silent no-op: no error, no event, nothing on the
-        -- cursor (CLAUDE.md rule 24).
-        --
-        -- CursorHasItem is the only honest answer to "did that work", and not
-        -- asking is what shipped the reported bug: a routine, transient lock
-        -- came out as "skipped Light Feather -- the game would not attach it"
-        -- and the item was abandoned for the rest of the run. A stack the
-        -- server is briefly holding is exactly what the lock budget above
-        -- exists to wait for, so wait for it here too rather than blaming the
-        -- item for the client's stale cache.
-        if CursorHasItem and not CursorHasItem() then
-            WaitForBusySlot(attachment)
-            return
-        end
-
         ClickSendMailItemButton()
 
         -- Verify the attach landed AND that it landed with the RIGHT item.
         --
-        -- The old check asked only whether something was attached, which is
-        -- not the same question: if a different stack had moved into the
-        -- remembered slot, the check passed and that item went to the
-        -- recipient instead. Resolve above makes this rare; the compare makes
-        -- it impossible.
-        if GetSendMailItem then
-            local onSlot = GetSendMailItem()
-            local wrong = onSlot and attachment.name and attachment.name ~= "?"
-                and onSlot ~= attachment.name
-            if not onSlot or wrong then
-                if onSlot then
-                    -- Take the wrong item straight back off before it can be
-                    -- posted, and put it back where it came from.
-                    ClickSendMailItemButton()
-                end
-                -- The pickup DID land -- we just checked -- so anything still
-                -- on the cursor means the mail refused it. That is the game
-                -- saying the item cannot be posted at all (soulbound, quest,
-                -- conjured), which no amount of retrying will change. Say so
-                -- plainly instead of the old catch-all, which blamed this for
-                -- every failure including the transient one above.
-                local stillHeld = CursorHasItem and CursorHasItem()
-                if ClearCursor then ClearCursor() end
-                if wrong then
-                    SkipAttachment(attachment, "it moved in your bags mid-send.")
-                elseif stillHeld then
-                    SkipAttachment(attachment, "this item cannot be mailed.")
-                else
-                    SkipAttachment(attachment, "the game would not attach it.")
-                end
+        -- "Is something attached?" is not the same question as "is the thing I
+        -- queued attached?" -- a stack that moved out and was replaced passes
+        -- the first and mails the WRONG item to the recipient, silently. This
+        -- is the one check TurtleMail does not make and the one place Courier
+        -- deliberately does not copy it (CLAUDE.md rule 24).
+        local onSlot = GetSendMailItem and GetSendMailItem()
+        local wrong = onSlot and attachment.name and attachment.name ~= "?"
+            and onSlot ~= attachment.name
+
+        if GetSendMailItem and (not onSlot or wrong) then
+            -- Take whatever is on the slot back off before it can be posted,
+            -- and put the cursor down, so the recovery below starts from the
+            -- same clean state the step began with.
+            if onSlot then ClickSendMailItemButton() end
+            if ClearCursor then ClearCursor() end
+
+            -- RECOVERY. Now -- and only now -- pay for the careful path.
+            local status = send.ResolveSlot(attachment)
+            if status == send.SLOT_LOCKED then
+                -- The stack is busy. Routine: the previous mail's BAG_UPDATE
+                -- has not landed. Wait rather than blaming the item.
+                WaitForBusySlot(attachment)
                 return
             end
+            if status == send.SLOT_GONE then
+                SkipAttachment(attachment, "it is no longer in your bags.")
+                return
+            end
+            -- The slot resolved clean, so the coordinate is good now even
+            -- though the attach just failed on it -- either the stack moved
+            -- and ResolveSlot has rewritten the address, or the server was
+            -- holding it a moment ago with `locked` not yet set. Both are
+            -- worth one more attempt, on the same budget, rather than a
+            -- verdict about the item.
+            if wrong then
+                -- Exception: a different item really was in the slot. Say so,
+                -- because retrying an address that resolves to the wrong stack
+                -- is how the wrong thing gets mailed.
+                SkipAttachment(attachment, "it moved in your bags mid-send.")
+                return
+            end
+            WaitForBusySlot(attachment)
+            return
         end
     end
 
@@ -684,10 +724,10 @@ local waited = 0
 --
 -- The fixed 0.3s this replaces was chosen when MAIL_FAILED abandoned the whole
 -- batch, so any race was catastrophic and worth over-paying to avoid. That
--- handler now retries per mail with a budget that resets on success, and the
--- attach path re-resolves and waits on locks rather than trusting a stale
--- coordinate -- so the race it was insuring against is handled where it
--- happens. On a 12-item send the old constant cost 3.6 seconds of pure
+-- handler now retries per mail with a budget that resets on success, and a
+-- failed attach falls back to re-resolving and waiting on locks rather than
+-- trusting a stale coordinate -- so the race it was insuring against is
+-- handled where it happens. On a 12-item send the old constant cost 3.6 seconds of pure
 -- waiting, paid by every user on every batch to guard the worst connection.
 send.SETTLE_MIN  = 0
 send.SETTLE_STEP = 0.3
@@ -844,6 +884,12 @@ function send.HarvestContacts()
     end
     return added
 end
+
+-- The mail session, tracked here rather than read off the UI: send.IsMailable
+-- probes the real attachment slot and must never do so without a live session.
+send.atMailbox = false
+A.RegisterEvent("MAIL_SHOW",   function() send.atMailbox = true  end)
+A.RegisterEvent("MAIL_CLOSED", function() send.atMailbox = false end)
 
 A.OnLoad(function()
     send.InstallHooks()
