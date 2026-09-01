@@ -1002,10 +1002,28 @@ function ui.BuildInboxPanel()
     -- so the run stalled after the first mail every single time. Open All does
     -- the job users actually wanted and does it correctly. The engine mode
     -- survives for tests; see the note on take.MODE_TAKE.
+    -- Take Sold: the same Open All run, filtered to auction SALES.
+    --
+    -- The case it exists for is the bank alt whose mailbox is a hundred
+    -- auction mails and a handful of letters from real people. Open All takes
+    -- everything and deletes it; this collects the gold from sales and leaves
+    -- everything else -- expired and cancelled auctions with goods to sort,
+    -- outbid refunds, and mail from players -- exactly where it was.
+    --
+    -- "sold" is Courier's own subject classification, so it means mail whose
+    -- subject the CLIENT's own localized format marks as a completed sale. It
+    -- is deliberately not "anything from an auction house": outbid mail also
+    -- carries money -- the player's own returned bid -- and expired mail
+    -- carries the goods back.
+    local takeSold = ActionButton("TakeSold", "Take Sold", 82, function()
+        take.Start(take.MODE_OPEN, "sold")
+    end)
+    takeSold:SetPoint("LEFT", openAll, "RIGHT", 4, 0)
+
     local delRead = ActionButton("DeleteRead", "Delete Read", 90, function()
         take.Start(take.MODE_DELETE)
     end)
-    delRead:SetPoint("LEFT", openAll, "RIGHT", 4, 0)
+    delRead:SetPoint("LEFT", takeSold, "RIGHT", 4, 0)
 
     local stop = ActionButton("Stop", "Stop", 56, function()
         take.Stop()
@@ -1013,6 +1031,7 @@ function ui.BuildInboxPanel()
     stop:SetPoint("LEFT", delRead, "RIGHT", 12, 0)
 
     ui.btnOpenAll, ui.btnDeleteRead, ui.btnStop = openAll, delRead, stop
+    ui.btnTakeSold = takeSold
 
     -- Running total for this mailbox visit, to the right of the buttons.
     local collected = Label(panel, "GameFontNormalSmall", C.green)
@@ -1525,6 +1544,10 @@ function ui.OnTakeStateChanged()
 
     SetEnabled(ui.btnOpenAll,
         atMailbox and not running and take.HasWork(take.MODE_OPEN))
+    -- Asked with the SAME filter the run uses, so the button cannot light up
+    -- for work the run would then step over.
+    SetEnabled(ui.btnTakeSold,
+        atMailbox and not running and take.HasWork(take.MODE_OPEN, "sold"))
     SetEnabled(ui.btnDeleteRead,
         atMailbox and not running and take.HasWork(take.MODE_DELETE))
     SetEnabled(ui.btnStop, running)

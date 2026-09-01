@@ -1,4 +1,4 @@
-# Aegis: Courier (v1.7.1)
+# Aegis: Courier (v1.8.0)
 
 [![Discord](https://img.shields.io/badge/Discord-join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/hsgPTNkSX)
 [![Octo WoW](https://img.shields.io/badge/Octo%20WoW-1.18.1-8A2BE2?style=flat-square&labelColor=555)](https://octowow.st/)
@@ -93,6 +93,7 @@ enough for the 1.12 client to notice a new `.toc` entry.
 | Action | What it does |
 |---|---|
 | **Open All** | take gold and items, then delete the emptied mail |
+| **Take Sold** | collect auction **sales** only — leaves expired and cancelled auctions, outbid refunds and player mail untouched |
 | **Delete Read** | delete read mail that is already empty — never anything holding gold or an item |
 | **left-click a mail** | open and read it |
 | **right-click a mail** | take that one mail |

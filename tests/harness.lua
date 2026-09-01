@@ -394,6 +394,7 @@ CursorHasItem = function() return cursor ~= nil end
 -- PickupContainerItem on a locked slot is a silent no-op on the real client.
 -- A slot is locked while its item is on the cursor, or while a test pins it.
 GetContainerItemInfo = function(bag, slot)
+    containerInfoCalls = containerInfoCalls + 1
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
     local locked = it.locked
@@ -402,12 +403,18 @@ GetContainerItemInfo = function(bag, slot)
 end
 -- The backpack is bag 0 and always has 16 slots; a nil BAGS entry is a bag the
 -- character does not have equipped.
+-- Bag-inspection call counts. The send fast path's whole claim is that a
+-- HEALTHY item costs no bag inspection at all -- relocating a stack walks five
+-- bags with a link read and a pattern match per slot -- so the claim is
+-- asserted as a number rather than described.
+containerInfoCalls, containerLinkCalls = 0, 0
 GetContainerNumSlots = function(bag)
     if type(bag) ~= "number" or bag < 0 or bag > 4 then return 0 end
     if bag == 0 or BAGS[bag] then return 16 end
     return 0
 end
 GetContainerItemLink = function(bag, slot)
+    containerLinkCalls = containerLinkCalls + 1
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
     return "|cff1eff00|Hitem:1:0:0:0|h[" .. it.name .. "]|h|r"
@@ -1046,6 +1053,98 @@ INBOX = { mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 } }
 check(take.Single(1) == false, "single take refuses COD")
 check(INBOX[1].money == 100, "COD mail untouched")
 
+print("== take: Take Sold collects sales and leaves everything else ==")
+-- The bank-alt case: a mailbox that is mostly auction traffic plus a few real
+-- letters. Open All takes the lot; this takes the gold from completed sales
+-- and leaves the rest untouched.
+INBOX = {
+    mail{ sender = AH,    subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Ann", subject = "hey",  money = 300 },
+    mail{ sender = AH,    subject = "Auction expired: Black Lotus", item = "Black Lotus" },
+    mail{ sender = AH,    subject = "Outbid on Arcanite Bar", money = 1200 },
+    mail{ sender = AH,    subject = "Auction successful: Copper Ore", money = 400 },
+}
+check(take.HasWork(take.MODE_OPEN, "sold"), "there are sales to take")
+check(take.Start(take.MODE_OPEN, "sold"), "the run started")
+pump()
+check(not take.running, "and finished rather than stalling on a skip")
+check(table.getn(INBOX) == 3, "the two sales were collected", table.getn(INBOX))
+check(INBOX[1].sender == "Ann", "the player letter survived", INBOX[1].sender)
+check(INBOX[1].money == 300, "with its gold untouched", INBOX[1].money)
+check(A.util.Contains(INBOX[2].subject, "expired"),
+      "the expired auction survived", INBOX[2].subject)
+check(INBOX[2].hasItem, "still holding its goods")
+check(A.util.Contains(INBOX[3].subject, "Outbid"),
+      "and the outbid refund survived", INBOX[3].subject)
+check(INBOX[3].money == 1200, "with its returned bid untouched", INBOX[3].money)
+check(take.money == 9900, "only the two sales were collected", take.money)
+check(take.only == nil, "the filter did not outlive the run")
+
+print("== take: Take Sold books BOTH sales in the ledger ==")
+-- Filtered or not, collection is still what writes the ledger -- and outbid
+-- money must still never be booked as income (rule 20).
+A.db.ClearLedger()
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = AH, subject = "Outbid on Arcanite Bar", money = 1200 },
+    mail{ sender = AH, subject = "Auction successful: Copper Ore", money = 400 },
+}
+take.Start(take.MODE_OPEN, "sold")
+pump()
+check(table.getn(A.db.Ledger()) == 2, "two sales booked",
+      table.getn(A.db.Ledger()))
+check(table.getn(INBOX) == 1, "the outbid mail is still there", table.getn(INBOX))
+
+print("== take: Take Sold with nothing sold does nothing at all ==")
+-- The filtered run walks past far more mail than an ordinary one, so its skips
+-- are the ones most likely to expose a missing re-arm (rule 16). A mailbox
+-- with no sales at all is that walk end to end.
+INBOX = {
+    mail{ sender = "Ann", subject = "hey", money = 300 },
+    mail{ sender = AH,    subject = "Outbid on Arcanite Bar", money = 1200 },
+    mail{ sender = "Bob", subject = "parcel", item = "Black Lotus" },
+}
+check(take.HasWork(take.MODE_OPEN, "sold") == false,
+      "the button would not be offered")
+check(take.Start(take.MODE_OPEN, "sold"), "but a run started anyway still...")
+pump()
+check(not take.running, "...walks the whole inbox and STOPS rather than hanging")
+check(table.getn(INBOX) == 3, "having taken nothing", table.getn(INBOX))
+check(take.money == 0, "and collected nothing", take.money)
+
+print("== take: a stopped filtered run does not leak its filter ==")
+-- take.Start always overwrites take.only, so a leak cannot show up there --
+-- but take.Single and take.PayCOD do not go through Start, and a filter left
+-- behind would make a right-clicked letter silently do nothing. Those are the
+-- entry points a stale filter can actually reach.
+INBOX = {
+    mail{ sender = AH,    subject = "Auction successful: Silk Cloth", money = 9500 },
+    mail{ sender = "Ann", subject = "hey", money = 300 },
+}
+take.Start(take.MODE_OPEN, "sold")
+take.Stop(true)                        -- user hits Stop mid-run
+check(take.only == nil, "Stop cleared the filter")
+-- Right-click the PLAIN letter, which a leaked "sold" filter would skip.
+check(take.Single(2), "a single take on a non-sale still starts")
+pump()
+check(not take.running, "and finishes")
+check(table.getn(INBOX) == 1, "the letter was taken", table.getn(INBOX))
+check(INBOX[1].subject ~= "hey", "and it was the right mail", INBOX[1].subject)
+
+print("== take UI: the Take Sold button tracks the same filter ==")
+INBOX = { mail{ sender = "Ann", subject = "hey", money = 300 } }
+A.ui.mailOpen = true
+A.ui.OnTakeStateChanged()
+check(A.ui.btnOpenAll:IsEnabled(), "Open All is live for a plain money mail")
+check(not A.ui.btnTakeSold:IsEnabled(),
+      "but Take Sold is not -- there are no sales")
+INBOX = {
+    mail{ sender = AH, subject = "Auction successful: Silk Cloth", money = 9500 },
+}
+A.ui.OnTakeStateChanged()
+check(A.ui.btnTakeSold:IsEnabled() and true,
+      "and it lights up once a sale is there")
+
 print("== take: a COD can be paid deliberately, by index, once ==")
 -- THE FIELD BUG: there was no way to pay a COD at all. Every automatic path
 -- refuses one (rule 21, and rightly), the reader hid its Take button, and
@@ -1517,6 +1616,81 @@ check(send.skipped == 2, "both were skipped rather than aborting the batch",
       send.skipped)
 check(send.Count() == 2, "attachments kept so the user can retry", send.Count())
 
+print("== send: a healthy batch never walks the bags ==")
+-- The speed fix, as a number. Courier used to re-resolve every attachment's
+-- coordinate and poll its `locked` flag BEFORE picking it up -- correct, but
+-- paid on every item whether or not anything was wrong, and a relocate walks
+-- five bags with a link read and a pattern match per slot. That work is now
+-- spent only when an attach actually fails, which is TurtleMail's shape and
+-- most of the gap users measured side by side.
+--
+-- Asserted as zero rather than "fewer": one stray inspection per item is
+-- exactly how this creeps back.
+stockBags()
+send.atMailbox = false                 -- no mailable probe; measuring the SEND
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+containerInfoCalls, containerLinkCalls = 0, 0
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "the batch finished")
+check(table.getn(SENT) == 3, "all three mails went out", table.getn(SENT))
+check(containerInfoCalls == 0,
+      "no bag slot was inspected during a clean batch", containerInfoCalls)
+check(containerLinkCalls == 0,
+      "and no bag was walked to relocate anything", containerLinkCalls)
+
+print("== send: a STALE cached lock costs nothing ==")
+-- Where the measured time actually went. `locked` is the client's cached view
+-- and it is routinely still set on a stack the server has already released --
+-- normal in the frames after the previous mail's BAG_UPDATE. The old path
+-- consulted that flag BEFORE picking anything up and waited LOCK_WAIT on it,
+-- so every item paid for a lock that was not really there. Measured over three
+-- items with the flag stuck for three polls: 45 frames then, 3 frames now.
+--
+-- The fast path does not ask. It picks the stack up, and the pickup either
+-- works -- which is the answer -- or it does not and the recovery path asks
+-- properly. A stack that is GENUINELY held still gets waited for; the test
+-- above this one covers that and must keep passing.
+stockBags()
+send.atMailbox = false
+-- Cached flag set, but the stack itself is free: PickupContainerItem checks
+-- `locked`, and this is deliberately NOT that field.
+local realInfo = GetContainerItemInfo
+GetContainerItemInfo = function(bag, slot)
+    local it = BAGS[bag] and BAGS[bag][slot]
+    if it and it.staleLock then return it.texture, it.count, 1, 1, nil end
+    return realInfo(bag, slot)
+end
+BAGS[0][1].staleLock = true
+BAGS[0][2].staleLock = true
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "x", "", 0, false, false)
+-- ONE pump tick per mail plus its confirmation. If the run consulted the stale
+-- flag it would arm a LOCK_WAIT instead and still be going.
+pumpSend(4)
+GetContainerItemInfo = realInfo
+check(not send.sending, "the batch finished without waiting on a lie")
+check(table.getn(SENT) == 2, "both mails went out", table.getn(SENT))
+check((send.skipped or 0) == 0, "and nothing was skipped", send.skipped)
+
+print("== send: a FAILED attach still pays for the careful path ==")
+-- The other half: dropping the pre-emptive check must not drop the recovery.
+-- A stack that moved is still found and still mailed -- it just costs the walk
+-- only when it is actually needed.
+stockBags()
+send.Attach(0, 1)
+BAGS[0][9] = BAGS[0][1]                -- the player reshuffles before sending
+BAGS[0][1] = nil
+containerInfoCalls, containerLinkCalls = 0, 0
+send.Start("Ann", "x", "", 0, false, false)
+pumpSend()
+check(not send.sending, "the run finished")
+check(table.getn(SENT) == 1, "the moved stack was still mailed", table.getn(SENT))
+check(SENT[1].item == "Silk Cloth", "and it was the right item", SENT[1].item)
+check((send.skipped or 0) == 0, "nothing was skipped", send.skipped)
+check(containerLinkCalls > 0,
+      "the bag walk DID happen -- once it was needed", containerLinkCalls)
+
 print("== send: a pickup the server silently ignores is WAITED for ==")
 -- THE FIELD BUG: "skipped Light Feather -- the game would not attach it",
 -- twice in a row, on an item plainly sitting in the player's bags.
@@ -1556,20 +1730,19 @@ check(table.getn(SENT) == 1, "the other item still went out", table.getn(SENT))
 check(SENT[1].item == "Copper Ore", "and it was the reachable one", SENT[1].item)
 check(BAGS[0][1] ~= nil, "the stuck item is still in the player's bag")
 
-print("== send: an item the mail REFUSES is named as unmailable ==")
--- Distinct from the case above and it must read differently: the pickup landed,
--- so the item is not busy -- the mail itself will not carry it (soulbound,
--- quest, conjured). Retrying that forever would be pointless, so it is skipped
--- at once, and the message says why rather than blaming the client.
+print("== send: an item the mail REFUSES is rejected when it is ATTACHED ==")
+-- TurtleMail's sendmail_pickup_mailable, and the reason it belongs here rather
+-- than in the send loop: the answer is definite and cheap, so asking it when
+-- the user adds the item means they find out while they can still do something
+-- about it. Courier used to discover this mid-batch, which was both too late
+-- and -- because an attach can fail for transient reasons too -- sometimes
+-- simply wrong.
 stockBags()
-send.Attach(0, 1)
+send.atMailbox = true
 failAttach = true
 DEFAULT_CHAT_FRAME.messages = {}
-send.Start("Ann", "x", "", 0, false, false)
-pumpSend()
-failAttach = false
-check(not send.sending, "run ended")
-check(send.skipped == 1, "the item was skipped", send.skipped)
+check(send.Attach(0, 1) == false, "an unmailable item is refused")
+check(send.Count() == 0, "and never reaches the list", send.Count())
 local saidUnmailable = false
 local ui2 = 1
 while ui2 <= table.getn(DEFAULT_CHAT_FRAME.messages) do
@@ -1578,8 +1751,25 @@ while ui2 <= table.getn(DEFAULT_CHAT_FRAME.messages) do
     end
     ui2 = ui2 + 1
 end
-check(saidUnmailable,
-      "and was reported as unmailable, not as a failed attach")
+check(saidUnmailable, "the user is told which item and why")
+check(BAGS[0][1] ~= nil, "and the probe left the stack in the bag")
+check(attachSlot == nil, "with nothing left on the mail slot")
+check(cursor == nil, "and nothing left on the cursor")
+failAttach = false
+check(send.Attach(0, 1), "a mailable item still attaches normally")
+check(send.Count() == 1, "and reaches the list", send.Count())
+
+print("== send: the mailable probe is not run without a live mail session ==")
+-- Away from a mailbox the attach slot does not respond and GetSendMailItem
+-- answers nil for everything, so probing there would condemn every item in the
+-- game. The question is deferred to the send loop instead.
+stockBags()
+send.atMailbox = false
+failAttach = true                      -- would fail the probe if it ran
+check(send.Attach(0, 1), "the item is accepted away from a mailbox")
+check(send.Count() == 1, "and is on the list", send.Count())
+failAttach = false
+send.atMailbox = true
 
 print("== send: MAIL_FAILED aborts the batch ==")
 stockBags()
@@ -2481,6 +2671,26 @@ check(A.ui.btnOpenAll ~= nil and A.ui.btnDeleteRead ~= nil and
 -- The mode stays reachable from Lua on purpose: it is how the tests below
 -- observe an emptied-but-still-present mail.
 check(take.MODE_TAKE == "take", "MODE_TAKE remains available to callers")
+
+print("== geometry: the Inbox action row still fits the panel ==")
+-- Take Sold was inserted into a row that was already four items wide. 1.12
+-- does not clip children, so an overflowing row just draws off the panel and
+-- over whatever is beside it. Summed from the LIVE widths rather than the
+-- literals, so changing a button label or width is what fires this.
+local btns = { A.ui.btnOpenAll, A.ui.btnTakeSold, A.ui.btnDeleteRead,
+               A.ui.btnStop }
+local rowW, bi = 0, 1
+while bi <= table.getn(btns) do
+    rowW = rowW + (btns[bi]:GetWidth() or 0)
+    bi = bi + 1
+end
+rowW = rowW + 4 + 4 + 12          -- the gaps the anchors use
+local panelW = A.ui.frame:GetWidth() - 2 * 10
+check(rowW < panelW, "the four action buttons fit across the panel",
+      rowW .. " wide vs " .. panelW)
+-- And leave room for the running total that trails them.
+check(panelW - rowW >= 60, "with room left for the collected total",
+      panelW - rowW)
 
 print("== geometry: every list's rows fit inside its own well ==")
 -- The reported clipping bug: the window was a literal 440 tall, which left the

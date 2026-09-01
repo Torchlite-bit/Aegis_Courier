@@ -434,12 +434,25 @@ end
 ResetCounters()
 
 -- Is there anything at all for `mode` to do? Drives button enable state.
-function take.HasWork(mode)
+-- Does this mail match the run's filter?
+--
+-- `only` is nil for an unrestricted run, or "sold" for the Take Sold button.
+-- Kept as one predicate so the button's enable state and the engine's skip
+-- decision can never disagree -- if HasWork says there is work, the run must
+-- find it, or the button lights up and then does nothing.
+function take.Matches(h, only)
+    if not h then return false end
+    if not only then return true end
+    if only == "sold" then return h.auctionKind == "sold" end
+    return true
+end
+
+function take.HasWork(mode, only)
     local n = inbox.NumItems()
     local i = 1
     while i <= n do
         local h = inbox.Header(i)
-        if h and not h.isGM and not (h.cod > 0) then
+        if h and not h.isGM and not (h.cod > 0) and take.Matches(h, only) then
             if mode == take.MODE_DELETE then
                 if h.wasRead and h.money == 0 and not h.hasItem then
                     return true
@@ -576,6 +589,15 @@ function take.Step()
         return
     end
 
+    -- A filtered run steps over everything it was not asked for. Same rule as
+    -- every other skip: go through take.Advance so the clock is re-armed
+    -- (rule 16) -- a filtered run walks past far more mail than an ordinary
+    -- one, so a skip that failed to re-arm here would stall almost at once.
+    if not take.Matches(h, take.only) then
+        take.Advance()
+        return
+    end
+
     -- Snapshot the mail the FIRST time we touch it, for the correspondence
     -- log. It has to happen here: once the money is taken and the item pulled,
     -- the header no longer says what the mail contained, and the attached
@@ -699,11 +721,12 @@ end
 -- Run control
 -- ---------------------------------------------------------------------------
 
-function take.Start(mode)
+function take.Start(mode, only)
     if take.running then return false end
     if not inbox.NumItems or inbox.NumItems() == 0 then return false end
     take.running  = true
     take.mode     = mode or take.MODE_OPEN
+    take.only     = only  -- nil = everything; "sold" = auction sales only
     take.codIndex = nil   -- Open All can never pay a COD. See take.Step.
     take.index    = 1
     take.attempts = 0
@@ -724,6 +747,7 @@ function take.Stop(quiet)
     take.running = false
     take.pending = nil
     take.codIndex = nil
+    take.only = nil
     inbox.Flush()
     if not quiet then take.Report() end
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
@@ -733,6 +757,7 @@ function take.Finish()
     take.running = false
     take.pending = nil
     take.codIndex = nil
+    take.only = nil
     -- The inbox just changed shape for the last time; refresh now so
     -- inbox.lastUnread is current if the user closes the mailbox immediately
     -- (ui.SettleMailIcon reads it after the session is already gone).
@@ -774,6 +799,7 @@ function take.Single(index)
     if h.money == 0 and not h.hasItem then return false end
     take.running  = true
     take.mode     = take.MODE_OPEN
+    take.only     = nil
     take.codIndex = nil
     take.index    = index
     take.attempts = 0
@@ -830,6 +856,7 @@ function take.PayCOD(index)
     end
     take.running  = true
     take.mode     = take.MODE_OPEN
+    take.only     = nil
     take.index    = index
     take.codIndex = index
     take.attempts = 0
