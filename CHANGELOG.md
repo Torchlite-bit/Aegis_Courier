@@ -9,6 +9,43 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.8.1]
+
+Speed, measured properly this time. `/reload`.
+
+### Changed
+- **A mail's gold and its item are now collected in ONE round trip.** A server
+  call is a full latency wait, and that — not Lua time — is what you actually
+  wait on: an entire twelve-mail send is under a millisecond of Lua. Courier
+  spent one trip on the money, waited, then another on the item, so a mail
+  holding both cost three trips including the delete. Measured over a 70-mail
+  mailbox: **210 waits before, 140 after**.
+  - Issuing both together is safe in a way folding the *delete* in is not:
+    neither call can destroy anything. A refused take leaves the mail as it
+    was, and the next step finds the remainder and asks again.
+  - Money and item are now confirmed **separately**, which the combined step
+    makes necessary: a full bag rejects the item while the gold arrives
+    anyway, and booking them together would credit an item still sitting in
+    the mail — then count it again when the next step took it properly.
+- **One refused mail no longer taxes the rest of the batch.** Every
+  `MAIL_FAILED` used to add 0.3s to the gap between mails and *keep* it for the
+  remaining ones, on the theory that a server which refused once will refuse
+  again. On a twelve-item send one hiccup on mail two cost nearly nine seconds
+  across the other ten. TurtleMail has no such delay and does not need one —
+  what makes a batch survive a refusal is the per-mail retry, which resets on
+  success. The pause before retrying **the refused mail itself** is also down
+  from 1.0s to 0.3s.
+
+### Notes
+- Courier still spends **2 round trips per mail** collecting, against
+  TurtleMail's 1. The difference is the delete: TurtleMail fires
+  `TakeInboxItem` and `DeleteInboxItem` back to back without checking, so a bag
+  that fills mid-run loses the item it could not take. Courier verifies the
+  mail is empty first (rule 14), and that verification is what costs the second
+  trip. Closing the remaining gap safely means walking the inbox **backwards**
+  — deleting index *i* does not shift anything below it — which is a change to
+  index discipline, not a constant, and is not in this release.
+
 ## [1.8.0]
 
 Sending now follows TurtleMail's path, unmailable items are caught when you add

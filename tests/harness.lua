@@ -1053,6 +1053,57 @@ INBOX = { mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 } }
 check(take.Single(1) == false, "single take refuses COD")
 check(INBOX[1].money == 100, "COD mail untouched")
 
+print("== take: money and item leave in ONE round trip ==")
+-- A server call is a full latency wait and that is the unit the user feels --
+-- Lua time is nothing next to it (a whole 12-mail send is under a millisecond).
+-- Courier used to spend one trip on the money, wait, then another on the item,
+-- so a mail holding both cost three trips with the delete. TurtleMail costs
+-- one. This asserts the two takes share a trip; the delete still has its own.
+INBOX = { mail{ sender = "Bob", subject = "parcel", money = 500,
+                item = "Black Lotus" } }
+serverCalls = 0
+local tripCount = 0
+take.Start(take.MODE_OPEN)
+local tdrv = getglobal("AegisCourierTaker")
+local tg = 0
+while take.running and tg < 200 do
+    local before = serverCalls
+    tdrv.scripts.OnUpdate()
+    if serverCalls ~= before and take.running then
+        tripCount = tripCount + 1
+        fire("MAIL_INBOX_UPDATE")
+    end
+    tg = tg + 1
+end
+check(table.getn(INBOX) == 0, "the mail was collected and deleted")
+check(serverCalls == 3, "three server calls were needed", serverCalls)
+check(tripCount == 2, "but only TWO waits -- money and item shared one",
+      tripCount)
+check(take.money == 500, "the money was booked once", take.money)
+check(take.items == 1, "and the item once", take.items)
+
+print("== take: a full bag books the money but NOT the item ==")
+-- The hazard the combined step creates: one call can be honoured and the other
+-- refused. A full bag rejects the item while the gold arrives anyway. Booking
+-- them together on the strength of the money would credit an item still
+-- sitting in the mail -- and the next step, which takes it properly, would
+-- count it a second time. Worse, nothing may delete a mail still holding it.
+INBOX = { mail{ sender = "Bob", subject = "parcel", money = 500,
+                item = "Black Lotus" } }
+failTakeItem = true
+take.Start(take.MODE_OPEN)
+pump(12)
+check(take.money == 500, "the gold was collected", take.money)
+check(take.items == 0, "the refused item was NOT booked", take.items)
+check(table.getn(INBOX) == 1, "and the mail was NOT deleted", table.getn(INBOX))
+check(INBOX[1].hasItem, "with the item still safely in it")
+failTakeItem = false
+-- ...and once the bag has room, a re-run collects it without double counting.
+take.Start(take.MODE_OPEN)
+pump()
+check(table.getn(INBOX) == 0, "the re-run collected it", table.getn(INBOX))
+check(take.items == 1, "counted exactly once", take.items)
+
 print("== take: Take Sold collects sales and leaves everything else ==")
 -- The bank-alt case: a mailbox that is mostly auction traffic plus a few real
 -- letters. Open All takes the lot; this takes the gold from completed sales
@@ -3057,18 +3108,16 @@ check(table.getn(A.db.Log("received")) == 0,
 print("== pacing: a batch starts at full speed and earns any delay ==")
 -- Courier used to pause a fixed 0.3s between every mail, which on a 12-item
 -- send is 3.6 seconds of pure waiting that TurtleMail does not pay -- it
--- re-arms on the next frame. That constant was chosen when MAIL_FAILED threw
--- the whole batch away; it now retries per mail, so the delay is earned rather
--- than assumed.
+-- re-arms on the next frame. The fixed pause this replaced was chosen when
+-- MAIL_FAILED threw the whole batch away; it now retries per mail, so no delay
+-- is assumed at all.
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 send.Start("Ann", "quick", "", 0, false, false)
-check(send.settle == send.SETTLE_MIN,
-      "a fresh batch starts at the minimum", send.settle)
+check(send.SETTLE == 0, "a batch pays no settle", send.SETTLE)
 pumpSend()
-check(send.settle == send.SETTLE_MIN,
-      "a clean run never slows itself down", send.settle)
+check(send.SETTLE == 0, "and a clean run never slows itself down", send.SETTLE)
 
 print("== pacing: a batch reports its own elapsed time ==")
 -- "Did the speed change?" was not answerable by feel. A batch that measures
@@ -3096,7 +3145,7 @@ check(A.util.FormatSeconds(4.26) == "4.3s", "rounding to nearest",
       A.util.FormatSeconds(4.26))
 check(A.util.FormatSeconds(0) == "0.0s", "zero is fine")
 
-print("== pacing: SETTLE_MIN really does mean the very next frame ==")
+print("== pacing: a confirmed mail is followed on the VERY NEXT FRAME ==")
 -- Arm(0) sets wait = 0; the driver's guard is `waited < wait`, so with a wait
 -- of zero the first tick after arming steps immediately. If this ever became
 -- `<=` the batch would silently cost an extra frame per mail.
@@ -3111,42 +3160,54 @@ arg1 = nil
 send.Step = origStep
 check(steppedOn == "yes", "one frame later, it stepped")
 send.armed = false
+check(send.SETTLE == 0, "and there is no settle to pay", send.SETTLE)
 
-print("== pacing: a refusal backs off, and the backoff sticks ==")
+print("== pacing: ONE refusal does not tax the rest of the batch ==")
+-- Courier used to escalate: every MAIL_FAILED added 0.3s and KEPT it for the
+-- remaining mails, so a single hiccup on mail two cost every mail after it --
+-- nearly nine seconds on a twelve-item send. TurtleMail has no such delay and
+-- does not need one; the per-mail retry is what makes a batch survive a
+-- refusal. This is the assertion that stops the escalation coming back.
 stockBags()
-send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = false
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 failSendCount = 1                  -- the server refuses the first mail once
 send.Start("Ann", "bumpy", "", 0, false, false)
 pumpSend()
 failSendCount = 0
-check(send.settle > send.SETTLE_MIN,
-      "the refusal bought a delay", send.settle)
-check(send.settle == send.SETTLE_MIN + send.SETTLE_STEP,
-      "of exactly one step", send.settle)
-check(table.getn(SENT) == 2, "and the batch still completed", table.getn(SENT))
+check(table.getn(SENT) == 3, "the batch still completed", table.getn(SENT))
+check(send.SETTLE == 0,
+      "and the refusal bought no standing delay", send.SETTLE)
 
--- It must not creep past the ceiling however bad the connection is.
-send.settle = send.SETTLE_MAX
-local before = send.settle
+-- The mail that was actually refused is the only one that waits, and the wait
+-- applies to it alone.
+check(send.RETRY_WAIT > 0, "a refused mail does pause before retrying",
+      send.RETRY_WAIT)
+check(send.RETRY_WAIT <= 0.5,
+      "but briefly -- this used to be a full second", send.RETRY_WAIT)
+
+-- Frame-count the whole thing: with no settle, a clean batch costs one frame
+-- per mail and nothing more.
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.Start("Ann", "clean", "", 0, false, false)
+local paceFrames, paceSeen = 0, sendAttempts
+while send.sending and paceFrames < 200 do
+    fakeClock = fakeClock + 0.016
+    arg1 = 0.016
+    sdriver.scripts.OnUpdate()
+    arg1 = nil
+    paceFrames = paceFrames + 1
+    if sendAttempts > paceSeen then
+        paceSeen = sendAttempts
+        if lastSendFailed then fire("MAIL_FAILED") else fire("MAIL_SEND_SUCCESS") end
+    end
+end
+check(table.getn(SENT) == 3, "three mails out", table.getn(SENT))
+check(paceFrames == 3, "in exactly three frames -- one per mail", paceFrames)
+
 fire("MAIL_FAILED")                -- not sending, so this must be inert
-check(send.settle == before, "MAIL_FAILED outside a run changes nothing",
-      send.settle)
-
-stockBags()
-send.Attach(0, 1)
-failSendCount = 3
-send.Start("Ann", "rough", "", 0, false, false)
-pumpSend()
-failSendCount = 0
-check(send.settle <= send.SETTLE_MAX, "the backoff is capped", send.settle)
-
--- And the next batch starts optimistic again rather than inheriting it.
-stockBags()
-send.Attach(0, 1)
-send.Start("Ann", "fresh", "", 0, false, false)
-check(send.settle == send.SETTLE_MIN,
-      "a new batch does not inherit the last one's penalty", send.settle)
-pumpSend()
+check(not send.sending, "MAIL_FAILED outside a run changes nothing")
 
 print("== sent box: a batch is ONE record carrying its items ==")
 -- Vanilla mail has one attachment per message, so mailing two items is two

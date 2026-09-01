@@ -399,7 +399,6 @@ function send.Start(to, subject, body, money, isCOD, codAll)
     send.total     = send.MailCount()
     send.sentCount = 0
     send.skipped   = 0
-    send.settle    = send.SETTLE_MIN
     send.sentRec   = nil    -- opened by the first confirmed mail, not here
     -- Wall clock for the batch. GetTime is the client's high-resolution timer;
     -- time() is whole seconds and would round a fast batch to nothing. This
@@ -709,35 +708,26 @@ local driver = CreateFrame("Frame", "AegisCourierSender")
 driver:Hide()
 local waited = 0
 
--- Seconds to let the mail system settle between a confirmed send and the next
--- one. Courier used to issue the next mail on the very next OnUpdate frame,
--- about 16ms after the server's acknowledgement, and batches were coming back
--- with the second mail rejected. This is a mitigation rather than a proven
--- root cause -- see the MAIL_FAILED handler, which is what actually makes a
--- batch survive a rejection -- but it costs a few seconds on a 12-item send
--- and removes a whole class of race.
--- ADAPTIVE. Every batch starts optimistic -- next frame, which is the pacing
--- TurtleMail uses and the reason it feels faster than a fixed pause. The delay
--- is EARNED, one refusal at a time, and once earned it is kept for the rest of
--- the batch: a server that refused once will refuse again, and re-learning
--- that per mail is what makes a long send feel unreliable.
+-- THERE IS NO SETTLE. The next mail goes out on the next OnUpdate frame after
+-- the server's acknowledgement, which is exactly what TurtleMail does.
 --
--- The fixed 0.3s this replaces was chosen when MAIL_FAILED abandoned the whole
--- batch, so any race was catastrophic and worth over-paying to avoid. That
--- handler now retries per mail with a budget that resets on success, and a
--- failed attach falls back to re-resolving and waiting on locks rather than
--- trusting a stale coordinate -- so the race it was insuring against is
--- handled where it happens. On a 12-item send the old constant cost 3.6 seconds of pure
--- waiting, paid by every user on every batch to guard the worst connection.
-send.SETTLE_MIN  = 0
-send.SETTLE_STEP = 0.3
-send.SETTLE_MAX  = 0.9
+-- Courier used to ESCALATE a delay: every MAIL_FAILED added 0.3s, up to 0.9s,
+-- and KEPT it for the rest of the batch, on the theory that a server which
+-- refused once will refuse again. The effect was that one hiccup on mail two
+-- taxed all ten remaining mails -- nearly nine seconds on a twelve-item send
+-- -- and refusals are common enough in the field that users paid it often.
+--
+-- TurtleMail has no such delay and does not need one, which is the evidence
+-- that this was insuring against the wrong thing. What actually makes a batch
+-- survive a refusal is the MAIL_FAILED retry below, and that is per mail and
+-- resets on success. If a pause between mails ever looks necessary again,
+-- MEASURE it -- do not reintroduce a delay every mail pays for one mail's
+-- problem.
+send.SETTLE = 0
 
--- The delay currently in force. Reset per batch in send.Start.
-send.settle = send.SETTLE_MIN
-
--- Longer pause before re-attempting a mail the server just refused.
-send.RETRY_WAIT = 1.0
+-- Pause before re-attempting the ONE mail the server just refused. It applies
+-- to that mail alone and never to the rest of the batch.
+send.RETRY_WAIT = 0.3
 
 driver:SetScript("OnUpdate", function()
     if not send.armed then
@@ -805,7 +795,7 @@ A.RegisterEvent("MAIL_SEND_SUCCESS", function()
         send.lastSent = nil
     end
     if send.queue and table.getn(send.queue) > 0 then
-        send.Arm(send.settle)   -- more items: next mail at the earned pacing
+        send.Arm(0)   -- more items: next mail on the very next frame
     else
         send.Finish()
     end
@@ -824,11 +814,6 @@ end)
 -- capped globally; only a mail that fails repeatedly gives up.
 A.RegisterEvent("MAIL_FAILED", function()
     if not send.sending then return end
-
-    -- Back off and STAY backed off for the rest of this batch. See the
-    -- SETTLE_MIN note: the delay is earned, not assumed.
-    send.settle = send.settle + send.SETTLE_STEP
-    if send.settle > send.SETTLE_MAX then send.settle = send.SETTLE_MAX end
 
     send.retries = (send.retries or 0) + 1
     if send.retries <= send.MAX_RETRIES then

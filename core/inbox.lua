@@ -514,29 +514,37 @@ function take.Confirm()
 
     local h = inbox.Header(p.index)
 
-    -- Did the mail we acted on still exist, unchanged, with its money intact?
-    -- If so the take did NOT happen and we must not book anything.
-    local unchanged = h
-        and h.subject == p.subject
-        and h.sender  == p.sender
-        and h.money   == p.money
-        and p.money > 0
-
-    if unchanged then
-        return false
+    -- Is the mail we acted on still the same mail? If it is gone entirely it
+    -- can only have gone to us -- we are the only thing acting on this mailbox
+    -- -- so everything we asked for arrived.
+    local same = h and h.subject == p.subject and h.sender == p.sender
+    if not same then
+        if p.money > 0 then
+            take.money = take.money + p.money
+            take.RecordSale(p.header)
+        end
+        if p.item then take.items = take.items + 1 end
+        return true
     end
 
-    -- Otherwise the money left the mail: either the field is now zero, or the
-    -- mail is gone entirely (it can only have gone to us -- we are the only
-    -- thing acting on this mailbox). Book it.
-    if p.money > 0 then
+    -- The mail is still here, so book ONLY what actually left it. Money and
+    -- item are checked SEPARATELY and this is not a refinement -- one step now
+    -- asks for both at once, and the server can honour one and refuse the
+    -- other: a full bag rejects the item while the gold arrives regardless.
+    -- Booking them together on the strength of the money alone would credit an
+    -- item still sitting in the mail, and the next step -- which re-reads the
+    -- header and takes it again -- would count it twice.
+    local booked = false
+    if p.money > 0 and h.money == 0 then
         take.money = take.money + p.money
         take.RecordSale(p.header)
+        booked = true
     end
-    if p.item then
+    if p.item and not h.hasItem then
         take.items = take.items + 1
+        booked = true
     end
-    return true
+    return booked
 end
 
 -- ---------------------------------------------------------------------------
@@ -641,21 +649,35 @@ function take.Step()
         return
     end
 
-    -- Money first: it always succeeds where an item can fail on a full bag.
-    if h.money > 0 then
+    -- EMPTY THE MAIL IN ONE STEP: money and item together.
+    --
+    -- Each server call costs a full round trip, and a round trip is the unit
+    -- the user actually waits on -- Lua time here is negligible (a whole
+    -- 12-mail send is under a millisecond of it). Courier used to spend one
+    -- round trip on the money, wait, then another on the item, so a mail
+    -- holding both cost three trips with the delete and TurtleMail's cost one.
+    -- Measured over a 70-mail box: 210 trips against TurtleMail's 70.
+    --
+    -- Issuing both together is safe in a way that folding the DELETE in is
+    -- not: neither call can destroy anything. A take the server refuses simply
+    -- leaves the mail as it was, take.Confirm books only what actually left,
+    -- and the next step finds the remainder and asks again. The delete still
+    -- gets its own verified step -- see rule 14, and the note above it.
+    --
+    -- Rule 16 is satisfied and then some: this issues at least one server call,
+    -- so the acknowledgement that re-arms the engine is guaranteed. Two calls
+    -- may produce two MAIL_INBOX_UPDATEs; an extra armed step is harmless,
+    -- because every step re-reads the header and decides again from scratch.
+    if h.money > 0 or h.hasItem then
         take.attempts = take.attempts + 1
         take.pending = { index = take.index, subject = h.subject,
-            sender = h.sender, money = h.money, item = nil, header = h }
-        TakeInboxMoney(take.index)
-        return
-    end
-
-    if h.hasItem then
-        take.attempts = take.attempts + 1
-        take.pending = { index = take.index, subject = h.subject,
-            sender = h.sender, money = 0, item = true, header = h }
-        -- 1.12 mail carries a single attachment, so one call empties it.
-        TakeInboxItem(take.index)
+            sender = h.sender, money = h.money,
+            item = h.hasItem and true or nil, header = h }
+        -- Money first: it always succeeds where an item can fail on a full bag,
+        -- so if the server only gets through one of them, make it the one that
+        -- cannot fail.
+        if h.money > 0 then TakeInboxMoney(take.index) end
+        if h.hasItem then TakeInboxItem(take.index) end
         return
     end
 

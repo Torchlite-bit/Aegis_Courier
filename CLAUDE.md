@@ -138,7 +138,20 @@ section, which is Courier's equivalent hazard surface.
     is empty" is false. Re-read the header and delete only when `money == 0`
     **and** `hasItem` is false. TurtleMail takes-then-deletes in one step and
     relies on `UI_ERROR_MESSAGE` to catch the failure; that is a race we do not
-    reproduce.
+    reproduce, and it is why Courier costs 2 server round trips per mail where
+    TurtleMail costs 1. That is a deliberate, known price — see below.
+    - **A SERVER CALL IS THE UNIT OF COST, not Lua time.** Each one is a full
+      latency wait; the Lua around it is free by comparison (a whole 12-mail
+      send is under a millisecond). When something feels slow, count ROUND
+      TRIPS before optimising anything else — a call counter is not the same
+      measurement, since several calls issued in one step share one wait.
+    - **Take money and the item TOGETHER, in one step.** Neither can destroy
+      anything, so nothing is risked by issuing both, and it removes a whole
+      round trip from every mail that holds both.
+    - **Then confirm them SEPARATELY.** The server can honour one and refuse
+      the other — a full bag rejects the item while the gold arrives regardless
+      — so booking both on the strength of the money credits an item still
+      sitting in the mail, and the next step counts it twice.
 15. **Deleting SHIFTS every later mail down one index.** After a successful
     delete, do **not** advance — the next mail slides into the index you are
     already on. Taking money or an item shifts nothing, so a mode that keeps
@@ -495,6 +508,11 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       its name to the queued item**; bag coordinates are re-resolved at use;
       `locked` (3rd return of `GetContainerItemInfo`) is read and waited on;
       postage multiplied per mail; gold only on the first mail.
+- [ ] Bulk mail work is counted in SERVER ROUND TRIPS, not calls or Lua time.
+      Money and item leave in one step; only the delete gets its own, and only
+      because it must be verified first.
+- [ ] No delay is imposed on a whole batch because one mail failed. The retry
+      is per mail; there is no standing settle.
 - [ ] The send hot path inspects NOTHING before the pickup — no `ResolveSlot`,
       no `locked` poll. Relocation and lock waiting happen only after a failed
       verify. A clean batch inspects zero bag slots and the harness says so.
