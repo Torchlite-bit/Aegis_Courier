@@ -408,8 +408,15 @@ function send.Start(to, subject, body, money, isCOD, codAll)
     send.retries   = 0
     send.inFlight  = nil
     send.sending   = true
-    send.Arm()
     if A.ui and A.ui.RefreshSend then A.ui.RefreshSend() end
+    -- FIRST MAIL GOES OUT NOW, not on the next frame.
+    --
+    -- TurtleMail's send button calls sendmail_send() straight from the click
+    -- handler, and there is no reason to be slower: nothing about the first
+    -- mail needs a frame boundary. Courier used to Arm and wait, spending a
+    -- frame before the batch had even started.
+    if send.Wake then send.Wake() end
+    send.Step()
     return true
 end
 
@@ -731,7 +738,13 @@ send.RETRY_WAIT = 0.3
 
 driver:SetScript("OnUpdate", function()
     if not send.armed then
-        driver:Hide()
+        -- Stay SHOWN for the duration of a batch. A hidden frame runs no
+        -- OnUpdate, so hiding between mails means the next Arm has to Show us
+        -- again and the step waits for the frame after that. TurtleMail's
+        -- update frame is simply always live while the mailbox is open, and
+        -- this is the same thing scoped to a run. Idle cost is one comparison
+        -- per frame, and only while actually sending.
+        if not send.sending then driver:Hide() end
         waited = 0
         return
     end
@@ -742,6 +755,17 @@ driver:SetScript("OnUpdate", function()
     send.armed = false
     send.Step()
 end)
+
+-- Bring the driver up WITHOUT arming a step.
+--
+-- send.Start issues its first mail synchronously, so nothing has shown the
+-- driver by the time the batch is under way -- and the first acknowledgement
+-- would then have to Show it and lose a frame waiting for the next OnUpdate.
+-- Waking it up front means the driver is live for the whole run, which is the
+-- state TurtleMail's update frame is always in.
+function send.Wake()
+    driver:Show()
+end
 
 -- `wait` is seconds to hold off before the next Step; nil means immediately.
 function send.Arm(wait)

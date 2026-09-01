@@ -9,6 +9,35 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.8.2]
+
+The send loop is now TurtleMail's, down to which frame each mail leaves on.
+`/reload`.
+
+### Changed
+- **The first mail of a batch goes out immediately**, not on the next frame.
+  TurtleMail's send button calls `sendmail_send()` straight from the click
+  handler; Courier armed a timer and waited. Nothing about the first mail needs
+  a frame boundary.
+- **The send driver stays awake for the whole batch.** A hidden frame runs no
+  `OnUpdate`, and a frame shown during this frame's work does not run one until
+  the next — so a driver that went to sleep between mails cost a frame every
+  time an acknowledgement had to wake it. With a real server there are always
+  frames of latency in between, so it slept on every single mail. TurtleMail's
+  update frame is simply always live while the mailbox is open.
+
+### Notes
+- Measured under a modelled four-frame server latency, three mails: **11 frames
+  now, 13 before** — one wasted frame per mail, plus one more at the start of
+  every batch. The harness had been unable to see any of this, because its mock
+  ticked hidden frames and treated `Show()` as taking effect immediately;
+  it now models both, which is what makes these changes testable at all.
+- With this, Courier's send loop matches TurtleMail call for call and frame for
+  frame: same five-call attach sequence, no pre-emptive bag inspection, no
+  settle, first mail synchronous, one frame per mail thereafter. The measured
+  Lua cost of a twelve-mail batch is **0.1 ms** — there is nothing left to win
+  on this side without changing what the client itself does.
+
 ## [1.8.1]
 
 Speed, measured properly this time. `/reload`.

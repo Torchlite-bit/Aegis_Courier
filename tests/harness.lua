@@ -155,6 +155,11 @@ CreateFrame = function(kind, name, parent, template)
     end
     function f:GetPoint() return "CENTER", nil, "CENTER", 0, 0 end
     function f:Show()
+        -- A frame Shown during this frame's work does not run its OnUpdate
+        -- until the NEXT one. That is why hiding a driver between steps costs
+        -- a frame every time it has to be brought back, and modelling Show as
+        -- instant hid that cost completely.
+        if not self.visible then rawset(self, "justShown", true) end
         self.visible = true
         if self.scripts.OnShow then self.scripts.OnShow() end
     end
@@ -483,16 +488,25 @@ SetSendMailCOD   = function(c) codCalls = codCalls + 1; sendCODAmt = c or 0 end
 
 -- Every SendMail gets exactly one of MAIL_SEND_SUCCESS / MAIL_FAILED back, as
 -- on the real client. `failSendCount` makes the server refuse the next N.
+-- One response per SendMail, tracked as a PENDING ACK rather than by watching
+-- a counter move. The counter version could only see sends that happened while
+-- the pump was looping -- and the first mail of a batch now goes out
+-- synchronously from send.Start, before any pump exists, exactly as
+-- TurtleMail's send button does. A pump that snapshots the counter on entry
+-- silently never acknowledges that mail, and the batch looks like it stalled.
+pendingAck = nil
 sendAttempts, failSendCount, lastSendFailed = 0, 0, false
 SendMail = function(to, subject, body)
     sendAttempts = sendAttempts + 1
     if failSendCount > 0 then
         failSendCount = failSendCount - 1
         lastSendFailed = true
+        pendingAck = "MAIL_FAILED"
         -- A refused mail keeps its attachment: nothing left the client.
         return
     end
     lastSendFailed = false
+    pendingAck = "MAIL_SEND_SUCCESS"
     table.insert(SENT, { to = to, subject = subject, body = body,
         item = attachSlot and attachSlot.item.name or nil,
         count = attachSlot and attachSlot.item.count or nil,
@@ -527,6 +541,11 @@ local function Click(btn)
 end
 
 local function fire(e, a1)
+    -- Firing a mail response IS the acknowledgement, so it consumes the one
+    -- the mock is holding. Without this, a test that fires the event by hand
+    -- and then hands over to pumpSend would have it delivered twice, and the
+    -- batch would send a mail it was never asked for.
+    if e == "MAIL_SEND_SUCCESS" or e == "MAIL_FAILED" then pendingAck = nil end
     event, arg1 = e, a1
     A.Dispatch()
 end
@@ -1360,23 +1379,36 @@ check(sdriver ~= nil, "send driver frame exists")
 -- Our tick issues one mail; the server then confirms it. Sending a batch from
 -- inside the success handler is exactly what this deferral avoids.
 local function pumpSend(limit)
-    local n, seenAttempts = 0, sendAttempts
+    local n = 0
+    -- The batch's FIRST mail is issued synchronously by send.Start, so an
+    -- acknowledgement can already be outstanding before the first tick.
     while send.sending and n < (limit or 60) do
-        -- A generous frame delta so any settle/retry wait elapses in one tick.
-        -- The fake clock advances with it, so elapsed time is measurable.
+        if pendingAck then
+            local ack = pendingAck
+            pendingAck = nil
+            fire(ack)
+        end
+        if not send.sending then break end
+        -- A generous frame delta so any retry wait elapses in one tick. The
+        -- fake clock advances with it, so elapsed time is measurable.
         fakeClock = fakeClock + 5
         arg1 = 5
-        sdriver.scripts.OnUpdate()
-        arg1 = nil
-        if sendAttempts > seenAttempts then
-            seenAttempts = sendAttempts
-            if lastSendFailed then
-                fire("MAIL_FAILED")
-            else
-                fire("MAIL_SEND_SUCCESS")
-            end
+        -- A HIDDEN FRAME RUNS NO OnUpdate. The mock used to tick the driver
+        -- regardless, which made frame cost invisible: a driver that hid
+        -- itself between mails and had to be re-Shown looked exactly as fast
+        -- as one that stayed live. The wall clock still advances -- that is
+        -- the whole point of the frame being wasted.
+        if sdriver.visible and not rawget(sdriver, "justShown") then
+            sdriver.scripts.OnUpdate()
         end
+        rawset(sdriver, "justShown", nil)
+        arg1 = nil
         n = n + 1
+    end
+    if pendingAck then
+        local ack = pendingAck
+        pendingAck = nil
+        fire(ack)
     end
     return n
 end
@@ -3162,6 +3194,56 @@ check(steppedOn == "yes", "one frame later, it stepped")
 send.armed = false
 check(send.SETTLE == 0, "and there is no settle to pay", send.SETTLE)
 
+print("== pacing: the driver stays live across the server's latency ==")
+-- With a real server the acknowledgement does not come back in the same frame
+-- the mail went out -- there are frames of waiting in between. A driver that
+-- hides itself the moment it has nothing to do must then be Shown again when
+-- the ack lands, and a frame Shown during this frame's work does not run its
+-- OnUpdate until the next one. That is a wasted frame per mail, every mail.
+-- TurtleMail's update frame is simply always live while the mailbox is open.
+stockBags()
+send.atMailbox = false
+send.ClearAttachments()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+SENT = {}
+-- Start from a genuinely idle driver. Left visible by an earlier test, the
+-- wake-up cost this measures is already paid and invisible.
+sdriver:Hide()
+rawset(sdriver, "justShown", nil)
+send.Start("Ann", "laggy", "", 0, false, false)
+local LATENCY = 4                  -- frames between SendMail and its answer
+local lagFrames, ackIn = 0, LATENCY
+while send.sending and lagFrames < 400 do
+    if pendingAck then
+        ackIn = ackIn - 1
+        if ackIn <= 0 then
+            local a = pendingAck; pendingAck = nil; ackIn = LATENCY
+            fire(a)
+        end
+    end
+    if not send.sending then break end
+    arg1 = 0.016
+    if sdriver.visible and not rawget(sdriver, "justShown") then
+        sdriver.scripts.OnUpdate()
+    end
+    rawset(sdriver, "justShown", nil)
+    arg1 = nil
+    lagFrames = lagFrames + 1
+end
+if pendingAck then local a = pendingAck; pendingAck = nil; fire(a) end
+check(table.getn(SENT) == 3, "all three mails went out", table.getn(SENT))
+-- Mail 1 is free (sent synchronously). Mails 2 and 3 each wait LATENCY frames
+-- for the ack and then step on the very next frame. Anything more means the
+-- driver went to sleep and had to be woken.
+-- Three mails, three acknowledgements, LATENCY frames of waiting for each --
+-- and the loop exits the moment the last one lands, before that iteration is
+-- counted. So the floor is LATENCY * 3 - 1 and every frame above it is one the
+-- driver spent asleep, waiting to be Shown again.
+local floorFrames = LATENCY * 3 - 1
+check(lagFrames == floorFrames,
+      "no frame was lost re-waking the driver",
+      lagFrames .. " frames, floor is " .. floorFrames)
+
 print("== pacing: ONE refusal does not tax the rest of the batch ==")
 -- Courier used to escalate: every MAIL_FAILED added 0.3s and KEPT it for the
 -- remaining mails, so a single hiccup on mail two cost every mail after it --
@@ -3191,20 +3273,29 @@ check(send.RETRY_WAIT <= 0.5,
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 send.Start("Ann", "clean", "", 0, false, false)
-local paceFrames, paceSeen = 0, sendAttempts
+-- The first mail is already out -- send.Start issued it synchronously, as
+-- TurtleMail's button does -- so only the SECOND and THIRD cost a frame.
+check(table.getn(SENT) == 1, "the first mail left without waiting a frame",
+      table.getn(SENT))
+local paceFrames = 0
 while send.sending and paceFrames < 200 do
+    if pendingAck then
+        local ack = pendingAck; pendingAck = nil; fire(ack)
+    end
+    if not send.sending then break end
     fakeClock = fakeClock + 0.016
     arg1 = 0.016
-    sdriver.scripts.OnUpdate()
+    if sdriver.visible and not rawget(sdriver, "justShown") then
+        sdriver.scripts.OnUpdate()
+    end
+    rawset(sdriver, "justShown", nil)
     arg1 = nil
     paceFrames = paceFrames + 1
-    if sendAttempts > paceSeen then
-        paceSeen = sendAttempts
-        if lastSendFailed then fire("MAIL_FAILED") else fire("MAIL_SEND_SUCCESS") end
-    end
 end
+if pendingAck then local ack = pendingAck; pendingAck = nil; fire(ack) end
 check(table.getn(SENT) == 3, "three mails out", table.getn(SENT))
-check(paceFrames == 3, "in exactly three frames -- one per mail", paceFrames)
+check(paceFrames == 2, "the other two cost one frame each -- no more",
+      paceFrames)
 
 fire("MAIL_FAILED")                -- not sending, so this must be inert
 check(not send.sending, "MAIL_FAILED outside a run changes nothing")

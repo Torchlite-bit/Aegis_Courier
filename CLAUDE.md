@@ -244,8 +244,17 @@ section, which is Courier's equivalent hazard surface.
       the first refusal loses every remaining item and makes the user rebuild
       the list. Budget the retries **per mail** and reset on each success, or a
       long batch is capped by unrelated earlier hiccups.
-    - Leave the next mail a moment after the server's acknowledgement rather
-      than firing on the very next OnUpdate frame (`send.SETTLE`).
+    - **Issue the next mail on the very NEXT OnUpdate frame after the
+      acknowledgement, and the FIRST one synchronously from the click.** That
+      is TurtleMail's pacing and there is nothing to gain by being slower.
+      `send.SETTLE` is 0 and must stay 0; a delay every mail pays for one
+      mail's failure is what made batches feel slow.
+    - **Keep the send driver SHOWN for the whole batch** (`send.Wake`). A
+      hidden frame runs no `OnUpdate`, and one shown during this frame's work
+      does not run until the next — so a driver sleeping between mails loses a
+      frame to every acknowledgement, and with real latency that is every mail.
+    - A test harness that ticks hidden frames, or treats `Show()` as immediate,
+      cannot see any of this and will happily pass a driver that sleeps.
 23. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
     *that* something is held, never *what*. The only way to identify a dragged
     item is to remember where it came from: save-and-replace
