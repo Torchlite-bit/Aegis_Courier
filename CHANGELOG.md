@@ -9,6 +9,19 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.2]
+
+### Added
+- **Hovering a row in the Sent history lists the whole record** — every item
+  with its count, the gold or COD that rode along, and how many mails the batch
+  became. The row itself can only show a clipped one-line summary, and a record
+  can carry twelve items, so this is the only place the whole thing is legible
+  without opening it.
+  - A record that carried nothing says **"no attachments"** rather than showing
+    an empty box.
+  - As with the Sent reader, this is names and counts: the mails are gone from
+    the client, so it is what Courier captured at send time.
+
 ## [1.9.1]
 
 Fixes ordinary items being refused with "cannot be mailed". `/reload`.
