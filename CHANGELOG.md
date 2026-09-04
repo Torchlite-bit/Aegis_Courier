@@ -9,6 +9,31 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.1]
+
+Fixes ordinary items being refused with "cannot be mailed". `/reload`.
+
+### Fixed
+- **"&lt;item&gt; cannot be mailed" fired on perfectly mailable items** — reported
+  on a *Training Sword of the Tiger* — and, worse, **refused the attach**, so
+  the item could not be mailed at all.
+  - The attach-time probe treated "nothing ended up attached" as proof the
+    item was unmailable. That is the exact mistake the probe was added in 1.8.0
+    to fix *in the send loop*: an attach also fails for transient reasons. On a
+    slot the server is briefly holding, `PickupContainerItem` is a silent
+    no-op, nothing attaches, and the item was condemned.
+  - **The probe now fails open.** It answers "no" only on positive evidence —
+    the pickup landed on the cursor *and* the mail then refused it. Every
+    ambiguous outcome answers "yes" and lets the send loop find out. A wrong
+    "no" costs the player the item; a wrong "yes" costs one skipped mail the
+    batch already reports, so the two are not remotely equal.
+  - **It also no longer probes while an item is on the cursor.** That is the
+    drag-to-attach path: the item is held and its bag slot is locked until the
+    server says otherwise, so clearing the cursor to run a probe would drop
+    what the player is dragging. Nothing can be learned safely in that state.
+- A genuinely unmailable item — soulbound, quest, conjured — is still caught
+  and still named. Failing open is not failing blind.
+
 ## [1.9.0]
 
 Item tooltips on mail. `/reload`.

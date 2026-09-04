@@ -1902,6 +1902,91 @@ failAttach = false
 check(send.Attach(0, 1), "a mailable item still attaches normally")
 check(send.Count() == 1, "and reaches the list", send.Count())
 
+print("== send: a BUSY slot never condemns the item ==")
+-- The field report: "Training Sword of the Tiger cannot be mailed", on an
+-- ordinary weapon. The probe took "nothing attached" as proof the item was
+-- unmailable -- the exact mistake it exists to fix in the send loop. A slot
+-- the server is holding makes the pickup a silent no-op, and the probe then
+-- refused the attach outright, so the player could not mail the item at all.
+--
+-- A wrong "no" costs the player the item; a wrong "yes" costs one skipped
+-- mail the batch already reports. So this must fail OPEN.
+stockBags()
+send.atMailbox = true
+BAGS[0][1].locked = 1                  -- the server is holding the stack
+DEFAULT_CHAT_FRAME.messages = {}
+check(send.Attach(0, 1), "a busy stack still attaches")
+check(send.Count() == 1, "and reaches the list", send.Count())
+local condemned = false
+local mi = 1
+while mi <= table.getn(DEFAULT_CHAT_FRAME.messages) do
+    if A.util.Contains(DEFAULT_CHAT_FRAME.messages[mi], "cannot be mailed") then
+        condemned = true
+    end
+    mi = mi + 1
+end
+check(not condemned, "and the player is told nothing of the sort")
+BAGS[0][1].locked = nil
+
+-- Same again for the cached flag that lies: `locked` clear, server holding.
+stockBags()
+BAGS[0][1].serverHolds = true
+check(send.Attach(0, 1), "a stack behind a stale lock attaches too")
+check(send.Count() == 1, "and reaches the list", send.Count())
+BAGS[0][1].serverHolds = nil
+
+print("== send: probing never drops what the player is dragging ==")
+-- The drag-to-attach path calls Attach with the item ON THE CURSOR, and the
+-- bag slot it came from is locked until the server says otherwise. Clearing
+-- the cursor to run a probe would drop the item being dragged, and the pickup
+-- would then no-op against that locked slot and condemn it.
+stockBags()
+send.atMailbox = true
+cursor = { bag = 0, slot = 1, item = BAGS[0][1] }
+-- The client locks the slot an item was lifted from, and that lock outlives
+-- ClearCursor -- it clears on the server's ITEM_LOCK_CHANGED, not instantly.
+BAGS[0][1].locked = 1
+send.cursorItem = { bag = 0, slot = 1 }
+-- The probe must not touch the attachment slot AT ALL in this state. Counting
+-- the clicks is what makes that checkable: the guard is otherwise redundant
+-- with the pickup check below it, and nothing would prove it was doing
+-- anything.
+local clicksBefore = 0
+local realClick = ClickSendMailItemButton
+ClickSendMailItemButton = function() clicksBefore = clicksBefore + 1; return realClick() end
+check(send.AttachCursor(), "a dragged item attaches")
+ClickSendMailItemButton = realClick
+check(clicksBefore == 0, "and the probe never touched the mail slot to do it",
+      clicksBefore)
+check(send.Count() == 1, "it reaches the list", send.Count())
+check(BAGS[0][1] ~= nil, "the dragged stack is still in the bag")
+check(attachSlot == nil, "and nothing was left on the mail slot")
+BAGS[0][1].locked = nil
+
+print("== send: a genuinely unmailable item is STILL caught ==")
+-- Failing open must not mean failing blind. When the pickup lands and the mail
+-- refuses it -- the item stays on the cursor -- that is positive evidence and
+-- the only thing that answers no.
+stockBags()
+send.atMailbox = true
+cursor = nil
+failAttach = true
+DEFAULT_CHAT_FRAME.messages = {}
+check(send.Attach(0, 1) == false, "the soulbound-style item is refused")
+check(send.Count() == 0, "and never reaches the list", send.Count())
+local saidNo = false
+mi = 1
+while mi <= table.getn(DEFAULT_CHAT_FRAME.messages) do
+    if A.util.Contains(DEFAULT_CHAT_FRAME.messages[mi], "cannot be mailed") then
+        saidNo = true
+    end
+    mi = mi + 1
+end
+check(saidNo, "with the reason named")
+failAttach = false
+check(cursor == nil, "and the probe put the cursor down after itself")
+check(attachSlot == nil, "leaving nothing on the mail slot")
+
 print("== send: the mailable probe is not run without a live mail session ==")
 -- Away from a mailbox the attach slot does not respond and GetSendMailItem
 -- answers nil for everything, so probing there would condemn every item in the

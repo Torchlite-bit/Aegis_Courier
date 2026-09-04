@@ -308,6 +308,24 @@ section, which is Courier's equivalent hazard surface.
       transient reasons and the loop cannot tell which. The probe needs a LIVE
       mail session; without one `GetSendMailItem` answers nil for everything
       and would condemn every item in the game.
+    - **THE PROBE MUST FAIL OPEN, and this is not a style preference.** A wrong
+      "no" REFUSES THE ATTACH — the player cannot mail the item at all. A wrong
+      "yes" costs one skipped mail at send time, which the batch already
+      handles and reports. Answer no ONLY on positive evidence: the pickup
+      landed on the cursor (`CursorHasItem`) **and** the mail then refused it,
+      leaving it still held. Every other outcome is a yes.
+      - Moving the question earlier did NOT make it immune to the transient
+        failures it was written to escape. Taking "nothing attached" as proof
+        shipped again as "Training Sword of the Tiger cannot be mailed" — a
+        busy slot, condemned. Same bug, one step upstream.
+    - **Never probe with something on the cursor.** That is drag-to-attach: the
+      item is held and its source slot is locked until the server says
+      otherwise, so clearing the cursor to make room for a probe drops what the
+      player is dragging. Skip and assume mailable.
+    - These guards are deliberately redundant — each alone prevents the false
+      positive — so no single sabotage can prove any one of them. Prove them by
+      restoring the whole broken probe, and pin the drag guard separately by
+      counting that it touches the attachment slot ZERO times mid-drag.
     - **Empty the mail's attachment slot BEFORE resolving anything.** A mail the
       server refused leaves its item in that slot rather than in the bags, so
       resolving first concludes the stack vanished and skips every
