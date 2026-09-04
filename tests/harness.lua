@@ -3649,6 +3649,30 @@ check(GameTooltip.shown.link == "item:6521:0:0:0",
       "for the right item", GameTooltip.shown.link)
 unhover(sword)
 
+print("== tooltips: an old SUFFIXED record recovers from the player's bags ==")
+-- The case the item cache cannot serve, and the one the user actually hit: a
+-- record from before the link was captured, holding a random-suffix item. The
+-- cache is keyed on the base item so "Training Sword of Agility" misses -- but
+-- a BAG SLOT's link carries the suffix, because it links the real item. People
+-- routinely mail one of something they still have more of.
+box[1].items[1].n = "Training Sword of Agility"
+box[1].items[1].l = nil
+ITEM_CACHE["Training Sword of Agility"] = nil     -- as the real cache behaves
+BAGS = { [0] = {
+    [1] = { name = "Training Sword of Agility", texture = "t1", count = 1,
+            id = 6273, suffix = 1783 },
+} }
+A.ui.OpenSentRecord(1)
+GameTooltip:Hide()
+check(hover(sword), "the row is hoverable")
+check(GameTooltip.shown and GameTooltip.shown.kind == "link",
+      "and opens the REAL tooltip, recovered from the bags",
+      GameTooltip.shown and GameTooltip.shown.kind)
+check(GameTooltip.shown.link == "item:6273:0:1783:0",
+      "with the SUFFIX intact -- the whole point of using the bag link",
+      GameTooltip.shown.link)
+unhover(sword)
+
 print("== tooltips: a suffixed old record falls back to the name ==")
 -- The limit of that recovery, and it is a real one: the item cache is keyed on
 -- the BASE item, so "Training Sword of Agility" is not a lookup key -- only
@@ -3656,6 +3680,7 @@ print("== tooltips: a suffixed old record falls back to the name ==")
 -- thing that actually fixes it, and the cache lookup is only a bonus.
 box[1].items[1].n = "Training Sword of Agility"
 box[1].items[1].l = nil
+BAGS = { [0] = {} }                    -- the player mailed away their only one
 A.ui.OpenSentRecord(1)
 GameTooltip:Hide()
 check(hover(sword), "the row is hoverable")

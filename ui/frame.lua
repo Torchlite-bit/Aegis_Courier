@@ -416,6 +416,17 @@ local function ShowSentItemTooltip(owner, link, name, count)
     -- item, so "Training Sword of Agility" is not a lookup key and "Training
     -- Sword" is. Those keep falling back to text, which is why this is a
     -- bonus rather than a replacement for capturing the link at send time.
+    -- FIRST, the player's own bags. A bag slot's link carries the SUFFIX,
+    -- because it is a link to the actual item -- so this recovers a "Training
+    -- Sword of Agility" correctly where the name-keyed item cache cannot. It
+    -- is also common: people mail one of something they still have more of.
+    if not target and name and A.send and A.send.FindItemLink then
+        target = A.send.FindItemLink(name)
+    end
+    -- Then the item cache, which answers for an ordinary item the client has
+    -- seen even when the player no longer owns one. It CANNOT answer for a
+    -- random-suffix name, so it is tried second: a bag hit is exact, a cache
+    -- hit is only exact for items that have no suffix to lose.
     if not target and name and GetItemInfo then
         local _, cached = GetItemInfo(name)
         target = util.ItemStringFromLink(cached)
