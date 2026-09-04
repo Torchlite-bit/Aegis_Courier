@@ -84,6 +84,15 @@ CreateFrame = function(kind, name, parent, template)
     function f:CreateTexture() return newRegion() end
     function f:GetRegions() return newRegion() end
     function f:IsVisible() return self.visible end
+    -- REAL mouse-enable tracking. A plain Frame does NOT receive mouse events
+    -- until EnableMouse(true) -- only Buttons are interactive by default -- so
+    -- a hover target built as a Frame and never enabled is simply dead. The
+    -- CamelCase no-op swallowed this, and a test that called OnEnter directly
+    -- could not tell a live target from a dead one. Buttons start true, other
+    -- frames false, exactly as the client has it.
+    rawset(f, "mouseEnabled", (kind == "Button"))
+    function f:EnableMouse(on) rawset(self, "mouseEnabled", on and true or false) end
+    function f:IsMouseEnabled() return rawget(self, "mouseEnabled") end
     function f:GetChecked() return self.checked end
     function f:SetChecked(v) self.checked = v and true or false end
     -- EditBoxes are frames, so text lives here too, not only on regions.
@@ -321,6 +330,37 @@ fakeClock = 0
 GetTime = function() return fakeClock end
 -- Whichever EditBox currently holds the keyboard, or nil.
 focusedBox = nil
+-- GameTooltip, recording what it was asked to show rather than drawing it.
+--
+-- 1.12 has no GetInboxItemLink (rule 10), so the ONLY way to show a mail
+-- attachment's tooltip is SetInboxItem(index) -- the call Blizzard's own
+-- InboxFrameItem_OnEnter makes. A mock that swallowed these would let a
+-- tooltip point at the wrong mail, or at nothing, and say nothing about it.
+-- `shown` is what a test asserts on; `owner` catches a tooltip anchored to
+-- the wrong frame, which is how one ends up drawn across the window.
+GameTooltip = CreateFrame("Frame", "GameTooltip")
+GameTooltip.shown = nil
+GameTooltip.owner = nil
+function GameTooltip:SetOwner(owner, anchor)
+    rawset(self, "owner", owner)
+    rawset(self, "anchor", anchor)
+end
+function GameTooltip:SetInboxItem(index)
+    rawset(self, "shown", { kind = "inbox", index = index })
+end
+function GameTooltip:SetBagItem(bag, slot)
+    rawset(self, "shown", { kind = "bag", bag = bag, slot = slot })
+end
+function GameTooltip:SetText(t)
+    rawset(self, "shown", { kind = "text", text = t })
+end
+function GameTooltip:Show() rawset(self, "visible", true) end
+function GameTooltip:Hide()
+    rawset(self, "visible", false)
+    rawset(self, "shown", nil)
+    rawset(self, "owner", nil)
+end
+
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
 MiniMapMailFrame:Show()
 -- Counts operations the SERVER would have to perform. The pump below clocks
@@ -538,6 +578,26 @@ local function Click(btn)
     if btn.IsEnabled and not btn:IsEnabled() then return false end
     btn.scripts.OnClick()
     return true
+end
+
+-- Hover a frame the way the client would: a frame that is hidden, or that
+-- never enabled the mouse, receives nothing at all. Calling OnEnter directly
+-- bypasses both and will happily "test" a target the player cannot reach.
+local function hover(f)
+    if not f then return false end
+    -- Mouse-enable only. Visibility is NOT checked here: this mock creates
+    -- frames hidden, where the client creates them shown, so `visible` is only
+    -- meaningful on a frame something explicitly Show()s or Hide()s. The tests
+    -- that care assert it directly rather than having it silently swallow a
+    -- hover here.
+    if not f:IsMouseEnabled() then return false end
+    if not f.scripts.OnEnter then return false end
+    f.scripts.OnEnter()
+    return true
+end
+
+local function unhover(f)
+    if f and f.scripts.OnLeave then f.scripts.OnLeave() end
 end
 
 local function fire(e, a1)
@@ -2624,6 +2684,92 @@ check(A.ui.ReaderOpen() == false, "switching tabs closes it")
 A.ui.SelectSubTab("Inbox")
 check(A.ui.ReaderOpen() == false, "and coming back lands on the list")
 
+print("== tooltips: an inbox row shows its attachment's real tooltip ==")
+-- 1.12 has NO GetInboxItemLink, so an attachment cannot be turned into a link
+-- and handed to SetHyperlink (rule 10). SetInboxItem(index) needs no link --
+-- it is what Blizzard's own InboxFrameItem_OnEnter calls -- and it takes the
+-- ABSOLUTE index, which is the one thing that must not be got wrong: point it
+-- at the wrong number and the player reads the wrong item's tooltip.
+INBOX = {
+    mail{ sender = "Ann", subject = "letter", money = 100 },
+    mail{ sender = "Bob", subject = "parcel", item = "Black Lotus" },
+}
+A.ui.CloseReader()
+A.ui.SelectSubTab("Inbox")
+A.ui.RefreshInbox()
+GameTooltip:Hide()
+local rowA, rowB = A.ui.inboxRows[1], A.ui.inboxRows[2]
+check(rowB.mailIndex == 2, "row 2 is the mail with the item", rowB.mailIndex)
+check(hover(rowB), "the row is a live hover target")
+check(GameTooltip.shown ~= nil, "hovering it opened a tooltip")
+check(GameTooltip.shown.kind == "inbox",
+      "and it is the CLIENT's item tooltip, not text we invented",
+      GameTooltip.shown.kind)
+check(GameTooltip.shown.index == 2,
+      "pointed at the absolute index of THAT mail", GameTooltip.shown.index)
+check(GameTooltip.owner == rowB, "anchored to the row it came from")
+unhover(rowB)
+check(GameTooltip.shown == nil, "and it closes on leaving")
+
+-- A mail with nothing attached has nothing to show, and must not leave the
+-- previous mail's tooltip standing.
+check(hover(rowA), "the letter row is live too")
+check(GameTooltip.shown == nil, "a letter opens no tooltip at all")
+
+print("== tooltips: the reader shows the attachment it is displaying ==")
+A.ui.OpenReader(2)
+GameTooltip:Hide()
+check(A.ui.readerIconHover.visible == true,
+      "the hover target is live on a mail with an item")
+check(hover(A.ui.readerIconHover), "the reader hover target is live")
+check(GameTooltip.shown and GameTooltip.shown.kind == "inbox",
+      "the real item tooltip again")
+check(GameTooltip.shown.index == 2, "for the mail the reader is on",
+      GameTooltip.shown.index)
+unhover(A.ui.readerIconHover)
+A.ui.CloseReader()
+-- ...and it is not left hovering over an empty mail.
+A.ui.OpenReader(1)
+check(A.ui.readerIconHover.visible == false,
+      "no hover target on a mail with no attachment")
+A.ui.CloseReader()
+
+print("== tooltips: a compose slot shows the BAG item, live ==")
+-- These are real stacks in the player's bags, so the full tooltip is
+-- available through SetBagItem -- no need to settle for a name.
+stockBags()
+send.atMailbox = false
+send.Attach(0, 1)
+A.ui.RefreshSend()
+GameTooltip:Hide()
+local slot1 = A.ui.sendSlots[1]
+check(hover(slot1), "the compose slot is a live hover target")
+check(GameTooltip.shown and GameTooltip.shown.kind == "bag",
+      "the bag item's own tooltip")
+check(GameTooltip.shown.bag == 0 and GameTooltip.shown.slot == 1,
+      "for the slot the attachment points at",
+      tostring(GameTooltip.shown.bag) .. "/" .. tostring(GameTooltip.shown.slot))
+unhover(slot1)
+
+-- A coordinate goes stale (rule 24). If the stack has left the slot, fall back
+-- to the name rather than pointing SetBagItem at nothing.
+BAGS[0][1] = nil
+GameTooltip:Hide()
+check(hover(slot1), "the compose slot is a live hover target")
+check(GameTooltip.shown and GameTooltip.shown.kind == "text",
+      "an emptied slot falls back to text",
+      GameTooltip.shown and GameTooltip.shown.kind)
+check(A.util.Contains(GameTooltip.shown.text or "", "Silk Cloth"),
+      "naming the item that was queued", GameTooltip.shown.text)
+unhover(slot1)
+
+-- An empty slot is not a target at all.
+send.ClearAttachments()
+A.ui.RefreshSend()
+GameTooltip:Hide()
+check(hover(slot1), "the compose slot is a live hover target")
+check(GameTooltip.shown == nil, "an unused slot opens nothing")
+
 print("== reader: COD and GM mail offer no Take button ==")
 INBOX = {
     mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
@@ -3323,6 +3469,61 @@ check(rec.items[1].c == 20, "stack count", rec.items[1].c)
 check(rec.items[2].n == "Copper Ore", "second item", rec.items[2].n)
 check(rec.money == 5000, "gold recorded once for the batch", rec.money)
 check(rec.char ~= nil, "and which character sent it", tostring(rec.char))
+
+print("== tooltips: a SENT item can only offer what was written down ==")
+-- The one place the real tooltip is unavailable, and it is not a shortcoming
+-- of this code: a sent mail is GONE from the client. There is no index to give
+-- SetInboxItem and no link to build, so the name and count Courier captured at
+-- send time are the whole of what exists. Worth showing anyway -- the list
+-- clips long names and this is where the full one is readable.
+A.db.ClearLog()
+stockBags()
+send.atMailbox = false
+send.Attach(0, 1)
+send.Start("Ann", "supplies", "", 0, false, false)
+pumpSend()
+A.ui.SelectSubTab("Sent")
+A.ui.OpenSentRecord(1)
+GameTooltip:Hide()
+local itemRow = A.ui.sentItemRows[1]
+check(itemRow.visible == true, "the record lists its item")
+check(hover(itemRow), "the sent item row is a live hover target")
+check(GameTooltip.shown ~= nil, "hovering it opens a tooltip")
+check(GameTooltip.shown.kind == "text",
+      "text, because no link or index survives a sent mail",
+      GameTooltip.shown.kind)
+check(A.util.Contains(GameTooltip.shown.text or "", "Silk Cloth"),
+      "naming the item", GameTooltip.shown.text)
+check(A.util.Contains(GameTooltip.shown.text or "", "20"),
+      "and its count", GameTooltip.shown.text)
+unhover(itemRow)
+check(GameTooltip.shown == nil, "and closes again")
+
+-- Item rows are RECYCLED between records. A row that carried an item for a
+-- two-item mail must not still answer for it when a one-item mail reuses it --
+-- the row is hidden, but a hidden frame keeps whatever was last written to it,
+-- and this hover reads a field rather than the label.
+A.db.ClearLog()
+stockBags()
+send.Attach(0, 1); send.Attach(0, 2)          -- a TWO-item batch first
+send.Start("Bob", "two things", "", 0, false, false)
+pumpSend()
+A.ui.OpenSentRecord(1)
+check(A.ui.sentItemRows[2].visible == true, "row 2 carried the second item")
+check(A.ui.sentItemRows[2].itemName ~= nil, "and remembers its name")
+
+send.Attach(0, 3)                              -- then a ONE-item batch
+send.Start("Cid", "one thing", "", 0, false, false)
+pumpSend()
+-- The box is appended in order, so the one-item batch is record 2.
+A.ui.OpenSentRecord(2)
+local stale = A.ui.sentItemRows[2]
+check(stale.visible == false, "row 2 is no longer shown")
+GameTooltip:Hide()
+stale.scripts.OnEnter()
+check(GameTooltip.shown == nil,
+      "and it no longer answers for the item it used to hold",
+      GameTooltip.shown and GameTooltip.shown.text)
 
 print("== sent box: COD is recorded as COD, not as gold ==")
 A.db.ClearLog()

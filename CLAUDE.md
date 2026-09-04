@@ -83,6 +83,13 @@ section, which is Courier's equivalent hazard surface.
     `name, itemTexture, count, quality, canUse` — a **name and texture, no
     link and no itemID**. Any item identity must be resolved from the NAME.
     Do not write code that assumes a link is obtainable from the inbox.
+    - **A TOOLTIP still does not need one.** `GameTooltip:SetInboxItem(index)`
+      takes the absolute index and no link — it is what Blizzard's own
+      `InboxFrameItem_OnEnter` calls. `GameTooltip:SetBagItem(bag, slot)` is
+      the equivalent for the player's bags. Reaching for `SetHyperlink` is what
+      leads to the false conclusion that mail tooltips are impossible here.
+    - A **sent** record gets neither: the mail is gone from the client, so all
+      that exists is what was captured at send time. Name and count, as text.
 11. **Hiding `MailFrame` ENDS the mail session.** `MailFrame`'s XML `<OnHide>`
     runs **`CloseMail()`**, so **any** `MailFrame:Hide()` /
     `HideUIPanel(MailFrame)` closes the server session, after which
@@ -534,6 +541,10 @@ Read their patterns for how vanilla mailbox automation is done in practice —
 - [ ] COD is reachable ONLY through the reader's two-click Pay button; every
       automatic path still skips it, and `take.codIndex` names one index and is
       compared against `take.index`.
+- [ ] A hover target that is a plain `Frame` called `EnableMouse(true)`. Only
+      Buttons are interactive by default, so a Frame that skips it is dead --
+      and a test that calls `OnEnter` directly cannot tell the difference.
+      Hover through the harness's `hover()` helper, which checks.
 - [ ] A mock that cannot express a failure cannot test it. Before trusting a
       new test, SABOTAGE the code it covers — a test that still passes is
       testing nothing. Both the pickup-no-op and the refused-attach fixes had

@@ -32,7 +32,7 @@ A.name = "Aegis_Courier"   -- must match the folder / .toc / ADDON_LOADED
 -- bar kept claiming 1.0.4. Read the real thing instead. The literal below is
 -- only a fallback for a client without GetAddOnMetadata, and the test harness
 -- parses the .toc and asserts the two agree so it cannot drift again.
-A.version = "1.8.2"
+A.version = "1.9.0"
 if GetAddOnMetadata then
     local v = GetAddOnMetadata("Aegis_Courier", "Version")
     if type(v) == "string" and v ~= "" then A.version = v end
