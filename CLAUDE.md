@@ -90,6 +90,19 @@ section, which is Courier's equivalent hazard surface.
       leads to the false conclusion that mail tooltips are impossible here.
     - A **sent** record gets neither: the mail is gone from the client, so all
       that exists is what was captured at send time. Name and count, as text.
+      The Sent HISTORY row shows the whole record that way -- every item, the
+      money, the mail count -- because the row itself is a clipped one-liner
+      and a record can carry twelve items.
+    - **Open a multi-line tooltip with `SetText`, then `AddLine`.** `SetText`
+      REPLACES, `AddLine` appends; both `SetText` and `SetOwner` clear the
+      tooltip on the real client, which is what stops one row's contents
+      stacking under the next row's heading when the cursor moves straight
+      between them. A mock whose `SetOwner` does not clear cannot represent
+      that and will assert against a state the client never produces.
+    - **A row that stashes a record for its hover must let go of it when the
+      row is recycled.** Rows are reused and a hidden frame keeps whatever was
+      last written to it, so a list that shrinks leaves rows still describing
+      mail that is no longer listed.
 11. **Hiding `MailFrame` ENDS the mail session.** `MailFrame`'s XML `<OnHide>`
     runs **`CloseMail()`**, so **any** `MailFrame:Hide()` /
     `HideUIPanel(MailFrame)` closes the server session, after which
