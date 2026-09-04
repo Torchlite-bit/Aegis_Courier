@@ -83,6 +83,13 @@ section, which is Courier's equivalent hazard surface.
     `name, itemTexture, count, quality, canUse` — a **name and texture, no
     link and no itemID**. Any item identity must be resolved from the NAME.
     Do not write code that assumes a link is obtainable from the inbox.
+    - **A TOOLTIP still does not need one.** `GameTooltip:SetInboxItem(index)`
+      takes the absolute index and no link — it is what Blizzard's own
+      `InboxFrameItem_OnEnter` calls. `GameTooltip:SetBagItem(bag, slot)` is
+      the equivalent for the player's bags. Reaching for `SetHyperlink` is what
+      leads to the false conclusion that mail tooltips are impossible here.
+    - A **sent** record gets neither: the mail is gone from the client, so all
+      that exists is what was captured at send time. Name and count, as text.
 11. **Hiding `MailFrame` ENDS the mail session.** `MailFrame`'s XML `<OnHide>`
     runs **`CloseMail()`**, so **any** `MailFrame:Hide()` /
     `HideUIPanel(MailFrame)` closes the server session, after which
@@ -301,6 +308,24 @@ section, which is Courier's equivalent hazard surface.
       transient reasons and the loop cannot tell which. The probe needs a LIVE
       mail session; without one `GetSendMailItem` answers nil for everything
       and would condemn every item in the game.
+    - **THE PROBE MUST FAIL OPEN, and this is not a style preference.** A wrong
+      "no" REFUSES THE ATTACH — the player cannot mail the item at all. A wrong
+      "yes" costs one skipped mail at send time, which the batch already
+      handles and reports. Answer no ONLY on positive evidence: the pickup
+      landed on the cursor (`CursorHasItem`) **and** the mail then refused it,
+      leaving it still held. Every other outcome is a yes.
+      - Moving the question earlier did NOT make it immune to the transient
+        failures it was written to escape. Taking "nothing attached" as proof
+        shipped again as "Training Sword of the Tiger cannot be mailed" — a
+        busy slot, condemned. Same bug, one step upstream.
+    - **Never probe with something on the cursor.** That is drag-to-attach: the
+      item is held and its source slot is locked until the server says
+      otherwise, so clearing the cursor to make room for a probe drops what the
+      player is dragging. Skip and assume mailable.
+    - These guards are deliberately redundant — each alone prevents the false
+      positive — so no single sabotage can prove any one of them. Prove them by
+      restoring the whole broken probe, and pin the drag guard separately by
+      counting that it touches the attachment slot ZERO times mid-drag.
     - **Empty the mail's attachment slot BEFORE resolving anything.** A mail the
       server refused leaves its item in that slot rather than in the bags, so
       resolving first concludes the stack vanished and skips every
@@ -534,6 +559,10 @@ Read their patterns for how vanilla mailbox automation is done in practice —
 - [ ] COD is reachable ONLY through the reader's two-click Pay button; every
       automatic path still skips it, and `take.codIndex` names one index and is
       compared against `take.index`.
+- [ ] A hover target that is a plain `Frame` called `EnableMouse(true)`. Only
+      Buttons are interactive by default, so a Frame that skips it is dead --
+      and a test that calls `OnEnter` directly cannot tell the difference.
+      Hover through the harness's `hover()` helper, which checks.
 - [ ] A mock that cannot express a failure cannot test it. Before trusting a
       new test, SABOTAGE the code it covers — a test that still passes is
       testing nothing. Both the pickup-no-op and the refused-attach fixes had

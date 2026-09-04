@@ -339,6 +339,71 @@ local function SetClipped(fs, text, maxWidth)
     fs:SetText(string.sub(text, 1, lo) .. "...")
 end
 
+-- ---------------------------------------------------------------------------
+-- Item tooltips
+-- ---------------------------------------------------------------------------
+-- There is NO GetInboxItemLink on 1.12 (CLAUDE.md rule 10), so an attachment
+-- cannot be turned into a link and handed to GameTooltip:SetHyperlink. That is
+-- not a dead end, because the client offers a call that needs no link at all:
+--
+--   GameTooltip:SetInboxItem(index)   -- inbox attachment, ABSOLUTE index
+--   GameTooltip:SetBagItem(bag, slot) -- a stack in the player's bags
+--
+-- SetInboxItem is exactly what Blizzard's own InboxFrameItem_OnEnter calls, so
+-- it is as available as the mailbox itself. Both are guarded here anyway: a
+-- server build without one costs a tooltip, never an error.
+--
+-- A SENT record gets neither. The mail is gone from the client and there is no
+-- API to read one back (rule: "captured AT SEND TIME"), so all that exists is
+-- the name and count Courier wrote down. Those get a plain text tooltip --
+-- less than the real thing, and still better than nothing.
+local function HideTooltip()
+    if GameTooltip then GameTooltip:Hide() end
+end
+
+-- Show the real item tooltip for an inbox attachment.
+local function ShowInboxTooltip(owner, index)
+    if not GameTooltip or not index then return end
+    if not GameTooltip.SetInboxItem then return end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:SetInboxItem(index)
+    GameTooltip:Show()
+end
+
+-- Show the real item tooltip for a bag slot, but only while the slot still
+-- holds something. A queued attachment is a coordinate and coordinates go
+-- stale (rule 24); pointing SetBagItem at an emptied slot is not worth
+-- finding out the hard way.
+local function ShowBagTooltip(owner, bag, slot, fallbackName, fallbackCount)
+    if not GameTooltip then return end
+    local live = GetContainerItemInfo and bag and slot
+        and GetContainerItemInfo(bag, slot)
+    if live and GameTooltip.SetBagItem then
+        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+        GameTooltip:SetBagItem(bag, slot)
+        GameTooltip:Show()
+        return
+    end
+    if not fallbackName then return end
+    local text = fallbackName
+    if fallbackCount and fallbackCount > 1 then
+        text = text .. " x" .. fallbackCount
+    end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:SetText(text)
+    GameTooltip:Show()
+end
+
+-- Name and count only -- everything a sent record has.
+local function ShowTextTooltip(owner, name, count)
+    if not GameTooltip or not name then return end
+    local text = name
+    if count and count > 1 then text = text .. " x" .. count end
+    GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+    GameTooltip:SetText(text)
+    GameTooltip:Show()
+end
+
 local function Backdrop(frame, bg, border)
     frame:SetBackdrop({
         bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
@@ -1096,6 +1161,15 @@ function ui.BuildInboxPanel()
         -- Right-click takes this one mail, matching TurtleMail's muscle
         -- memory. Left-click opens the reader.
         row:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        -- Hovering ANY part of the row shows the attachment's tooltip, which
+        -- is what Blizzard's own inbox does -- its mail buttons are the whole
+        -- row too. The icon alone is 22px and a texture cannot take mouse
+        -- events without a frame of its own, so this is both the friendlier
+        -- target and the cheaper one.
+        row:SetScript("OnEnter", function()
+            if row.hasItem then ShowInboxTooltip(row, row.mailIndex) end
+        end)
+        row:SetScript("OnLeave", HideTooltip)
         row:SetScript("OnClick", function()
             if not row.mailIndex then return end
             -- 1.12 delivers the clicked button in the arg1 GLOBAL.
@@ -1213,6 +1287,21 @@ function ui.BuildReader(well)
     local attach = Label(r, "GameFontNormalSmall", C.text)
     attach:SetPoint("LEFT", icon, "RIGHT", 6, 0)
     ui.readerAttach = attach
+
+    -- A texture receives no mouse events, so the hover target is a frame laid
+    -- over the icon AND the name beside it -- the name is the bigger target
+    -- and the one people actually aim at. Shown and hidden with the icon, so
+    -- an empty mail has nothing to hover.
+    local iconHover = CreateFrame("Frame", nil, r)
+    iconHover:SetPoint("TOPLEFT", icon, "TOPLEFT", 0, 0)
+    iconHover:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 220, 0)
+    iconHover:EnableMouse(true)
+    iconHover:SetScript("OnEnter", function()
+        ShowInboxTooltip(iconHover, ui.readerIndex)
+    end)
+    iconHover:SetScript("OnLeave", HideTooltip)
+    iconHover:Hide()
+    ui.readerIconHover = iconHover
 
     local money = Label(r, "GameFontNormalSmall", C.gold)
     money:SetPoint("TOPRIGHT", r, "TOPRIGHT", -4, -48)
@@ -1393,6 +1482,7 @@ function ui.RefreshReader()
         local item = inbox.Item(idx)
         ui.readerIcon:SetTexture(item and item.texture or inbox.Icon(h))
         ui.readerIcon:Show()
+        ui.readerIconHover:Show()
         local label = item and item.name or "attachment"
         if item and item.count and item.count > 1 then
             label = label .. " x" .. item.count
@@ -1400,6 +1490,7 @@ function ui.RefreshReader()
         ui.readerAttach:SetText(label)
     else
         ui.readerIcon:Hide()
+        ui.readerIconHover:Hide()
         ui.readerAttach:SetText("")
     end
 
@@ -1683,6 +1774,10 @@ function ui.RefreshInbox()
 
             row.expire:SetText(util.FormatDaysLeft(h.daysLeft))
             row.mailIndex = h.index
+            -- Read by the row's OnEnter. `hasItem` is an item COUNT on some
+            -- server builds and boolean-ish on others (rule 8), so this is a
+            -- truthiness test and nothing more.
+            row.hasItem = h.hasItem and true or false
 
             -- `canReply` is the same gate FrameXML uses to enable its own
             -- Reply button: auction-house and system mail have it unset and
@@ -1697,6 +1792,7 @@ function ui.RefreshInbox()
             row:Show()
         else
             row.mailIndex = nil
+            row.hasItem = false
             row.ret:Hide()
             row:Hide()
         end
@@ -2033,6 +2129,12 @@ function ui.BuildSendPanel()
             end
         end)
         b:SetScript("OnReceiveDrag", function() A.send.AttachCursor() end)
+        b:SetScript("OnEnter", function()
+            local att = A.send.attachments[b.slotIndex]
+            if not att then return end
+            ShowBagTooltip(b, att.bag, att.slot, att.name, att.count)
+        end)
+        b:SetScript("OnLeave", HideTooltip)
         ui.sendSlots[i] = b
         i = i + 1
     end
@@ -2773,6 +2875,17 @@ function ui.BuildSentReader(well)
         label:SetPoint("LEFT", f, "LEFT", 18, 0)
         f.label = label
 
+        -- Name and count only. A sent mail is GONE from the client -- there is
+        -- no index to point SetInboxItem at and no link to build -- so this is
+        -- the whole of what Courier wrote down at send time. It is also why
+        -- the row can still be worth hovering: the list clips long names, and
+        -- the tooltip is where the full one is readable.
+        f:EnableMouse(true)
+        f:SetScript("OnEnter", function()
+            ShowTextTooltip(f, f.itemName, f.itemCount)
+        end)
+        f:SetScript("OnLeave", HideTooltip)
+
         f:Hide()
         ui.sentItemRows[n] = f
         n = n + 1
@@ -3026,8 +3139,14 @@ function ui.RefreshSentReader()
             local label = it.n or "?"
             if it.c and it.c > 1 then label = label .. " x" .. it.c end
             SetClipped(f.label, label, 258)
+            -- Kept unclipped for the tooltip, which is the only place a long
+            -- name can be read in full.
+            f.itemName = it.n
+            f.itemCount = it.c
             f:Show()
         else
+            f.itemName = nil
+            f.itemCount = nil
             f:Hide()
         end
         i = i + 1

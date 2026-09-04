@@ -9,6 +9,58 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.1]
+
+Fixes ordinary items being refused with "cannot be mailed". `/reload`.
+
+### Fixed
+- **"&lt;item&gt; cannot be mailed" fired on perfectly mailable items** — reported
+  on a *Training Sword of the Tiger* — and, worse, **refused the attach**, so
+  the item could not be mailed at all.
+  - The attach-time probe treated "nothing ended up attached" as proof the
+    item was unmailable. That is the exact mistake the probe was added in 1.8.0
+    to fix *in the send loop*: an attach also fails for transient reasons. On a
+    slot the server is briefly holding, `PickupContainerItem` is a silent
+    no-op, nothing attaches, and the item was condemned.
+  - **The probe now fails open.** It answers "no" only on positive evidence —
+    the pickup landed on the cursor *and* the mail then refused it. Every
+    ambiguous outcome answers "yes" and lets the send loop find out. A wrong
+    "no" costs the player the item; a wrong "yes" costs one skipped mail the
+    batch already reports, so the two are not remotely equal.
+  - **It also no longer probes while an item is on the cursor.** That is the
+    drag-to-attach path: the item is held and its bag slot is locked until the
+    server says otherwise, so clearing the cursor to run a probe would drop
+    what the player is dragging. Nothing can be learned safely in that state.
+- A genuinely unmailable item — soulbound, quest, conjured — is still caught
+  and still named. Failing open is not failing blind.
+
+## [1.9.0]
+
+Item tooltips on mail. `/reload`.
+
+### Added
+- **Hovering a mail shows its attachment's tooltip** — the real one, with
+  stats, quality and everything else the game knows. Hovering anywhere on the
+  row works, which is what Blizzard's own inbox does; the icon alone is 22px.
+- **The reader shows it too**, over the attachment's icon and name.
+- **Compose attachment slots show the item you queued**, read live from the
+  bag so it is the full tooltip rather than a name.
+- **Sent records show what was recorded**: the item name and count. Less than
+  the others get, and unavoidably so — see below — but it is also where a long
+  name clipped by the list can finally be read in full.
+
+### Notes
+- There is **no `GetInboxItemLink` on 1.12**, so none of this could be done by
+  building a link. The client offers `GameTooltip:SetInboxItem(index)` instead,
+  which needs no link at all and is what Blizzard's own
+  `InboxFrameItem_OnEnter` calls; compose slots use `SetBagItem(bag, slot)`.
+  Both are guarded, so a server build missing one costs a tooltip, never an
+  error.
+- A **sent** mail is gone from the client — no index to point at, no link to
+  build — so its tooltip can only ever be the name and count Courier wrote
+  down at send time. A queued compose attachment whose stack has since left the
+  slot falls back the same way rather than pointing `SetBagItem` at nothing.
+
 ## [1.8.2]
 
 The send loop is now TurtleMail's, down to which frame each mail leaves on.

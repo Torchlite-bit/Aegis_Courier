@@ -237,14 +237,31 @@ end
 -- had merely lost a race. A question with a definite answer belongs where the
 -- user can still do something about it.
 function send.IsMailable(bag, slot)
-    -- Needs a LIVE mail session. Without one the attach silently does nothing
-    -- and GetSendMailItem answers nil for everything -- which would condemn
-    -- every item in the game as unmailable. Away from a mailbox, say yes and
-    -- let the send loop find out.
+    -- IT FAILS OPEN, AND THAT IS THE WHOLE DESIGN.
+    --
+    -- A wrong "no" here REFUSES THE ATTACH -- the player cannot mail the item
+    -- at all, and is told their perfectly ordinary sword is unmailable. A
+    -- wrong "yes" costs one skipped mail at send time, which the batch already
+    -- handles and reports. The two mistakes are nowhere near equal, so this
+    -- returns false ONLY on positive evidence that the mail refused the item,
+    -- and true in every other case including every ambiguous one.
+    --
+    -- That is not what shipped. The first version took "nothing attached" as
+    -- proof of unmailable, which is the exact mistake this probe was written
+    -- to fix in the send loop: an attach fails for transient reasons too, and
+    -- a run of "Training Sword of the Tiger cannot be mailed" reports followed.
     if not send.atMailbox then return true end
     if not ClickSendMailItemButton or not GetSendMailItem then return true end
     -- Never while a batch is in flight: this moves the attachment slot.
     if send.sending then return true end
+
+    -- NEVER PROBE WITH SOMETHING ON THE CURSOR. That is the drag-to-attach
+    -- path -- the item is held, and the bag slot it came from is LOCKED until
+    -- the server says otherwise. Clearing the cursor here would drop what the
+    -- player is dragging, and the pickup below would then no-op against the
+    -- still-locked slot and condemn the item. Nothing can be learned safely
+    -- in this state, so learn nothing.
+    if CursorHasItem and CursorHasItem() then return true end
 
     if ClearCursor then ClearCursor() end
     ClickSendMailItemButton()
@@ -255,14 +272,29 @@ function send.IsMailable(bag, slot)
     else
         PickupContainerItem(bag, slot)
     end
+
+    -- DID THE PICKUP LAND? On a slot the server is holding it is a silent
+    -- no-op (rule 24), and `locked` is a cached view that lies about exactly
+    -- this. An empty cursor here says nothing whatsoever about the item, so it
+    -- must not be read as a verdict on it.
+    if CursorHasItem and not CursorHasItem() then
+        if ClearCursor then ClearCursor() end
+        return true
+    end
+
     ClickSendMailItemButton()
-    local ok = GetSendMailItem() and true or false
+    local attached = GetSendMailItem() and true or false
     -- Take it back off whatever the answer was, and put the cursor down. The
     -- slot must be left exactly as it was found -- this is a probe, not a
     -- send, and anything left attached here would be posted by the next mail.
-    ClickSendMailItemButton()
+    if attached then ClickSendMailItemButton() end
+    -- The mail REFUSED it: the pickup landed (checked above) and the item is
+    -- still sitting on the cursor rather than in the attachment slot. That is
+    -- the one outcome that means the item itself cannot be posted, and the
+    -- only one that answers no.
+    local refused = (not attached) and CursorHasItem and CursorHasItem()
     if ClearCursor then ClearCursor() end
-    return ok
+    return not refused
 end
 
 function send.Attach(bag, slot)
