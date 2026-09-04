@@ -88,21 +88,26 @@ section, which is Courier's equivalent hazard surface.
       `InboxFrameItem_OnEnter` calls. `GameTooltip:SetBagItem(bag, slot)` is
       the equivalent for the player's bags. Reaching for `SetHyperlink` is what
       leads to the false conclusion that mail tooltips are impossible here.
-    - A **sent** record gets neither: the mail is gone from the client, so all
-      that exists is what was captured at send time. Name and count, as text.
-      The Sent HISTORY row shows the whole record that way -- every item, the
-      money, the mail count -- because the row itself is a clipped one-liner
-      and a record can carry twelve items.
-    - **Open a multi-line tooltip with `SetText`, then `AddLine`.** `SetText`
-      REPLACES, `AddLine` appends; both `SetText` and `SetOwner` clear the
-      tooltip on the real client, which is what stops one row's contents
-      stacking under the next row's heading when the cursor moves straight
-      between them. A mock whose `SetOwner` does not clear cannot represent
-      that and will assert against a state the client never produces.
-    - **A row that stashes a record for its hover must let go of it when the
-      row is recycled.** Rows are reused and a hidden frame keeps whatever was
-      last written to it, so a list that shrinks leaves rows still describing
-      mail that is no longer listed.
+    - A **sent** item gets neither — and still shows a real tooltip, because
+      the link is captured EARLIER. At send time the item is still a stack in a
+      bag, and a bag slot HAS a link (`send.SlotInfo`), so the item string is
+      stored on the record and the reader hands it to
+      `GameTooltip:SetHyperlink`. "There is no link" is true of the inbox and
+      true of a sent mail; it is not true of the moment in between, and that
+      moment is the only chance to take one. Settling for a name because the
+      two ends have no link is how the Sent tab shipped worse than every other
+      view.
+    - **Store the whole item STRING, never just the itemID.** The suffix field
+      is what makes a *Training Sword of Agility* that item rather than the
+      plain base weapon; an id alone renders it with none of the stats the
+      player actually has, and still looks like a valid link.
+    - **Records written before a field existed must still render.** Nothing in
+      the sent box is ever backfilled — the mail cannot be re-read — so every
+      reader of it needs a fallback, and the fallback needs its own test.
+    - **A row that stashes data for its hover must let go of it when the row is
+      recycled.** Rows are reused and a hidden frame keeps whatever was last
+      written to it, so a list that shrinks leaves rows still answering for
+      mail that is no longer shown.
 11. **Hiding `MailFrame` ENDS the mail session.** `MailFrame`'s XML `<OnHide>`
     runs **`CloseMail()`**, so **any** `MailFrame:Hide()` /
     `HideUIPanel(MailFrame)` closes the server session, after which

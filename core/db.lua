@@ -461,11 +461,17 @@ end
 -- `texture` is the item's icon path, captured at attach time. Records written
 -- before it existed simply have no `x` field, and the reader falls back rather
 -- than showing a hole -- a sent mail cannot be re-read to fill it in.
-function db.SentAdd(rec, itemName, count, texture)
+-- `link` is the "item:id:enchant:suffix:unique" string, captured from the bag
+-- slot at send time. It is what lets the reader show the item's REAL tooltip;
+-- records written before it was captured simply have no `l` and fall back to
+-- the name, which is the rule for everything in this box -- a sent mail cannot
+-- be re-read, so nothing here is ever backfilled.
+function db.SentAdd(rec, itemName, count, texture, link)
     if not rec then return nil end
     rec.mails = rec.mails + 1
     if itemName then
-        table.insert(rec.items, { n = itemName, c = count or 1, x = texture })
+        table.insert(rec.items,
+            { n = itemName, c = count or 1, x = texture, l = link })
     end
     return rec
 end
