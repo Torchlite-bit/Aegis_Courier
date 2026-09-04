@@ -104,6 +104,19 @@ section, which is Courier's equivalent hazard surface.
     - **Records written before a field existed must still render.** Nothing in
       the sent box is ever backfilled — the mail cannot be re-read — so every
       reader of it needs a fallback, and the fallback needs its own test.
+      - "It works on new mail only" is a poor answer when most of a player's
+        history is old. `GetItemInfo` takes a NAME on 1.12 and returns a link
+        for anything in the item cache, which recovers the real tooltip for an
+        ordinary item with nothing stored but its name.
+      - That recovery **cannot** work for a random-suffix item: the cache is
+        keyed on the BASE item, so "Training Sword of Agility" is not a lookup
+        key and "Training Sword" is. Falling back to text there is correct —
+        showing the base item would display a weapon with none of the stats
+        actually sent. Never let a cache MISS become a link.
+    - **Do not reuse a version number across two different builds.** Two
+      separate 1.9.2 releases shipped with different Sent-tab behaviour, and a
+      user reporting "it still does X" could not be told which one they had.
+      A version is the only thing a bug report carries about the build.
     - **A row that stashes data for its hover must let go of it when the row is
       recycled.** Rows are reused and a hidden frame keeps whatever was last
       written to it, so a list that shrinks leaves rows still answering for

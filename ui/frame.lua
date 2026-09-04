@@ -404,9 +404,26 @@ end
 -- be re-read, so those can never be upgraded.
 local function ShowSentItemTooltip(owner, link, name, count)
     if not GameTooltip then return end
-    if link and GameTooltip.SetHyperlink then
+
+    local target = link
+    -- RECOVERY FOR OLD RECORDS. Anything sent before the link was captured has
+    -- only a name, and that is most of an existing player's history -- telling
+    -- them the feature works "on new mail only" is a poor answer when the
+    -- client can often do better. GetItemInfo takes a NAME on 1.12 and returns
+    -- a link for anything in the item cache, which covers ordinary items.
+    --
+    -- It CANNOT recover a random-suffix item: the cache is keyed on the base
+    -- item, so "Training Sword of Agility" is not a lookup key and "Training
+    -- Sword" is. Those keep falling back to text, which is why this is a
+    -- bonus rather than a replacement for capturing the link at send time.
+    if not target and name and GetItemInfo then
+        local _, cached = GetItemInfo(name)
+        target = util.ItemStringFromLink(cached)
+    end
+
+    if target and GameTooltip.SetHyperlink then
         GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-        GameTooltip:SetHyperlink(link)
+        GameTooltip:SetHyperlink(target)
         GameTooltip:Show()
         return
     end
