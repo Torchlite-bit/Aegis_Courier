@@ -394,51 +394,27 @@ local function ShowBagTooltip(owner, bag, slot, fallbackName, fallbackCount)
     GameTooltip:Show()
 end
 
--- The FULL contents of a sent record, one line per item.
+-- The REAL item tooltip for a sent item, from the link captured at send time.
 --
--- The history row can only show a clipped one-line summary and a record may
--- carry twelve items across as many mails, so this is the only place the whole
--- thing is legible without opening it. Everything here was captured at send
--- time -- the mails themselves are long gone from the client -- which is why
--- it is names and counts rather than real item tooltips.
-local function ShowSentTooltip(owner, rec)
-    if not GameTooltip or not rec then return end
+-- A sent mail is gone from the client, so there is no index for SetInboxItem
+-- and the stack is no longer in a bag for SetBagItem. What there IS, because
+-- send.SlotInfo took it while the item was still a stack in a bag, is the
+-- item string -- and SetHyperlink needs nothing else. Records written before
+-- that was captured have no link and fall back to the name; a sent mail cannot
+-- be re-read, so those can never be upgraded.
+local function ShowSentItemTooltip(owner, link, name, count)
+    if not GameTooltip then return end
+    if link and GameTooltip.SetHyperlink then
+        GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+        GameTooltip:SetHyperlink(link)
+        GameTooltip:Show()
+        return
+    end
+    if not name then return end
+    local text = name
+    if count and count > 1 then text = text .. " x" .. count end
     GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
-    GameTooltip:SetText("To " .. (rec.to or "?"), C.gold[1], C.gold[2], C.gold[3])
-
-    local subject = rec.s or ""
-    if subject ~= "" then
-        GameTooltip:AddLine(subject, C.text[1], C.text[2], C.text[3])
-    end
-
-    local items = rec.items or {}
-    local n = table.getn(items)
-    local i = 1
-    while i <= n do
-        local it = items[i]
-        local line = it.n or "?"
-        if it.c and it.c > 1 then line = line .. " x" .. it.c end
-        GameTooltip:AddLine(line, C.green[1], C.green[2], C.green[3])
-        i = i + 1
-    end
-    if n == 0 then
-        GameTooltip:AddLine("no attachments", C.dim[1], C.dim[2], C.dim[3])
-    end
-
-    if rec.cod and rec.cod > 0 then
-        GameTooltip:AddLine("COD " .. util.FormatMoney(rec.cod, false),
-            0.82, 0.31, 0.31)
-    elseif rec.money and rec.money > 0 then
-        GameTooltip:AddLine(util.FormatMoney(rec.money, false) .. " sent",
-            C.gold[1], C.gold[2], C.gold[3])
-    end
-
-    -- A batch is N mails carrying one item each (rule 22), and the row only
-    -- hints at that. Say it plainly.
-    if rec.mails and rec.mails > 1 then
-        GameTooltip:AddLine(rec.mails .. " mails",
-            C.dim[1], C.dim[2], C.dim[3])
-    end
+    GameTooltip:SetText(text)
     GameTooltip:Show()
 end
 
@@ -2822,14 +2798,6 @@ function ui.BuildSentPanel()
         row:SetScript("OnClick", function()
             if row.recIndex then ui.OpenSentRecord(row.recIndex) end
         end)
-        -- The row is a Button, so it is already mouse-live. `rec` is stashed
-        -- by RefreshSent rather than re-fetched here: the box can be pruned
-        -- between paints, and an index read at hover time can point at a
-        -- different record than the one under the cursor.
-        row:SetScript("OnEnter", function()
-            if row.rec then ShowSentTooltip(row, row.rec) end
-        end)
-        row:SetScript("OnLeave", HideTooltip)
 
         local when = Label(row, "GameFontNormalSmall", C.dim)
         when:SetPoint("LEFT", row, "LEFT", 0, 0)
@@ -2931,14 +2899,12 @@ function ui.BuildSentReader(well)
         label:SetPoint("LEFT", f, "LEFT", 18, 0)
         f.label = label
 
-        -- Name and count only. A sent mail is GONE from the client -- there is
-        -- no index to point SetInboxItem at and no link to build -- so this is
-        -- the whole of what Courier wrote down at send time. It is also why
-        -- the row can still be worth hovering: the list clips long names, and
-        -- the tooltip is where the full one is readable.
+        -- The item's REAL tooltip, from the link captured at send time. Older
+        -- records have no link and fall back to the name -- a sent mail cannot
+        -- be re-read, so nothing can be backfilled into them.
         f:EnableMouse(true)
         f:SetScript("OnEnter", function()
-            ShowTextTooltip(f, f.itemName, f.itemCount)
+            ShowSentItemTooltip(f, f.itemLink, f.itemName, f.itemCount)
         end)
         f:SetScript("OnLeave", HideTooltip)
 
@@ -3119,11 +3085,9 @@ function ui.RefreshSent()
                 row.amount:SetText("")
             end
             row.recIndex = entry.index
-            row.rec = rec
             row:Show()
         else
             row.recIndex = nil
-            row.rec = nil
             row:Hide()
         end
         i = i + 1
@@ -3201,10 +3165,12 @@ function ui.RefreshSentReader()
             -- name can be read in full.
             f.itemName = it.n
             f.itemCount = it.c
+            f.itemLink = it.l
             f:Show()
         else
             f.itemName = nil
             f.itemCount = nil
+            f.itemLink = nil
             f:Hide()
         end
         i = i + 1

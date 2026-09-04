@@ -217,6 +217,21 @@ function util.ItemNameFromLink(link)
     return name
 end
 
+-- Pull the "item:id:enchant:suffix:unique" string out of a full item link.
+--
+-- This is what GameTooltip:SetHyperlink wants, and the SUFFIX field is why the
+-- whole string is kept rather than just the id: a random-suffix item is
+-- "Training Sword" plus suffix 1234, and an id alone would render it as the
+-- plain base item with none of the stats the player actually has.
+function util.ItemStringFromLink(link)
+    if type(link) ~= "string" then return nil end
+    local _, _, s = string.find(link, "|H(item:[^|]+)|h")
+    if s then return s end
+    -- Already an item string rather than a decorated link.
+    if string.find(link, "^item:%d+") then return link end
+    return nil
+end
+
 -- Pull the numeric itemID out of an item link or item string.
 function util.ItemIdFromLink(link)
     if type(link) ~= "string" then return nil end

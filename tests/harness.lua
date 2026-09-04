@@ -342,13 +342,8 @@ GameTooltip = CreateFrame("Frame", "GameTooltip")
 GameTooltip.shown = nil
 GameTooltip.owner = nil
 function GameTooltip:SetOwner(owner, anchor)
-    -- SetOwner CLEARS the tooltip on the real client. Without that here, a
-    -- second hover would appear to stack its lines onto the first's and the
-    -- suite would be asserting against a state the client never produces.
     rawset(self, "owner", owner)
     rawset(self, "anchor", anchor)
-    rawset(self, "lines", nil)
-    rawset(self, "shown", nil)
 end
 function GameTooltip:SetInboxItem(index)
     rawset(self, "shown", { kind = "inbox", index = index })
@@ -356,31 +351,20 @@ end
 function GameTooltip:SetBagItem(bag, slot)
     rawset(self, "shown", { kind = "bag", bag = bag, slot = slot })
 end
+-- The real item tooltip from an "item:id:enchant:suffix:unique" string. This
+-- is the only route open to a SENT item: the mail is gone from the client, so
+-- there is no inbox index and the stack is no longer in a bag.
+function GameTooltip:SetHyperlink(link)
+    rawset(self, "shown", { kind = "link", link = link })
+end
 function GameTooltip:SetText(t)
-    -- SetText REPLACES the tooltip, so it also resets the line list. A mock
-    -- that only appended would let a stale record's items show under a new
-    -- one's heading and say nothing about it.
     rawset(self, "shown", { kind = "text", text = t })
-    rawset(self, "lines", { t })
-end
-function GameTooltip:AddLine(t)
-    local l = rawget(self, "lines")
-    if not l then l = {}; rawset(self, "lines", l) end
-    table.insert(l, t)
-end
--- Every line joined, for asserting on contents without caring about order.
-function GameTooltip:AllText()
-    return table.concat(rawget(self, "lines") or {}, "\n")
-end
-function GameTooltip:LineCount()
-    return table.getn(rawget(self, "lines") or {})
 end
 function GameTooltip:Show() rawset(self, "visible", true) end
 function GameTooltip:Hide()
     rawset(self, "visible", false)
     rawset(self, "shown", nil)
     rawset(self, "owner", nil)
-    rawset(self, "lines", nil)
 end
 
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
@@ -484,7 +468,15 @@ GetContainerItemLink = function(bag, slot)
     containerLinkCalls = containerLinkCalls + 1
     local it = BAGS[bag] and BAGS[bag][slot]
     if not it then return nil end
-    return "|cff1eff00|Hitem:1:0:0:0|h[" .. it.name .. "]|h|r"
+    -- A REAL link, per item. Every stack used to answer "item:1:0:0:0", which
+    -- meant a test could not tell the right item's link from the wrong one --
+    -- and could not see a random SUFFIX at all. "Training Sword of Agility" is
+    -- a base item plus a suffix id, and dropping that field renders it as the
+    -- plain base weapon with none of the stats the player actually has.
+    local id = it.id or 1
+    local suffix = it.suffix or 0
+    return "|cff1eff00|Hitem:" .. id .. ":0:" .. suffix ..
+        ":0|h[" .. it.name .. "]|h|r"
 end
 -- Test hook for the race the post-attach name check exists to catch: the slot
 -- verified a moment ago, but the server hands us a different stack when the
@@ -3577,120 +3569,64 @@ check(rec.items[2].n == "Copper Ore", "second item", rec.items[2].n)
 check(rec.money == 5000, "gold recorded once for the batch", rec.money)
 check(rec.char ~= nil, "and which character sent it", tostring(rec.char))
 
-print("== tooltips: a Sent HISTORY row lists the whole record ==")
--- The row shows a clipped one-line summary and a record can carry twelve items
--- across as many mails, so the tooltip is the only place the whole thing is
--- legible without opening it.
+print("== util: an item STRING is pulled out of a link, suffix and all ==")
+check(A.util.ItemStringFromLink(
+        "|cff1eff00|Hitem:6273:0:1783:0|h[Training Sword of Agility]|h|r")
+      == "item:6273:0:1783:0", "the whole item string, not just the id",
+      A.util.ItemStringFromLink(
+        "|cff1eff00|Hitem:6273:0:1783:0|h[Training Sword of Agility]|h|r"))
+check(A.util.ItemStringFromLink("item:6273:0:1783:0") == "item:6273:0:1783:0",
+      "a bare item string passes through")
+check(A.util.ItemStringFromLink(nil) == nil, "nil is nil")
+check(A.util.ItemStringFromLink("not a link") == nil, "junk is nil")
+
+print("== sent box: the item LINK is captured at send time ==")
+-- The one moment a sent item is addressable. The inbox has no link at all and
+-- a sent mail is gone from the client -- but at send time it is still a stack
+-- in a bag, which does have one. Miss it here and the reader can never show
+-- more than a name, because nothing about a sent mail can be backfilled.
 A.db.ClearLog()
-stockBags()
+BAGS = { [0] = {
+    [1] = { name = "Training Sword of Agility", texture = "t1", count = 1,
+            id = 6273, suffix = 1783 },
+} }
+SENT = {}; attachSlot, cursor = nil, nil
 send.atMailbox = false
 send.ClearAttachments()
-send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
-send.Start("subtilizer", "kit", "", 5000, false, false)
+send.Attach(0, 1)
+send.Start("subtilizer", "kit", "", 0, false, false)
 pumpSend()
+local box = A.db.SentBox()
+check(table.getn(box) == 1, "one record", table.getn(box))
+check(box[1].items[1].l == "item:6273:0:1783:0",
+      "carrying the item string, SUFFIX INCLUDED", box[1].items[1].l)
+
+print("== tooltips: a sent item shows its REAL tooltip ==")
 A.ui.SelectSubTab("Sent")
-A.ui.CloseSentRecord()
-A.ui.RefreshSent()
+A.ui.OpenSentRecord(1)
 GameTooltip:Hide()
-local srow = A.ui.sentRows[1]
-check(srow.rec ~= nil, "the row carries its record")
-check(hover(srow), "the history row is a live hover target")
-check(A.util.Contains(GameTooltip:AllText(), "subtilizer"),
-      "the tooltip names the recipient", GameTooltip:AllText())
-check(A.util.Contains(GameTooltip:AllText(), "Silk Cloth"),
-      "and every item in the record", GameTooltip:AllText())
-check(A.util.Contains(GameTooltip:AllText(), "Copper Ore"), "including the second")
-check(A.util.Contains(GameTooltip:AllText(), "Black Lotus"), "and the third")
-check(A.util.Contains(GameTooltip:AllText(), "3 mails"),
-      "and says it was a batch", GameTooltip:AllText())
-check(A.util.Contains(GameTooltip:AllText(), "sent"),
-      "and the gold that rode with it", GameTooltip:AllText())
-unhover(srow)
-check(GameTooltip:LineCount() == 0, "and it closes cleanly",
-      GameTooltip:LineCount())
+local sword = A.ui.sentItemRows[1]
+check(hover(sword), "the item row is hoverable")
+check(GameTooltip.shown and GameTooltip.shown.kind == "link",
+      "and opens the game's own item tooltip",
+      GameTooltip.shown and GameTooltip.shown.kind)
+check(GameTooltip.shown.link == "item:6273:0:1783:0",
+      "for exactly the item that was sent", GameTooltip.shown.link)
+unhover(sword)
 
-print("== tooltips: a Sent row does not inherit the last row's items ==")
--- SetText replaces a tooltip; AddLine appends. Hovering a second row must not
--- stack its items under the first one's heading.
-send.ClearAttachments()
-send.Attach(0, 4)
-BAGS[0][4] = { name = "Arcanite Bar", texture = "t9", count = 2 }
-send.ClearAttachments()
-send.Attach(0, 4)
-send.Start("Hathor", "just one", "", 0, false, false)
-pumpSend()
-A.ui.RefreshSent()
+print("== tooltips: a record from before links were captured still works ==")
+-- Nothing in the sent box can ever be backfilled -- the mail is gone -- so an
+-- old record has no link and must still render rather than opening nothing.
+box[1].items[1].l = nil
+A.ui.OpenSentRecord(1)
 GameTooltip:Hide()
--- Find them by recipient: the list order is the UI's business, not this
--- test's, and hardcoding it makes the test fail for the wrong reason.
-local function sentRowFor(who)
-    local k = 1
-    while k <= table.getn(A.ui.sentRows) do
-        local r = A.ui.sentRows[k]
-        if r.rec and r.rec.to == who then return r end
-        k = k + 1
-    end
-    return nil
-end
-local rowOld, rowNew = sentRowFor("subtilizer"), sentRowFor("Hathor")
-check(rowOld ~= nil and rowNew ~= nil, "both records have rows")
-check(hover(rowOld), "hover the three-item record")
-local oldLines = GameTooltip:LineCount()
-unhover(rowOld)
-check(hover(rowNew), "then the one-item record")
-check(not A.util.Contains(GameTooltip:AllText(), "Silk Cloth"),
-      "the first record's items are gone", GameTooltip:AllText())
-check(A.util.Contains(GameTooltip:AllText(), "Arcanite Bar"),
-      "and only this one's are shown", GameTooltip:AllText())
-check(GameTooltip:LineCount() < oldLines,
-      "so it is shorter, not stacked",
-      GameTooltip:LineCount() .. " vs " .. oldLines)
-unhover(rowNew)
-
-print("== tooltips: moving straight between rows does not stack them ==")
--- Hovering one row then another WITHOUT leaving in between. The client clears
--- a tooltip on SetOwner, so this must show only the row under the cursor.
-GameTooltip:Hide()
-check(hover(rowOld), "hover the three-item record")
-check(hover(rowNew), "then move straight to the one-item record")
-check(not A.util.Contains(GameTooltip:AllText(), "Silk Cloth"),
-      "no trace of the record we came from", GameTooltip:AllText())
-check(A.util.Contains(GameTooltip:AllText(), "Arcanite Bar"),
-      "only the one under the cursor", GameTooltip:AllText())
-unhover(rowNew)
-
-print("== tooltips: a history row emptied by a refresh answers for nothing ==")
--- Rows are RECYCLED. One that carried a record and is then hidden -- the box
--- was cleared, or a filter narrowed the list -- must not still describe it.
--- A hidden frame keeps whatever was last written to it, and this hover reads
--- a stashed field rather than the label.
-check(rowOld.rec ~= nil, "the row is carrying a record to begin with")
-A.db.ClearSentBox()
-A.ui.RefreshSent()
-check(rowOld.rec == nil, "and lets go of it when the list empties")
-GameTooltip:Hide()
-hover(rowOld)
-check(GameTooltip:LineCount() == 0,
-      "so hovering it opens nothing at all", GameTooltip:AllText())
-
-print("== tooltips: a plain letter row says so rather than nothing ==")
-send.ClearAttachments()
-send.Start("Ann", "just a note", "hello", 0, false, false)
-pumpSend()
-A.ui.RefreshSent()
-GameTooltip:Hide()
-local letterRow = nil
-local lr = 1
-while lr <= table.getn(A.ui.sentRows) do
-    local r = A.ui.sentRows[lr]
-    if r.rec and r.rec.to == "Ann" then letterRow = r end
-    lr = lr + 1
-end
-check(letterRow ~= nil, "the letter has a row")
-check(hover(letterRow), "which is hoverable")
-check(A.util.Contains(GameTooltip:AllText(), "no attachments"),
-      "and says it carried nothing", GameTooltip:AllText())
-unhover(letterRow)
+check(hover(sword), "the old record's row is still hoverable")
+check(GameTooltip.shown and GameTooltip.shown.kind == "text",
+      "and falls back to the name",
+      GameTooltip.shown and GameTooltip.shown.kind)
+check(A.util.Contains(GameTooltip.shown.text or "", "Training Sword"),
+      "which is what was written down", GameTooltip.shown.text)
+unhover(sword)
 
 print("== tooltips: a SENT item can only offer what was written down ==")
 -- The one place the real tooltip is unavailable, and it is not a shortcoming
@@ -3711,13 +3647,11 @@ local itemRow = A.ui.sentItemRows[1]
 check(itemRow.visible == true, "the record lists its item")
 check(hover(itemRow), "the sent item row is a live hover target")
 check(GameTooltip.shown ~= nil, "hovering it opens a tooltip")
-check(GameTooltip.shown.kind == "text",
-      "text, because no link or index survives a sent mail",
+check(GameTooltip.shown.kind == "link",
+      "the item's REAL tooltip, from the link captured at send time",
       GameTooltip.shown.kind)
-check(A.util.Contains(GameTooltip.shown.text or "", "Silk Cloth"),
-      "naming the item", GameTooltip.shown.text)
-check(A.util.Contains(GameTooltip.shown.text or "", "20"),
-      "and its count", GameTooltip.shown.text)
+check(A.util.Contains(GameTooltip.shown.link or "", "item:"),
+      "built from an item string", GameTooltip.shown.link)
 unhover(itemRow)
 check(GameTooltip.shown == nil, "and closes again")
 

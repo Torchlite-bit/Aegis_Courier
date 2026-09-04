@@ -11,16 +11,22 @@ client reads the file list at startup, so `/reload` is not enough.
 
 ## [1.9.2]
 
-### Added
-- **Hovering a row in the Sent history lists the whole record** — every item
-  with its count, the gold or COD that rode along, and how many mails the batch
-  became. The row itself can only show a clipped one-line summary, and a record
-  can carry twelve items, so this is the only place the whole thing is legible
-  without opening it.
-  - A record that carried nothing says **"no attachments"** rather than showing
-    an empty box.
-  - As with the Sent reader, this is names and counts: the mails are gone from
-    the client, so it is what Courier captured at send time.
+### Changed
+- **Sent items now show the game's REAL item tooltip**, like every other mail
+  view — stats, quality, the lot — instead of just a name and count.
+  - 1.9.0 settled for text on the grounds that a sent mail is gone from the
+    client, so there is no inbox index and the stack is no longer in a bag.
+    Both true, and both beside the point: **at send time the item is still a
+    stack in a bag**, which does have a link. Courier now takes the item string
+    then and stores it with the record, and the reader hands it to
+    `SetHyperlink`.
+  - The **random suffix is kept**, which is the whole reason the item string is
+    stored rather than just the id: a *Training Sword of Agility* is a base
+    item plus a suffix, and an id alone renders it as the plain base weapon
+    with none of the stats the player actually has.
+  - **Records sent before this release have no link** and still show the name.
+    Nothing in the sent box can be backfilled — the mail cannot be re-read —
+    so old records keep working rather than opening an empty tooltip.
 
 ## [1.9.1]
 

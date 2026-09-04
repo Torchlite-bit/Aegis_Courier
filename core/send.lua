@@ -161,12 +161,19 @@ function send.SlotInfo(bag, slot)
     if not GetContainerItemInfo then return nil end
     local texture, count = GetContainerItemInfo(bag, slot)
     if not texture then return nil end
-    local name
+    local name, itemString
     if GetContainerItemLink then
-        name = util.ItemNameFromLink(GetContainerItemLink(bag, slot))
+        local link = GetContainerItemLink(bag, slot)
+        name = util.ItemNameFromLink(link)
+        -- THE ONE MOMENT THE ITEM IS ADDRESSABLE. The inbox has no link at all
+        -- (rule 10) and a sent mail is gone from the client entirely -- but
+        -- right here it is still a stack in a bag, which does have one. Taking
+        -- it now is what lets the Sent reader show a REAL item tooltip later
+        -- instead of a name in a box.
+        itemString = util.ItemStringFromLink(link)
     end
     return { bag = bag, slot = slot, name = name or "?",
-        texture = texture, count = count or 1 }
+        texture = texture, count = count or 1, link = itemString }
 end
 
 function send.InstallHooks()
@@ -671,6 +678,7 @@ function send.Step()
         -- entirely -- there is no API to read one back -- so anything the
         -- reader will want has to be captured here or it is gone for good.
         texture = attachment and attachment.texture or nil,
+        link    = attachment and attachment.link or nil,
         money   = (not send.isCOD) and appliedMoney or 0,
         cod     = send.isCOD and appliedMoney or 0,
     }
@@ -847,7 +855,7 @@ A.RegisterEvent("MAIL_SEND_SUCCESS", function()
                 send.body)
         end
         A.db.SentAdd(send.sentRec, send.lastSent.item, send.lastSent.count,
-            send.lastSent.texture)
+            send.lastSent.texture, send.lastSent.link)
         send.lastSent = nil
     end
     if send.queue and table.getn(send.queue) > 0 then
