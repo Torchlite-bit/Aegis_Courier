@@ -9,6 +9,28 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.3]
+
+### Changed
+- **Mail sent BEFORE the link capture now shows a real tooltip too**, where the
+  client can still identify the item. 1.9.2 captured the item link at send
+  time, which fixed new mail and left every existing record showing a bare
+  name — most of a player's history. `GetItemInfo` takes a *name* on 1.12 and
+  returns a link for anything in the item cache, so an old record can usually
+  be turned back into the real thing.
+  - **Random-suffix items are the exception.** The cache is keyed on the base
+    item, so *"Training Sword of Agility"* is not a lookup key — *"Training
+    Sword"* is. Those still show the name, which is correct: guessing the base
+    item would display a weapon with none of the stats actually sent. This is
+    why capturing the link at send time is the real fix and the cache lookup
+    is only a bonus.
+
+### Notes
+- **Two different builds were released as 1.9.2** — one with a summary tooltip
+  on the Sent history rows, one with real item tooltips on the items. If a
+  window says 1.9.2 there is no way to tell which. Anything from this release
+  on says **1.9.3** or later.
+
 ## [1.9.2]
 
 ### Changed

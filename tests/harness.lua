@@ -338,6 +338,21 @@ focusedBox = nil
 -- tooltip point at the wrong mail, or at nothing, and say nothing about it.
 -- `shown` is what a test asserts on; `owner` catches a tooltip anchored to
 -- the wrong frame, which is how one ends up drawn across the window.
+-- The client's ITEM CACHE, keyed by name. GetItemInfo takes a name on 1.12 and
+-- answers for anything the client has seen; it is how a record that only wrote
+-- down a name can still be turned back into a real tooltip.
+--
+-- It is keyed on the BASE item, which is the limit that matters here: a
+-- random-suffix item is cached as "Training Sword", so looking up "Training
+-- Sword of Agility" misses and always will. A mock that answered for every
+-- name would hide that and make the text fallback look dead code.
+ITEM_CACHE = {}
+GetItemInfo = function(nameOrLink)
+    local e = ITEM_CACHE[nameOrLink]
+    if not e then return nil end
+    return e.name, e.link, e.quality or 1
+end
+
 GameTooltip = CreateFrame("Frame", "GameTooltip")
 GameTooltip.shown = nil
 GameTooltip.owner = nil
@@ -3614,18 +3629,41 @@ check(GameTooltip.shown.link == "item:6273:0:1783:0",
       "for exactly the item that was sent", GameTooltip.shown.link)
 unhover(sword)
 
-print("== tooltips: a record from before links were captured still works ==")
--- Nothing in the sent box can ever be backfilled -- the mail is gone -- so an
--- old record has no link and must still render rather than opening nothing.
+print("== tooltips: an OLD record recovers its link from the item cache ==")
+-- Everything sent before the link was captured has only a name -- which is
+-- most of an existing player's history, so "works on new mail only" is a poor
+-- answer when the client can often do better. GetItemInfo takes a name on 1.12
+-- and returns a link for anything cached.
+box[1].items[1].l = nil                -- as an old record has it
+ITEM_CACHE["Warrior's Pants"] =
+    { name = "Warrior's Pants",
+      link = "|cffffffff|Hitem:6521:0:0:0|h[Warrior's Pants]|h|r" }
+box[1].items[1].n = "Warrior's Pants"
+A.ui.OpenSentRecord(1)
+GameTooltip:Hide()
+check(hover(sword), "the old record's row is hoverable")
+check(GameTooltip.shown and GameTooltip.shown.kind == "link",
+      "and still opens the REAL tooltip, recovered from the cache",
+      GameTooltip.shown and GameTooltip.shown.kind)
+check(GameTooltip.shown.link == "item:6521:0:0:0",
+      "for the right item", GameTooltip.shown.link)
+unhover(sword)
+
+print("== tooltips: a suffixed old record falls back to the name ==")
+-- The limit of that recovery, and it is a real one: the item cache is keyed on
+-- the BASE item, so "Training Sword of Agility" is not a lookup key -- only
+-- "Training Sword" is. This is why capturing the link at SEND time is the
+-- thing that actually fixes it, and the cache lookup is only a bonus.
+box[1].items[1].n = "Training Sword of Agility"
 box[1].items[1].l = nil
 A.ui.OpenSentRecord(1)
 GameTooltip:Hide()
-check(hover(sword), "the old record's row is still hoverable")
+check(hover(sword), "the row is hoverable")
 check(GameTooltip.shown and GameTooltip.shown.kind == "text",
-      "and falls back to the name",
+      "and falls back to the name rather than showing the wrong item",
       GameTooltip.shown and GameTooltip.shown.kind)
-check(A.util.Contains(GameTooltip.shown.text or "", "Training Sword"),
-      "which is what was written down", GameTooltip.shown.text)
+check(A.util.Contains(GameTooltip.shown.text or "", "Training Sword of Agility"),
+      "naming exactly what was written down", GameTooltip.shown.text)
 unhover(sword)
 
 print("== tooltips: a SENT item can only offer what was written down ==")
