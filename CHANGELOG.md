@@ -9,6 +9,28 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.4]
+
+### Changed
+- **Old sent records now recover their tooltip from your BAGS**, which fixes
+  the case 1.9.3 could not: a **random-suffix item**. A bag slot's link carries
+  the suffix, because it links the actual item — so *"Training Sword of
+  Agility"* resolves correctly, where the name-keyed item cache can only ever
+  find the plain *"Training Sword"*. Mailing one of something you still have
+  more of is common, so this covers a lot of existing history.
+- Full order for a sent item's tooltip, first hit wins:
+  1. the link stored when it was sent (exact, always)
+  2. a matching item in your bags (exact, suffix included)
+  3. the client's item cache by name (ordinary items only)
+  4. the name and count
+
+### Notes
+- An item you no longer own, sent before 1.9.2, with a random suffix, still
+  shows only its name. There is nothing left to identify it with: the record
+  holds a name, the mail is gone, the cache is keyed on the base item, and
+  guessing the base item would show a weapon with none of the stats actually
+  sent.
+
 ## [1.9.3]
 
 ### Changed

@@ -110,9 +110,16 @@ section, which is Courier's equivalent hazard surface.
         ordinary item with nothing stored but its name.
       - That recovery **cannot** work for a random-suffix item: the cache is
         keyed on the BASE item, so "Training Sword of Agility" is not a lookup
-        key and "Training Sword" is. Falling back to text there is correct —
-        showing the base item would display a weapon with none of the stats
-        actually sent. Never let a cache MISS become a link.
+        key and "Training Sword" is. Never let a cache MISS become a link, and
+        never substitute the base item — it would show a weapon with none of
+        the stats actually sent.
+      - **The player's own BAGS answer what the cache cannot.** A bag slot's
+        link carries the suffix because it links the real item, so scanning
+        bags by name (`send.FindItemLink`) recovers a suffixed item exactly.
+        Try it BEFORE the cache and AFTER the stored link. Mailing one of
+        something you still hold is common, so this covers a lot of history.
+      - Resolution order for a sent item: stored link, then bags, then item
+        cache, then text. Each step is exact or it does not answer.
     - **Do not reuse a version number across two different builds.** Two
       separate 1.9.2 releases shipped with different Sent-tab behaviour, and a
       user reporting "it still does X" could not be told which one they had.

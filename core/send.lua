@@ -123,6 +123,36 @@ function send.FindItemSlot(name)
     return nil, nil, sawLocked
 end
 
+-- Find a LINK for an item the player still owns, by name.
+--
+-- Recovery for a sent record written before the link was captured. The item
+-- cache (GetItemInfo) can answer for an ordinary item but NOT a random-suffix
+-- one -- it is keyed on the base item, so "Training Sword of Agility" is not a
+-- key. A bag slot has no such problem: its link carries the suffix, because it
+-- is a link to the actual item the player is holding.
+--
+-- Unlike send.FindItemSlot this does not care about locks. Nothing is picked
+-- up here -- it only wants the link text -- so a stack the server is holding
+-- answers just as well as a free one.
+function send.FindItemLink(name)
+    if not GetContainerNumSlots or not GetContainerItemLink then return nil end
+    if type(name) ~= "string" or name == "" or name == "?" then return nil end
+    local bag = 0
+    while bag <= 4 do
+        local slots = GetContainerNumSlots(bag) or 0
+        local slot = 1
+        while slot <= slots do
+            local link = GetContainerItemLink(bag, slot)
+            if link and util.ItemNameFromLink(link) == name then
+                return util.ItemStringFromLink(link)
+            end
+            slot = slot + 1
+        end
+        bag = bag + 1
+    end
+    return nil
+end
+
 -- Re-validate a queued attachment against the bags RIGHT NOW, rewriting its
 -- coordinate in place if the stack moved. Never called from a paint or an
 -- event -- only from the step that is about to pick the item up.
