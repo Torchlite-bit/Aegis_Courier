@@ -2884,6 +2884,63 @@ GameTooltip:Hide()
 check(hover(slot1), "the compose slot is a live hover target")
 check(GameTooltip.shown == nil, "an unused slot opens nothing")
 
+print("== reader: an ALREADY-READ mail opens its body at once ==")
+-- The reported friction: a warning button on a mail the player had already
+-- opened. Reading costs the three-day expiry drop, but that clock starts on
+-- the FIRST read and re-reading neither restarts nor shortens it -- so on a
+-- mail already marked read the button was guarding a cost already paid.
+INBOX = {
+    mail{ sender = "Bob", subject = "parcel", item = "Black Lotus" },
+    mail{ sender = "Bob", subject = "opened", item = "Black Lotus",
+          read = true },
+}
+A.ui.SelectSubTab("Inbox")
+A.ui.OpenReader(1)
+check(A.ui.readerWantBody == false,
+      "an UNREAD loaded mail still asks first")
+check(A.ui.readerReveal.visible == true, "so the button is offered")
+A.ui.CloseReader()
+A.ui.OpenReader(2)
+check(A.ui.readerWantBody == true,
+      "an already-read one opens straight away")
+check(A.ui.readerReveal.visible == false, "with no button in the way")
+A.ui.CloseReader()
+
+print("== reader: the auto-open setting removes the button entirely ==")
+-- Off by default, because on this client the cost is real and players use the
+-- mailbox as storage. Opting in is the player's call to make.
+check(A.db.Setting("autoReadBody") == false, "off by default")
+A.ui.OpenReader(1)
+check(A.ui.readerWantBody == false, "so the unread mail still asks")
+A.ui.CloseReader()
+A.db.SetSetting("autoReadBody", true)
+A.ui.OpenReader(1)
+check(A.ui.readerWantBody == true, "with it on, the body opens at once")
+check(A.ui.readerReveal.visible == false, "and the button is gone")
+A.ui.CloseReader()
+A.db.SetSetting("autoReadBody", false)
+
+print("== reader UI: Delete appears only on an emptied mail ==")
+INBOX = {
+    mail{ sender = "Bob", subject = "gold", money = 900 },
+    mail{ sender = "Ann", subject = "empty", read = true },
+    mail{ sender = "GM",  subject = "ticket", gm = true },
+}
+A.ui.OpenReader(1)
+check(A.ui.readerDelete.visible == false,
+      "a mail still holding gold offers no Delete")
+A.ui.CloseReader()
+A.ui.OpenReader(2)
+check(A.ui.readerDelete.visible == true, "an emptied one does")
+A.ui.CloseReader()
+A.ui.OpenReader(3)
+check(A.ui.readerDelete.visible == true,
+      "and so does GM mail -- the only way one ever leaves the mailbox")
+-- Clicking it removes the mail and closes the reader.
+A.ui.readerDelete.scripts.OnClick()
+check(table.getn(INBOX) == 2, "the GM mail was deleted", table.getn(INBOX))
+check(A.ui.ReaderOpen() == false, "and the reader closed behind it")
+
 print("== reader: COD and GM mail offer no Take button ==")
 INBOX = {
     mail{ sender = "Ann", subject = "pay up", money = 100, cod = 5000 },
@@ -2895,9 +2952,94 @@ check(A.util.Contains(rawget(A.ui.readerStatus, "text") or "", "COD"),
       "and the reason is stated")
 A.ui.CloseReader()
 A.ui.OpenReader(2)
-check(A.ui.readerTake.visible == false, "no Take button on GM mail")
-check(A.ui.readerPay.visible == false, "and no Pay button either -- GM COD is barred")
+check(A.ui.readerTake.visible == true,
+      "GM mail DOES offer Take -- it is barred from automatic paths, not from "
+      .. "the player")
+check(A.ui.readerPay.visible == false, "and no Pay button -- GM COD is barred")
 A.ui.CloseReader()
+
+print("== take: GM mail is collected only from the reader, and is KEPT ==")
+-- The reported dead end: a GM mail carrying restored gold could not be
+-- collected by anything and could not be deleted either, so the player's own
+-- property was stuck in it permanently.
+INBOX = { mail{ sender = "GM", subject = "restored", money = 5000, gm = true } }
+check(take.Single(1) == false,
+      "a list right-click still refuses it -- that is muscle memory")
+check(INBOX[1].money == 5000, "so the mail is untouched")
+check(take.Single(1, true), "but the reader's Take collects it")
+pump()
+check(not take.running, "the run finished")
+check(table.getn(INBOX) == 1, "and the GM MAIL IS STILL THERE", table.getn(INBOX))
+check(INBOX[1].money == 0, "emptied, not deleted", INBOX[1].money)
+check(take.money == 5000, "with the gold collected", take.money)
+check(take.gmIndex == nil, "and the permission did not outlive the run")
+
+print("== take: the GM permission is ONE index, not a mode ==")
+-- take.gmIndex is compared against the index the engine is STANDING ON, so a
+-- permission granted for one mail cannot collect a different one. Driven
+-- through take.Step directly and deliberately: take.Single sets take.single,
+-- which stops the run after one mail, so a black-box run can never walk onto a
+-- second GM mail and therefore cannot tell a permission from a mode.
+INBOX = {
+    mail{ sender = "GM", subject = "first", money = 5000, gm = true },
+    mail{ sender = "GM", subject = "second", money = 7000, gm = true },
+}
+take.running  = true
+take.mode     = take.MODE_TAKE
+take.gmIndex  = 1                    -- permission for mail 1...
+take.index    = 2                    -- ...engine standing on mail 2
+take.codIndex = nil
+take.only     = nil
+take.attempts = 0
+take.lastSig  = nil
+take.pending  = nil
+take.logSnap  = nil
+take.Step()
+check(take.index == 3,
+      "the engine stepped OVER the GM mail it had no permission for",
+      take.index)
+check(INBOX[2].money == 7000, "leaving it untouched", INBOX[2].money)
+take.Stop(true)
+
+print("== take: Open All still steps over GM mail ==")
+INBOX = {
+    mail{ sender = "Ann", subject = "sale", money = 400 },
+    mail{ sender = "GM",  subject = "ticket", money = 5000, gm = true },
+    mail{ sender = "GM",  subject = "ticket2", money = 700, gm = true },
+}
+check(take.Start(take.MODE_OPEN), "Open All started")
+check(take.gmIndex == nil, "with no GM permission granted")
+pump()
+check(not take.running, "and finished rather than stalling")
+check(table.getn(INBOX) == 2, "only the ordinary mail was taken",
+      table.getn(INBOX))
+check(INBOX[1].money == 5000 and INBOX[2].money == 700,
+      "both GM mails untouched",
+      tostring(INBOX[1].money) .. "/" .. tostring(INBOX[2].money))
+
+print("== take: a single delete removes an emptied mail, GM included ==")
+INBOX = { mail{ sender = "GM", subject = "read me", gm = true } }
+check(take.DeleteSingle(1), "an empty GM mail can be deleted")
+check(table.getn(INBOX) == 0, "and it is gone", table.getn(INBOX))
+
+print("== take: a single delete NEVER removes a loaded mail ==")
+-- Rule 14 is the whole guard on that button. It must refuse on its own, not
+-- rely on the UI only showing it at the right moment.
+INBOX = {
+    mail{ sender = "Bob", subject = "gold", money = 900 },
+    mail{ sender = "Bob", subject = "parcel", item = "Black Lotus" },
+    mail{ sender = "Ann", subject = "pay up", cod = 500, item = "Thing" },
+}
+check(take.DeleteSingle(1) == false, "money in it -- refused")
+check(take.DeleteSingle(2) == false, "an item in it -- refused")
+check(take.DeleteSingle(3) == false, "a COD on it -- refused")
+check(table.getn(INBOX) == 3, "all three still there", table.getn(INBOX))
+-- ...and never mid-run, because a delete shifts every later index.
+INBOX = { mail{ sender = "Ann", subject = "read", read = true } }
+take.running = true
+check(take.DeleteSingle(1) == false, "refused while a run is walking the inbox")
+take.running = false
+check(table.getn(INBOX) == 1, "the mail survived")
 
 print("== reader UI: paying a COD takes TWO deliberate clicks ==")
 -- The manual path that had to exist: with no way to pay a COD, and the

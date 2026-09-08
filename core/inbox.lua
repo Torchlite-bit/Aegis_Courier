@@ -299,6 +299,12 @@ end
 -- it, and shortening the window to pay is a real cost.
 function inbox.ReadIsFree(h)
     if not h then return false end
+    -- ALREADY READ: the three-day clock started the first time, and reading
+    -- again does not restart or shorten it. There is nothing left to protect,
+    -- so making the player click a warning button to re-open a mail they have
+    -- already opened is pure friction -- it was guarding a cost that had
+    -- already been paid.
+    if h.wasRead then return true end
     if h.money > 0 then return false end
     if h.cod > 0 then return false end
     if h.hasItem then return false end
@@ -592,7 +598,13 @@ function take.Step()
     -- onto a different COD mail and pay it, and Open All -- which never sets
     -- it -- still cannot pay anything at all. GM mail has no exception.
     local codAllowed = take.codIndex ~= nil and take.codIndex == take.index
-    if (h.cod > 0 and not codAllowed) or h.isGM then
+    -- GM mail gets the same narrow exception COD does, and for the same
+    -- reason: barring it from every AUTOMATIC path is right, barring the
+    -- player from ever collecting it is not. A GM mail carrying restored gold
+    -- or items was uncollectable and undeletable, which left the player with
+    -- no way to get their own property out of it.
+    local gmAllowed = take.gmIndex ~= nil and take.gmIndex == take.index
+    if (h.cod > 0 and not codAllowed) or (h.isGM and not gmAllowed) then
         take.Advance()
         return
     end
@@ -750,6 +762,7 @@ function take.Start(mode, only)
     take.mode     = mode or take.MODE_OPEN
     take.only     = only  -- nil = everything; "sold" = auction sales only
     take.codIndex = nil   -- Open All can never pay a COD. See take.Step.
+    take.gmIndex  = nil   -- ...nor touch GM mail.
     take.index    = 1
     take.attempts = 0
     take.lastSig  = nil
@@ -769,6 +782,7 @@ function take.Stop(quiet)
     take.running = false
     take.pending = nil
     take.codIndex = nil
+    take.gmIndex = nil
     take.only = nil
     inbox.Flush()
     if not quiet then take.Report() end
@@ -779,6 +793,7 @@ function take.Finish()
     take.running = false
     take.pending = nil
     take.codIndex = nil
+    take.gmIndex = nil
     take.only = nil
     -- The inbox just changed shape for the last time; refresh now so
     -- inbox.lastUnread is current if the user closes the mailbox immediately
@@ -810,19 +825,33 @@ end
 
 -- Take one specific mail, outside of a run -- the right-click action on a row.
 -- Reuses the same machine so there is exactly one code path that mutates mail.
-function take.Single(index)
+-- `allowGM` is set ONLY by the reader's Take button, where the player is
+-- looking at the mail they are collecting. Right-click on a list row does not
+-- set it -- that is muscle memory, and GM mail is the one kind where a
+-- mis-click could destroy something that cannot be replaced.
+function take.Single(index, allowGM)
     if take.running then return false end
     local h = inbox.Header(index)
     if not h then return false end
-    if h.cod > 0 or h.isGM then
-        A.Print("skipped: COD and GM mail are never taken automatically.")
+    if h.cod > 0 then
+        A.Print("skipped: COD mail is only ever paid from the reader.")
+        return false
+    end
+    if h.isGM and not allowGM then
+        A.Print("skipped: GM mail is only ever collected from the reader.")
         return false
     end
     if h.money == 0 and not h.hasItem then return false end
     take.running  = true
-    take.mode     = take.MODE_OPEN
+    -- GM MAIL IS EMPTIED BUT KEPT. Taking what it carries is the player's
+    -- property; deleting it is not the same act at all -- a ticket response
+    -- can be the only record of what a GM did, and there is no undo. The
+    -- Delete button in the reader removes it once it is empty, if they want
+    -- that, which makes it their decision rather than a side effect.
+    take.mode     = h.isGM and take.MODE_TAKE or take.MODE_OPEN
     take.only     = nil
     take.codIndex = nil
+    take.gmIndex  = h.isGM and index or nil
     take.index    = index
     take.attempts = 0
     take.lastSig  = nil
@@ -879,6 +908,7 @@ function take.PayCOD(index)
     take.running  = true
     take.mode     = take.MODE_OPEN
     take.only     = nil
+    take.gmIndex  = nil
     take.index    = index
     take.codIndex = index
     take.attempts = 0
@@ -889,6 +919,25 @@ function take.PayCOD(index)
     take.single   = true
     take.armed    = true
     if A.ui and A.ui.OnTakeStateChanged then A.ui.OnTakeStateChanged() end
+    return true
+end
+
+-- Delete ONE mail the player is looking at, once it is empty.
+--
+-- The manual counterpart to Delete Read, and the way a GM mail finally leaves
+-- the mailbox: nothing automatic will ever remove one, so without this a GM
+-- mail is permanent furniture. Rule 14 is unchanged and is the whole guard --
+-- a mail still holding money, a COD or an item is refused outright, so this
+-- can never destroy anything. Refused during a run, because a delete shifts
+-- every later index and the engine is walking them.
+function take.DeleteSingle(index)
+    if take.running then return false end
+    local h = inbox.Header(index)
+    if not h then return false end
+    if h.money > 0 or h.cod > 0 or h.hasItem then return false end
+    if not DeleteInboxItem then return false end
+    DeleteInboxItem(index)
+    inbox.MarkDirty()
     return true
 end
 
