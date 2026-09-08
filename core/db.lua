@@ -52,6 +52,15 @@ local SETTING_DEFAULTS = {
     skipCOD      = true,
     -- Match pfUI's look when pfUI is installed.
     pfSkin       = true,
+    -- Fetch a mail's body the moment it is opened, even when the mail still
+    -- holds something.
+    --
+    -- OFF by default and that is not timidity: on this client reading a mail
+    -- that still holds an attachment drops its expiry from 30 days to 3, and
+    -- players use the mailbox as storage. Defaulting this on would silently
+    -- cost every such player 27 days on any mail they merely glanced at.
+    -- Opting in is a different thing entirely -- the player knows the trade.
+    autoReadBody = false,
     -- Keep a log of mail sent and collected. On by default: it is capped, and
     -- a log you have to know to switch on is one you never have when you want
     -- it. (TurtleMail defaults its log off.)

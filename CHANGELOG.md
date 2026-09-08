@@ -9,6 +9,42 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.5]
+
+Two dead ends removed. `/reload`.
+
+### Fixed
+- **Re-opening a mail you have already read no longer asks permission.** The
+  "Read message" button exists because reading a mail that still holds
+  something drops its expiry from 30 days to 3 — but that clock starts on the
+  **first** read, and reading again neither restarts nor shortens it. On an
+  already-read mail the button was guarding a cost that had already been paid.
+- **GM mail can be collected and deleted.** It was barred from every automatic
+  path, which is right, and from the player as well, which is not: a GM mail
+  carrying restored gold or items could not be emptied by anything and could
+  not be removed either, so the player's own property was stuck in it
+  permanently.
+  - The reader's **Take** now works on GM mail. A list right-click still
+    refuses — that is muscle memory, and GM mail is the one kind where a
+    mis-click could destroy something irreplaceable.
+  - **Taking a GM mail EMPTIES it but keeps it.** A ticket response can be the
+    only record of what a GM did, and there is no undo. Removing it is a
+    separate, deliberate act.
+  - Open All, Take Sold and Delete Read still step over every GM mail. The
+    permission is one absolute index, checked against the mail the engine is
+    actually standing on.
+
+### Added
+- **A Delete button in the reader**, shown once a mail is empty — the manual
+  counterpart to Delete Read, and the only way a GM mail ever leaves the
+  mailbox. It refuses anything still holding money, a COD or an item, so it
+  cannot destroy an attachment, and it refuses to run mid-collection because a
+  delete shifts every later index.
+- **"Open message bodies at once"** in the Courier tab, for anyone who would
+  rather never see the read prompt. **Off by default**, and the label says what
+  it costs: on this client the mailbox doubles as storage, and defaulting it on
+  would silently take 27 days off any loaded mail merely glanced at.
+
 ## [1.9.4]
 
 ### Changed

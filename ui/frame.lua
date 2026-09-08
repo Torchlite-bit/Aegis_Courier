@@ -1420,9 +1420,29 @@ function ui.BuildReader(well)
     takeBtn:SetText("Take")
     takeBtn:SetScript("OnClick", function()
         if not ui.readerIndex then return end
-        A.take.Single(ui.readerIndex)
+        -- `true` = GM mail is allowed HERE. The player is looking at the mail
+        -- they are collecting, which a list right-click cannot claim.
+        A.take.Single(ui.readerIndex, true)
     end)
     ui.readerTake = takeBtn
+
+    -- Delete, for a mail that is already empty. The only way to remove a GM
+    -- mail -- nothing automatic will ever touch one -- and refused by
+    -- take.DeleteSingle on anything still holding something, so the button
+    -- cannot destroy an attachment even if it is somehow shown at the wrong
+    -- moment.
+    local delBtn = ui.MakeButton(r, "quiet", "AegisCourierReaderDelete")
+    delBtn:SetWidth(64)
+    delBtn:SetHeight(20)
+    delBtn:SetText("Delete")
+    delBtn:SetScript("OnClick", function()
+        local idx = ui.readerIndex
+        if not idx then return end
+        -- The mail is about to stop existing, so there is nothing to look at.
+        ui.CloseReader()
+        A.take.DeleteSingle(idx)
+    end)
+    ui.readerDelete = delBtn
 
     -- COD mail. Never shown at the same time as Take -- Take is refused for
     -- COD everywhere -- so it occupies the same corner.
@@ -1482,7 +1502,12 @@ function ui.OpenReader(index)
     -- Remembered so a shifted or replaced mail can be detected rather than
     -- silently rendered as though it were the one that was clicked.
     ui.readerSig = h.sender .. "|" .. h.subject
+    -- Free to read, or the player has said they always want the body anyway.
+    -- The setting is theirs to make: the cost it opts out of is real (see
+    -- db's autoReadBody note), but so is the friction of a warning button on
+    -- a mail you deliberately opened.
     ui.readerWantBody = inbox.ReadIsFree(h)
+        or (A.db.Setting("autoReadBody") and true or false)
     ui.readerPayArmed = nil
     ui.RefreshInbox()
     return true
@@ -1584,9 +1609,16 @@ function ui.RefreshReader()
     -- Actions. Take is refused for COD and GM mail everywhere in this addon,
     -- so the button is not offered rather than offered and rejected. COD mail
     -- gets the Pay button in its place instead -- see below.
-    local canTake = (h.money > 0 or h.hasItem) and h.cod == 0 and not h.isGM
+    -- GM mail IS takeable here. It is barred from every automatic path, not
+    -- from the player -- see take.Single.
+    local canTake = (h.money > 0 or h.hasItem) and h.cod == 0
         and not A.take.running
     if canTake then ui.readerTake:Show() else ui.readerTake:Hide() end
+
+    -- Deletable once there is nothing left in it. Same test take.DeleteSingle
+    -- enforces, so the button and the action cannot disagree.
+    local canDelete = h.money == 0 and h.cod == 0 and not h.hasItem
+        and not A.take.running
 
     -- The COD button. "busy" only means a run is in progress -- the mail is
     -- still a payable COD -- so the button hides for the run rather than
@@ -1628,6 +1660,15 @@ function ui.RefreshReader()
         ui.readerReturn:Hide()
     end
 
+    if canDelete then
+        ui.readerDelete:Show()
+        ui.readerDelete:ClearAllPoints()
+        ui.readerDelete:SetPoint("LEFT", corner, "RIGHT", 6, 0)
+        corner = ui.readerDelete
+    else
+        ui.readerDelete:Hide()
+    end
+
     ui.readerStatus:ClearAllPoints()
     ui.readerStatus:SetPoint("LEFT", corner, "RIGHT", 10, 0)
 
@@ -1642,7 +1683,8 @@ function ui.RefreshReader()
                 "only by this button.")
         end
     elseif h.isGM then
-        ui.readerStatus:SetText("GM mail is never collected automatically.")
+        ui.readerStatus:SetText("GM mail is never collected automatically \226\128\148 " ..
+            "only from here.")
     else
         ui.readerStatus:SetText("")
     end
@@ -3379,10 +3421,26 @@ function ui.BuildCourierPanel()
         end)
     pfSkin:SetPoint("TOPLEFT", logOn, "BOTTOMLEFT", 0, -8)
 
+    -- The label says what it COSTS, not just what it does. This is the one
+    -- setting here that can lose the player something, and burying that in a
+    -- tooltip would be the same silent cost the default exists to avoid.
+    local autoRead = MakeCheck(panel, "AutoRead",
+        "Open message bodies at once (drops loaded mail to 3 days)",
+        "autoReadBody",
+        function()
+            -- Re-decide for the mail on screen right now rather than making
+            -- the player close and reopen it to see the setting take effect.
+            if ui.ReaderOpen and ui.ReaderOpen() then
+                ui.OpenReader(ui.readerIndex)
+            end
+        end)
+    autoRead:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 0, -8)
+
     ui.checkTakeover = takeover
     ui.checkPush = push
     ui.checkLog = logOn
     ui.checkPfSkin = pfSkin
+    ui.checkAutoRead = autoRead
 
     -- ---- window scale ----------------------------------------------------
     -- BUTTONS, NOT A SLIDER, deliberately: a slider that rescales the window it
@@ -3390,7 +3448,7 @@ function ui.BuildCourierPanel()
     -- then tracks to a value the player did not choose. Discrete steps have no
     -- such feedback loop and are easier to land on a round number.
     local scaleLbl = Label(panel, "GameFontNormalSmall", C.text)
-    scaleLbl:SetPoint("TOPLEFT", pfSkin, "BOTTOMLEFT", 2, -14)
+    scaleLbl:SetPoint("TOPLEFT", autoRead, "BOTTOMLEFT", 2, -14)
     scaleLbl:SetText("Window scale")
 
     local scaleDown = ui.MakeButton(panel, "quiet", "AegisCourierScaleDown")
@@ -3473,6 +3531,7 @@ function ui.RefreshCourier()
     ui.checkPush:SetChecked(db.Setting("pushToAegis") and true or false)
     ui.checkLog:SetChecked(db.Setting("logEnabled") and true or false)
     ui.checkPfSkin:SetChecked(db.Setting("pfSkin") and true or false)
+    ui.checkAutoRead:SetChecked(db.Setting("autoReadBody") and true or false)
 
     if ui.scaleText then
         -- Shown as a percentage: "85%" is easier to reason about than "0.85".

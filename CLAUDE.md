@@ -124,6 +124,11 @@ section, which is Courier's equivalent hazard surface.
       separate 1.9.2 releases shipped with different Sent-tab behaviour, and a
       user reporting "it still does X" could not be told which one they had.
       A version is the only thing a bug report carries about the build.
+    - **Bump the PATCH number. A MINOR bump is the maintainer's call, not an
+      automatic consequence of shipping a feature.** A release that adds a
+      button or a setting still goes out as 1.9.x unless asked otherwise —
+      1.10.0 was written for one and corrected back to 1.9.5. When in doubt,
+      patch.
     - **A row that stashes data for its hover must let go of it when the row is
       recycled.** Rows are reused and a hidden frame keeps whatever was last
       written to it, so a list that shrinks leaves rows still answering for
@@ -237,6 +242,15 @@ section, which is Courier's equivalent hazard surface.
     - **Side effect:** reading a mail that still holds attachments drops its
       expiry to three days. So call it only on mail being actively emptied,
       never on mail merely displayed. See `inbox.MarkRead`.
+    - **That clock starts on the FIRST read and never restarts.** So an
+      already-read mail costs nothing to read again, and `inbox.ReadIsFree`
+      must say so — gating a re-read behind the warning button guards a cost
+      already paid and is pure friction. Check `wasRead` before anything else.
+    - Auto-fetching is a SETTING (`autoReadBody`), off by default. The default
+      is what matters: players use the mailbox as storage, so turning it on for
+      everyone would silently cost 27 days on any loaded mail merely glanced
+      at. A player who opts in has been told the price — the checkbox label
+      states it, rather than hiding it in a tooltip.
     - **The reader obeys the same rule**, which is why it does not simply fetch
       a body when a row is clicked. `inbox.ReadIsFree` splits the two cases:
       mail holding nothing has no expiry left to lose, so it opens and reads at
@@ -273,7 +287,23 @@ section, which is Courier's equivalent hazard surface.
       the index the engine is standing on. It is not a mode and not a flag —
       a run must never be able to drift onto a second COD and pay it. Clear it
       wherever a run starts or ends.
-    - **GM mail has no equivalent exception**, deliberately.
+    - **GM mail has the SAME exception, for the same reason.** Barring it from
+      every automatic path is right; barring the player from ever collecting it
+      is not. A GM mail carrying restored gold was uncollectable AND
+      undeletable, so the player's own property was stuck in it permanently.
+      `take.gmIndex` is the permission, one absolute index, set only by the
+      reader's Take button — a list right-click does not set it, because that
+      is muscle memory and GM mail is the one kind where a mis-click could
+      destroy something irreplaceable.
+    - **Taking a GM mail uses MODE_TAKE: empty it, KEEP it.** A ticket response
+      can be the only record of what a GM did and there is no undo, so removing
+      it is a separate deliberate act (`take.DeleteSingle`), never a side
+      effect of collecting.
+    - `take.DeleteSingle` is the manual counterpart to Delete Read and the only
+      way a GM mail ever leaves the mailbox. It enforces rule 14 ITSELF —
+      refusing money, COD or an item — rather than trusting the UI to only
+      offer it at the right moment, and refuses mid-run because a delete shifts
+      every later index.
 
 ### Sending mail (1.12)
 
