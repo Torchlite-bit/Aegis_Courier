@@ -306,6 +306,11 @@ function ui.Geometry(frameH)
         inbox  = panelH - INBOX_TOP  - INBOX_BOTTOM,
         log    = panelH - LOG_TOP    - LOG_BOTTOM,
         ledger = panelH - LEDGER_TOP - LEDGER_BOTTOM,
+        -- The recipient picker's geometry, so the tests can assert the
+        -- dropdown fits under the To box instead of re-deriving the numbers
+        -- and testing their own arithmetic. Declared further down the file
+        -- with the Send panel; forward-read here via ui.AutoCompleteMetrics.
+        ac     = ui.AutoCompleteMetrics and ui.AutoCompleteMetrics() or nil,
         minH   = MIN_H,
         maxH   = MAX_H,
         minW   = MIN_W,
@@ -1906,7 +1911,64 @@ end
 -- core/send.lua; this is only the form.
 
 local ATTACH_COLS, ATTACH_SIZE = 6, 32
-local AUTOCOMPLETE_ROWS = 5
+
+-- ---- the recipient picker's row budget -------------------------------------
+-- The list shows three labelled sections (Friends / Guild / Recent), so it can
+-- no longer be five fixed rows: a guild is hundreds of names and a section
+-- header costs a row of its own.
+--
+-- Rows are built to AC_MAX_ROWS once and shown/hidden, never created on the
+-- fly, and how many are actually USED is derived from the window's height at
+-- paint time -- the window resizes, and 1.12 does not clip children, so a
+-- dropdown taller than the panel draws straight over the window's own footer
+-- rather than being cut off.
+local AC_ROW_H     = 16
+local AC_PAD       = 8                      -- the list frame's own top+bottom
+local AC_MAX_ROWS  = 18
+local AC_MIN_ROWS  = 6
+-- Where the list starts, measured down from the panel's top edge: the To box's
+-- own inset, its height, and the 2px gap the list is anchored with. Derived so
+-- that moving the box moves the budget with it.
+local AC_TOP       = 8 + 18 + 2
+-- Section headers are rows too, and a truncated section spends one more on its
+-- "and N more" note. Three of each is the worst case.
+local AC_CHROME    = 3 * 2
+local AC_SECTION_MIN = 2
+
+local SECTION_LABELS = {
+    Friends = "Friends",
+    Guild   = "Guild",
+    -- Contacts are harvested from mail RECEIVED as well as sent, so this has
+    -- always meant "people you have corresponded with" rather than "people you
+    -- have written to". Now that it is a visible label, it says the shorter
+    -- true thing instead of the longer false one.
+    Recent  = "Recent",
+}
+
+-- The picker's layout numbers, for anything that needs to reason about
+-- whether the dropdown fits -- so nothing has to restate them as literals.
+function ui.AutoCompleteMetrics()
+    return { top = AC_TOP, rowH = AC_ROW_H, pad = AC_PAD,
+             maxRows = AC_MAX_ROWS, minRows = AC_MIN_ROWS,
+             sectionMin = AC_SECTION_MIN }
+end
+
+-- How many rows fit under the To box at this window height.
+function ui.AutoCompleteRowCount(frameH)
+    local g = ui.Geometry(frameH)
+    local rows = math.floor((g.panelH - AC_TOP - AC_PAD) / AC_ROW_H)
+    if rows < AC_MIN_ROWS then rows = AC_MIN_ROWS end
+    if rows > AC_MAX_ROWS then rows = AC_MAX_ROWS end
+    return rows
+end
+
+-- Names per section, derived from that budget rather than picked: a small
+-- window shows two of each and says how many it left out.
+function ui.AutoCompleteSectionCap(rows)
+    local per = math.floor((rows - AC_CHROME) / 3)
+    if per < AC_SECTION_MIN then per = AC_SECTION_MIN end
+    return per
+end
 
 -- A plain checkbox with no SavedVariables binding, for the send form's
 -- per-mail toggles. (The settings tab's MakeCheck writes through to the DB and
@@ -2089,7 +2151,7 @@ function ui.BuildSendPanel()
     acBtn.courierNoSkin = true
     acBtn:SetScript("OnEnter", function()
         GameTooltip:SetOwner(acBtn, "ANCHOR_RIGHT")
-        GameTooltip:SetText("Recent recipients")
+        GameTooltip:SetText("Friends, guild and recent mail")
         GameTooltip:Show()
     end)
     acBtn:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -2113,20 +2175,23 @@ function ui.BuildSendPanel()
     -- rather than pushes anything down.
     local ac = CreateFrame("Frame", "AegisCourierAutoComplete", panel)
     ac:SetWidth(150)
-    ac:SetHeight(AUTOCOMPLETE_ROWS * 16 + 8)
+    ac:SetHeight(AC_MAX_ROWS * AC_ROW_H + AC_PAD)
     ac:SetPoint("TOPLEFT", toBox, "BOTTOMLEFT", 0, -2)
     ac:SetFrameStrata("DIALOG")
     Backdrop(ac, C.titleBG, true)
     ac:Hide()
     ui.sendAuto = ac
 
+    -- Built to the maximum and shown/hidden, never created on the fly: the row
+    -- count moves with the window and with how many sections have anybody in
+    -- them.
     ui.sendAutoRows = {}
     local i = 1
-    while i <= AUTOCOMPLETE_ROWS do
+    while i <= AC_MAX_ROWS do
         local b = CreateFrame("Button", "AegisCourierAutoRow" .. i, ac)
-        b:SetHeight(16)
-        b:SetPoint("TOPLEFT", ac, "TOPLEFT", 4, -4 - (i - 1) * 16)
-        b:SetPoint("TOPRIGHT", ac, "TOPRIGHT", -4, -4 - (i - 1) * 16)
+        b:SetHeight(AC_ROW_H)
+        b:SetPoint("TOPLEFT", ac, "TOPLEFT", 4, -4 - (i - 1) * AC_ROW_H)
+        b:SetPoint("TOPRIGHT", ac, "TOPRIGHT", -4, -4 - (i - 1) * AC_ROW_H)
         b:SetHighlightTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
         local fs = Label(b, "GameFontNormalSmall", C.text)
         fs:SetPoint("LEFT", b, "LEFT", 4, 0)
@@ -2266,6 +2331,19 @@ function ui.BuildSendPanel()
     -- than treating it as one field.
     ui.SetTabChain({ toBox, subjBox, bodyBox, money.g, money.s, money.c })
 
+    -- Tab has TWO jobs in the recipient box and the suggestion wins when there
+    -- is one: accepting a completion is what the key is FOR while a list is
+    -- open, and walking to Subject is what it is for the rest of the time.
+    --
+    -- This has to come AFTER SetTabChain, which writes OnTabPressed on every
+    -- box it is given -- including this one. And it falls through to exactly
+    -- what the chain would have done rather than swallowing the key, because a
+    -- Tab that silently does nothing reads as a broken keyboard.
+    toBox:SetScript("OnTabPressed", function()
+        if ui.AcceptSuggestion() then return end
+        subjBox:SetFocus()
+    end)
+
     local moneyHint = Label(panel, "GameFontNormalSmall", C.dim)
     moneyHint:SetPoint("LEFT", moneyBox, "RIGHT", 8, 0)
     moneyHint:SetText("e.g. 12g 30s")
@@ -2316,69 +2394,171 @@ end
 -- Otherwise the list only appears once the user has actually typed something:
 -- an empty recipient box matches every contact, which made the suggestions
 -- drop open the moment the Send tab was opened and sit on top of the form.
+--
+-- The list is three labelled sections -- Friends, Guild, Recent -- assembled
+-- by send.PickerSections, which also does the cross-section dedupe. Rows are
+-- one of three kinds: a header, a name (the only clickable kind), or an
+-- "and N more" note. Non-name rows turn the mouse OFF, so they neither
+-- highlight nor answer a click.
 function ui.UpdateAutoComplete(showAll)
     local ac = ui.sendAuto
     if not ac then return end
     local typed = ui.sendTo:GetText() or ""
+    -- Remembered so a roster arriving later repaints in the mode the list was
+    -- opened in. Without it, an async reply turns a browse list into a typed
+    -- one under the player's hand.
+    ui.sendAutoShowAll = showAll and true or false
 
     if not showAll and typed == "" then
         ac:Hide()
         return
     end
 
+    local budget   = ui.AutoCompleteRowCount()
+    local perSec   = ui.AutoCompleteSectionCap(budget)
     -- THE BUTTON MEANS "SHOW ME EVERYONE", so it must not filter by whatever
     -- is already in the box. It used to pass the typed text through here like
     -- the typing path does, which meant clicking it with a complete name
     -- already typed matched exactly one contact -- itself -- and then the
     -- exact-match rule below hid the list again. The button appeared to do
     -- nothing at all, which is exactly how it was reported.
-    local names = db.MatchContacts(showAll and "" or typed, AUTOCOMPLETE_ROWS)
-    local n = table.getn(names)
+    local sections = A.send.PickerSections(showAll and "" or typed, perSec)
+    local total    = A.send.PickerTotal(sections)
 
     if showAll then
-        -- The button must always visibly respond, so an empty contact list
-        -- says so rather than silently doing nothing -- the same complaint in
-        -- a different disguise.
-        if n == 0 then
+        -- The button must always visibly respond, so an empty list says so
+        -- rather than silently doing nothing -- the same complaint in a
+        -- different disguise. It covers all three sources now, so it no longer
+        -- claims the contact list is the only thing that was empty.
+        if total == 0 then
             local row = ui.sendAutoRows[1]
             row.name = nil
-            row.label:SetText("|cff808080no saved recipients yet|r")
+            row:EnableMouse(false)
+            row.label:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+            row.label:SetText("no names to suggest yet")
             row:Show()
             local j = 2
-            while j <= AUTOCOMPLETE_ROWS do
+            while j <= AC_MAX_ROWS do
                 ui.sendAutoRows[j].name = nil
                 ui.sendAutoRows[j]:Hide()
                 j = j + 1
             end
-            ac:SetHeight(24)
+            ac:SetHeight(AC_ROW_H + AC_PAD)
             ac:Show()
             return
         end
     else
         -- An exact single match is not a suggestion worth showing. This is a
         -- TYPING rule only: it must never apply to the button, or the button
-        -- goes dead the moment a full name is in the box.
-        if n == 0 or (n == 1 and names[1] == typed) then
+        -- goes dead the moment a full name is in the box. It counts ACROSS
+        -- sections -- a name that is merely alone in its own section is still
+        -- one of several suggestions.
+        if total == 0
+           or (total == 1 and sections[1].names[1] == typed) then
             ac:Hide()
             return
         end
     end
 
+    -- Flatten to rows. A header is only spent when its section has somebody in
+    -- it, which PickerSections has already guaranteed.
+    local entries = {}
+    local si, nsec = 1, table.getn(sections)
+    while si <= nsec do
+        local sec = sections[si]
+        table.insert(entries, { text = SECTION_LABELS[sec.key] or sec.key,
+                                header = true })
+        local ni, nn = 1, table.getn(sec.names)
+        while ni <= nn do
+            table.insert(entries, { text = sec.names[ni], name = sec.names[ni] })
+            ni = ni + 1
+        end
+        if sec.total > nn then
+            table.insert(entries, {
+                text = "and " .. (sec.total - nn) .. " more -- keep typing",
+                note = true })
+        end
+        si = si + 1
+    end
+
+    -- Trim to what fits, then drop a header left stranded at the bottom with
+    -- nothing under it.
+    while table.getn(entries) > budget do
+        table.remove(entries)
+    end
+    while table.getn(entries) > 0 and entries[table.getn(entries)].header do
+        table.remove(entries)
+    end
+
+    local shown = table.getn(entries)
     local i = 1
-    while i <= AUTOCOMPLETE_ROWS do
+    while i <= AC_MAX_ROWS do
         local row = ui.sendAutoRows[i]
-        if names[i] then
-            row.name = names[i]
-            row.label:SetText(names[i])
+        local e = entries[i]
+        if e then
+            row.name = e.name
+            -- Only a name is interactive. A header that still highlighted
+            -- under the mouse reads as clickable, and a click on it would be
+            -- a dead click -- worse than no affordance at all.
+            row:EnableMouse(e.name and true or false)
+            if e.header then
+                row.label:SetTextColor(C.goldDim[1], C.goldDim[2], C.goldDim[3])
+            elseif e.note then
+                row.label:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+            else
+                row.label:SetTextColor(C.text[1], C.text[2], C.text[3])
+            end
+            row.label:SetText(e.text)
             row:Show()
         else
             row.name = nil
+            row.label:SetText("")
             row:Hide()
         end
         i = i + 1
     end
-    ac:SetHeight(n * 16 + 8)
+    ac:SetHeight(shown * AC_ROW_H + AC_PAD)
     ac:Show()
+end
+
+-- Repaint a list that is already open. The rosters arrive asynchronously, so
+-- the reply can land while the player is looking at a list built before it --
+-- which must fill in rather than sit there empty until the next keystroke.
+function ui.RefreshAutoComplete()
+    if not ui.sendAuto or not ui.sendAuto:IsVisible() then return end
+    ui.UpdateAutoComplete(ui.sendAutoShowAll)
+end
+
+-- Tab's other job: fill in the suggestion.
+--
+-- WHAT YOU SEE IS WHAT IT FILLS. This reads the first clickable ROW rather
+-- than re-deriving the ranking, so the key and the list cannot disagree --
+-- re-deriving it would be a second source of truth, and the first time the two
+-- orders drifted apart Tab would quietly fill in a name that is not the one
+-- highlighted at the top.
+--
+-- Returns true when it consumed the key.
+function ui.AcceptSuggestion()
+    local ac = ui.sendAuto
+    if not ac or not ac:IsVisible() then return false end
+    local i = 1
+    while i <= AC_MAX_ROWS do
+        local row = ui.sendAutoRows[i]
+        if row and row.name and row:IsVisible() then
+            -- SetText re-enters OnTextChanged, which repaints this list, so the
+            -- Hide has to come after it or the repaint reopens what we closed.
+            ui.sendTo:SetText(row.name)
+            ac:Hide()
+            -- Focus deliberately STAYS in the box: the player was typing a
+            -- name and is not finished with the field -- they may want to keep
+            -- going, or Tab again to move on. A click is the gesture that
+            -- means "done here", and that one does clear focus.
+            ui.RefreshSend()
+            return true
+        end
+        i = i + 1
+    end
+    return false
 end
 
 -- Read the money box. Returns copper, or 0 when empty/unparseable.

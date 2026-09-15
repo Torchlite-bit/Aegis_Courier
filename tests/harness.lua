@@ -97,7 +97,31 @@ CreateFrame = function(kind, name, parent, template)
     function f:SetChecked(v) self.checked = v and true or false end
     -- EditBoxes are frames, so text lives here too, not only on regions.
     -- rawget throughout: see the note above newRegion.
-    function f:SetText(t) rawset(self, "text", t) end
+    --
+    -- SetText FIRES OnTextChanged, because the client's does -- including on a
+    -- programmatic write. That matters here: the recipient box's handler
+    -- repaints the suggestion list, so a completion that fills the box
+    -- re-enters the very function that drew it. A mock that swallowed the
+    -- event could not see that at all, and would happily pass a Tab-accept
+    -- that reopened the list it had just closed.
+    --
+    -- Re-entrancy is modelled rather than blocked: a handler that writes back
+    -- to its own box recurses on the real client too. It is bounded only so a
+    -- runaway loop fails loudly here instead of hanging the suite.
+    function f:SetText(t)
+        rawset(self, "text", t)
+        local fn = self.scripts and self.scripts.OnTextChanged
+        if not fn then return end
+        local d = (rawget(self, "textDepth") or 0) + 1
+        if d > 8 then
+            rawset(self, "textDepth", 0)
+            error("OnTextChanged recursed without end on " ..
+                  tostring(rawget(self, "name")))
+        end
+        rawset(self, "textDepth", d)
+        fn()
+        rawset(self, "textDepth", d - 1)
+    end
     function f:GetText() return rawget(self, "text") end
     -- REAL focus tracking. There was none: SetFocus fell through to the
     -- CamelCase no-op, so a Tab chain could be entirely broken and the suite
@@ -442,6 +466,55 @@ GetSendMailPrice = function() return 30 end
 GetCVar = function(k) return k == "realmName" and "TestRealm" or "" end
 UnitFactionGroup = function() return "Alliance" end
 UnitName = function() return "Tester" end
+
+-- ---- guild + friends rosters ----------------------------------------------
+-- Modelled the way 1.12 actually behaves, which is the whole hazard of the
+-- recipient picker: the counts answer ZERO until the request has been made AND
+-- the reply event has fired. A mock that simply returned the list would make
+-- the async path untestable -- and that path is the one most likely to ship
+-- broken, because on a fast local reply it looks fine either way.
+GUILD = {}           -- { { name, online }, ... } -- what the SERVER holds
+FRIENDS = {}
+guildDelivered, friendsDelivered = false, false
+guildRequests, friendRequests = 0, 0
+inGuild = true
+
+-- BOTH the count and the accessor are gated on delivery, deliberately: that is
+-- how the client behaves, and either one alone is enough to model it. So
+-- removing one of them proves nothing -- a sabotage has to strip BOTH before
+-- the async tests can tell, the same way the fail-open probe's redundant
+-- guards have to be removed together.
+IsInGuild = function() return inGuild end
+GuildRoster = function()
+    guildRequests = guildRequests + 1
+    -- Requesting does not deliver. fire("GUILD_ROSTER_UPDATE") is the reply,
+    -- and DeliverGuild is what a test calls to make one land.
+end
+GetNumGuildMembers = function()
+    if not guildDelivered then return 0 end
+    return table.getn(GUILD)
+end
+-- name, rank, rankIndex, level, class, zone, note, officernote, online
+GetGuildRosterInfo = function(i)
+    if not guildDelivered then return nil end
+    local m = GUILD[i]
+    if not m then return nil end
+    return m.name, "Member", 4, 60, "Mage", "Ironforge", "", "",
+           m.online and 1 or nil
+end
+
+ShowFriends = function() friendRequests = friendRequests + 1 end
+GetNumFriends = function()
+    if not friendsDelivered then return 0 end
+    return table.getn(FRIENDS)
+end
+-- name, level, class, area, connected
+GetFriendInfo = function(i)
+    if not friendsDelivered then return nil end
+    local f = FRIENDS[i]
+    if not f then return nil end
+    return f.name, 60, "Rogue", "Stormwind", f.connected and 1 or nil
+end
 -- Cursor and attachment slot, modelled the way the real client behaves,
 -- because the retry path depends on it: picking an item up REMOVES it from the
 -- bag, ClearCursor puts it BACK where it came from, and clicking the
@@ -2254,23 +2327,35 @@ check(not A.ui.sendAuto:IsVisible(),
 -- Clear every row first. The mock does not propagate a parent's Hide() to its
 -- children, so leftover rows from the previous show would otherwise still look
 -- "visible" and the count below would pass on stale state.
-local si = 1
-while si <= 5 do
-    A.ui.sendAutoRows[si].name = nil
-    A.ui.sendAutoRows[si].label:SetText("")
-    A.ui.sendAutoRows[si]:Hide()
-    si = si + 1
+local AC_ROWS = table.getn(A.ui.sendAutoRows)
+local function clearAutoRows()
+    local si = 1
+    while si <= AC_ROWS do
+        A.ui.sendAutoRows[si].name = nil
+        A.ui.sendAutoRows[si].label:SetText("")
+        A.ui.sendAutoRows[si]:Hide()
+        si = si + 1
+    end
 end
+-- Count the CLICKABLE rows. The list carries section headers and "and N more"
+-- notes now, so a raw count of visible rows counts chrome as contacts; a row
+-- with a name on it is exactly what "a contact is listed" means.
+local function autoNames()
+    local out = {}
+    local si = 1
+    while si <= AC_ROWS do
+        local row = A.ui.sendAutoRows[si]
+        if row.visible and row.name then table.insert(out, row.name) end
+        si = si + 1
+    end
+    return out
+end
+clearAutoRows()
 A.ui.sendAutoButton.scripts.OnClick()
 check(A.ui.sendAuto:IsVisible(),
       "but the BUTTON still opens the list with that name in the box")
 -- It lists everyone, not just what matches the typed text.
-local shown = 0
-si = 1
-while si <= 5 do
-    if A.ui.sendAutoRows[si].visible then shown = shown + 1 end
-    si = si + 1
-end
+local shown = table.getn(autoNames())
 check(shown == 3, "all three contacts are listed, not just the typed one", shown)
 A.ui.sendAutoButton.scripts.OnClick()
 check(not A.ui.sendAuto:IsVisible(), "and it still toggles shut")
@@ -2282,7 +2367,7 @@ A.ui.sendTo:SetText("")
 A.ui.sendAutoButton.scripts.OnClick()
 check(A.ui.sendAuto:IsVisible(), "an empty contact list still opens the list")
 check(A.util.Contains(rawget(A.ui.sendAutoRows[1].label, "text") or "",
-      "no saved recipients"), "and says so",
+      "no names to suggest"), "and says so",
       rawget(A.ui.sendAutoRows[1].label, "text"))
 check(A.ui.sendAutoRows[1].name == nil, "the placeholder row is not clickable")
 A.ui.sendAutoButton.scripts.OnClick()
@@ -2290,6 +2375,379 @@ A.db.AddContact("Torchlyte")
 A.db.AddContact("Torchlite")
 A.db.AddContact("Subtilizer")
 A.ui.sendTo:SetText("")
+
+-- Scoped: the main chunk is near Lua's 200-local ceiling, and a block
+-- releases its slots at the end. Nothing here is needed afterwards.
+do
+print("== picker: the rosters are ASYNCHRONOUS ==")
+-- The whole hazard of this feature. GetNumGuildMembers answers 0 until the
+-- request has been made and the reply has landed, so a picker that reads the
+-- count once concludes "no guild" for a player who has one.
+local wasAtMailbox = A.send.atMailbox
+-- The offline entries sort alphabetically BEFORE the online ones on purpose.
+-- With Gladys/Gomer and Fiona/Fred the two orderings agree, so dropping the
+-- online-first rule changed nothing and the sort was untestable.
+GUILD = { { name = "Gladys", online = true },
+          { name = "Bartho", online = false },
+          { name = "Tester", online = true } }   -- the player is ON the roster
+FRIENDS = { { name = "Fiona", connected = true },
+            { name = "Fred",  connected = false },
+            { name = "Bob",   connected = false } }
+guildDelivered, friendsDelivered = false, false
+A.send.guildDirty, A.send.friendDirty = true, true
+
+check(table.getn(A.send.GuildNames()) == 0,
+      "an undelivered guild roster reads as empty")
+check(table.getn(A.send.FriendNames()) == 0,
+      "an undelivered friends list reads as empty")
+
+guildRequests, friendRequests = 0, 0
+fire("MAIL_SHOW")
+check(guildRequests == 1, "opening the mailbox asks for the guild roster",
+      guildRequests)
+check(friendRequests == 1, "and for the friends list", friendRequests)
+
+-- Typing must not re-ask. Both calls are throttled server-side exactly like
+-- CheckInbox(), and a request per keystroke is the shape of that mistake.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Send")
+A.ui.sendTo:SetText("G")
+A.ui.sendTo:SetText("Gl")
+A.ui.sendTo:SetText("Gla")
+check(guildRequests == 1 and friendRequests == 1,
+      "typing does not re-ask for either roster",
+      guildRequests .. "/" .. friendRequests)
+A.ui.sendTo:SetText("")
+
+-- The reply lands.
+guildDelivered, friendsDelivered = true, true
+fire("GUILD_ROSTER_UPDATE")
+fire("FRIENDLIST_UPDATE")
+check(table.getn(A.send.GuildNames()) == 2,
+      "the delivered roster arrives, minus the player",
+      table.getn(A.send.GuildNames()))
+check(table.getn(A.send.FriendNames()) == 3, "and the friends list",
+      table.getn(A.send.FriendNames()))
+
+print("== picker: the player is not offered their own guild row ==")
+local gnames = {}
+local gi = 1
+while gi <= table.getn(A.send.GuildNames()) do
+    gnames[A.send.GuildNames()[gi].name] = true
+    gi = gi + 1
+end
+check(not gnames["Tester"], "the player is filtered out of Guild")
+-- But mailing yourself is still reachable: Recent carries the player's own
+-- name deliberately (send.lua seeds it at load), which is why this is a
+-- Guild-SECTION rule and not a global one. Seeded here because earlier tests
+-- clear the contact list.
+A.db.AddContact("Tester")
+check(table.getn(A.db.MatchContacts("Tester", 5)) == 1,
+      "the player is still reachable through Recent")
+check(table.getn(A.send.PickerSections("Tester", 10)) == 1,
+      "and the picker offers them, from Recent")
+
+print("== picker: online first, then alphabetical ==")
+check(A.send.GuildNames()[1].name == "Gladys",
+      "the online guildmate sorts first", A.send.GuildNames()[1].name)
+check(A.send.GuildNames()[2].name == "Bartho",
+      "ahead of the offline one, which is alphabetically FIRST",
+      A.send.GuildNames()[2].name)
+check(A.send.FriendNames()[1].name == "Fiona",
+      "same for friends", A.send.FriendNames()[1].name)
+check(A.send.FriendNames()[2].name == "Bob",
+      "and alphabetical inside each group", A.send.FriendNames()[2].name)
+
+print("== picker: sections, in order, deduped ==")
+A.db.ForgetContacts()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Gladys")     -- also a guildmate: must not appear twice
+local secs = A.send.PickerSections("", 10)
+check(table.getn(secs) == 3, "three sections", table.getn(secs))
+check(secs[1].key == "Friends" and secs[2].key == "Guild"
+      and secs[3].key == "Recent", "in the order the picker declares")
+local dupes = 0
+local di = 1
+while di <= table.getn(secs) do
+    local nj = 1
+    while nj <= table.getn(secs[di].names) do
+        if secs[di].names[nj] == "Gladys" then dupes = dupes + 1 end
+        nj = nj + 1
+    end
+    di = di + 1
+end
+check(dupes == 1, "a guildmate who is also a contact is listed once", dupes)
+check(secs[2].names[1] == "Gladys",
+      "and it is the earlier section that keeps them", secs[2].names[1])
+
+print("== picker: an empty section is not given a header ==")
+inGuild = false
+A.send.guildDirty = true
+secs = A.send.PickerSections("", 10)
+local keys = ""
+di = 1
+while di <= table.getn(secs) do keys = keys .. secs[di].key .. " "; di = di + 1 end
+check(not A.util.Contains(keys, "Guild"), "no guild, no Guild section", keys)
+inGuild = true
+A.send.guildDirty = true
+
+print("== picker: no guild and no friends degrades quietly ==")
+inGuild = false
+FRIENDS = {}
+A.send.guildDirty, A.send.friendDirty = true, true
+secs = A.send.PickerSections("", 10)
+check(table.getn(secs) == 1 and secs[1].key == "Recent",
+      "only Recent is left, and nothing errored")
+inGuild = true
+FRIENDS = { { name = "Fiona", connected = true },
+            { name = "Fred",  connected = false },
+            { name = "Bob",   connected = false } }
+A.send.guildDirty, A.send.friendDirty = true, true
+
+print("== picker UI: the list draws sections ==")
+A.ui.sendTo:SetText("")
+clearAutoRows()
+A.ui.sendAutoButton.scripts.OnClick()
+check(A.ui.sendAuto:IsVisible(), "the button opens it")
+local labels = {}
+local ri = 1
+while ri <= AC_ROWS do
+    local row = A.ui.sendAutoRows[ri]
+    if row.visible then
+        table.insert(labels, (rawget(row.label, "text") or "") ..
+                     (row.name and "*" or ""))
+    end
+    ri = ri + 1
+end
+check(labels[1] == "Friends", "the first row is the Friends header", labels[1])
+check(A.ui.sendAutoRows[1].name == nil, "a header is not a name")
+check(not A.ui.sendAutoRows[1]:IsMouseEnabled(),
+      "and it does not take the mouse, so it cannot look clickable")
+check(A.ui.sendAutoRows[2].name == "Fiona",
+      "the first friend follows it", A.ui.sendAutoRows[2].name)
+check(A.ui.sendAutoRows[2]:IsMouseEnabled(), "a name DOES take the mouse")
+check(hover(A.ui.sendAutoRows[2]) or true, "and can be hovered at all")
+local joined = ""
+ri = 1
+while ri <= table.getn(labels) do joined = joined .. labels[ri] .. "|"; ri = ri + 1 end
+check(A.util.Contains(joined, "Guild") and A.util.Contains(joined, "Recent"),
+      "all three headers are drawn", joined)
+
+print("== picker UI: a roster arriving repaints an OPEN list ==")
+-- The reply can land while the player is looking at a list built before it.
+-- Sitting there empty until the next keystroke is the bug this prevents.
+guildDelivered = false
+A.send.guildDirty = true
+A.ui.sendTo:SetText("")
+clearAutoRows()
+A.ui.sendAutoButton.scripts.OnClick()
+local before = ""
+ri = 1
+while ri <= AC_ROWS do
+    local row = A.ui.sendAutoRows[ri]
+    if row.visible then before = before .. (rawget(row.label, "text") or "") .. "|" end
+    ri = ri + 1
+end
+-- Bartho is in the guild and NOWHERE else, so his absence is really the
+-- roster's absence. Gladys would prove nothing: she is also a contact, and
+-- Recent would carry her whether the roster had landed or not.
+check(not A.util.Contains(before, "Bartho"),
+      "the open list has no guild in it yet", before)
+check(not A.util.Contains(before, "Guild|"),
+      "and no Guild header either", before)
+guildDelivered = true
+fire("GUILD_ROSTER_UPDATE")
+local after = ""
+ri = 1
+while ri <= AC_ROWS do
+    local row = A.ui.sendAutoRows[ri]
+    if row.visible then after = after .. (rawget(row.label, "text") or "") .. "|" end
+    ri = ri + 1
+end
+check(A.util.Contains(after, "Bartho"),
+      "and it fills in when the reply lands, without a keystroke", after)
+check(A.util.Contains(after, "Guild|"), "header and all", after)
+-- Repainted in the mode it was OPENED in: an async reply must not quietly turn
+-- a browse list into a typed one.
+check(A.util.Contains(after, "Friends"),
+      "still the full browse list, not a filtered one", after)
+
+print("== picker UI: a roster arriving does NOT open a closed list ==")
+A.ui.sendAuto:Hide()
+A.send.guildDirty = true
+fire("GUILD_ROSTER_UPDATE")
+check(not A.ui.sendAuto:IsVisible(),
+      "a background roster update does not pop the list open")
+
+print("== picker UI: typing matches across all three sources ==")
+A.ui.sendTo:SetText("F")
+check(A.ui.sendAuto:IsVisible(), "typing a friend's initial opens the list")
+local names = autoNames()
+check(table.getn(names) == 2 and names[1] == "Fiona",
+      "and offers the friends", table.getn(names) .. " " .. tostring(names[1]))
+A.ui.sendTo:SetText("Gl")
+names = autoNames()
+check(names[1] == "Gladys", "a guildmate matches too", tostring(names[1]))
+A.ui.sendTo:SetText("Zzz")
+check(not A.ui.sendAuto:IsVisible(), "and no match still means no list")
+
+print("== picker UI: Tab fills in the suggestion ==")
+A.ui.sendTo:SetText("Fio")
+check(A.ui.sendAuto:IsVisible(), "a suggestion is showing")
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendTo:GetText() == "Fiona",
+      "Tab completed the name", A.ui.sendTo:GetText())
+check(A.ui.sendTo:HasFocus(),
+      "and the keyboard stayed in the box -- the field is not finished with")
+check(not A.ui.sendAuto:IsVisible(),
+      "the list closed, and the repaint SetText triggers did not reopen it")
+
+-- What Tab fills must be what the top row shows. These are the same lookup on
+-- purpose: a second ranking would drift from the one on screen.
+A.ui.sendTo:SetText("G")
+names = autoNames()
+local top = names[1]
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendTo:GetText() == top,
+      "Tab fills the TOP row, whatever it is", tostring(top))
+
+print("== picker UI: a complete name is still a suggestion when others share it ==")
+-- Bob is a friend and Bobby is a contact, so "Bob" is an exact match that is
+-- ALONE IN ITS SECTION while two names are still on offer. The "an exact
+-- single match is not a suggestion" rule has to count across sections to get
+-- this right -- counting within the first section hides a list that has a
+-- second name in it.
+A.db.AddContact("Bobby")
+A.ui.sendTo:SetText("Bob")
+check(A.ui.sendAuto:IsVisible(),
+      "a complete name with a longer neighbour still suggests")
+names = autoNames()
+check(table.getn(names) == 2, "both are offered", table.getn(names))
+check(names[1] == "Bob", "the friend first", tostring(names[1]))
+
+-- And accepting it must CLOSE the list and leave it closed. Filling the box
+-- re-fires OnTextChanged, which repaints this very list -- and here the
+-- repaint finds two matches and wants to open it again, so a hide issued
+-- before the fill is simply undone. This is the case that proves the order.
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendTo:GetText() == "Bob", "Tab took the friend",
+      A.ui.sendTo:GetText())
+check(not A.ui.sendAuto:IsVisible(),
+      "and the list stayed shut through its own repaint")
+A.ui.sendTo:SetText("")
+
+print("== picker UI: Tab still walks the form when there is no suggestion ==")
+A.ui.sendTo:SetText("")
+check(not A.ui.sendAuto:IsVisible(), "no list open")
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendSubject:HasFocus(),
+      "Tab moves to Subject exactly as it did before")
+-- A complete name typed shows no suggestion either, and Tab must not eat the
+-- key there: that is the most common moment to press it.
+A.ui.sendTo:SetText("Fiona")
+check(not A.ui.sendAuto:IsVisible(), "a complete name shows no suggestion")
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendSubject:HasFocus(), "and Tab still moves on")
+A.ui.sendTo:SetText("")
+
+print("== picker UI: a long section is capped and says so ==")
+GUILD = {}
+local bi = 1
+while bi <= 40 do
+    table.insert(GUILD, { name = "Guildie" .. (bi < 10 and "0" or "") .. bi,
+                          online = true })
+    bi = bi + 1
+end
+guildDelivered = true
+A.send.guildDirty = true
+A.ui.sendTo:SetText("")
+clearAutoRows()
+A.ui.sendAutoButton.scripts.OnClick()
+local cap = A.ui.AutoCompleteSectionCap(A.ui.AutoCompleteRowCount())
+local guildShown = 0
+local sawMore = false
+ri = 1
+while ri <= AC_ROWS do
+    local row = A.ui.sendAutoRows[ri]
+    if row.visible then
+        local t = rawget(row.label, "text") or ""
+        if row.name and A.util.Contains(row.name, "Guildie") then
+            guildShown = guildShown + 1
+        end
+        if A.util.Contains(t, "more") then sawMore = true end
+    end
+    ri = ri + 1
+end
+check(guildShown == cap, "the guild section is capped at the row budget",
+      guildShown .. " vs " .. cap)
+check(sawMore, "and the list says how many it left out")
+-- Typing narrows it, which is what the note tells you to do.
+A.ui.sendTo:SetText("Guildie1")
+names = autoNames()
+check(table.getn(names) > 0 and table.getn(names) <= cap,
+      "typing narrows the section", table.getn(names))
+A.ui.sendTo:SetText("")
+
+print("== picker UI: the dropdown fits under the To box at every size ==")
+-- 1.12 does not clip children: a list taller than the panel draws over the
+-- window's own footer rather than being cut off. Asserted across the SIZE
+-- RANGE, not at one height.
+local gm = A.ui.Geometry()
+local heights = { gm.minH, gm.defaultH, gm.maxH }
+local hi = 1
+while hi <= 3 do
+    local gh = A.ui.Geometry(heights[hi])
+    local rows = A.ui.AutoCompleteRowCount(heights[hi])
+    local need = gh.ac.top + rows * gh.ac.rowH + gh.ac.pad
+    check(need <= gh.panelH,
+          "the list fits inside the panel at height " .. heights[hi],
+          need .. " vs " .. gh.panelH)
+    check(rows >= gh.ac.minRows and rows <= gh.ac.maxRows,
+          "and the row count stays in its bounds at " .. heights[hi], rows)
+    check(A.ui.AutoCompleteSectionCap(rows) >= gm.ac.sectionMin,
+          "every section still gets at least two names at " .. heights[hi])
+    hi = hi + 1
+end
+-- At every size the window can actually be, the panel is roomier than the
+-- list's own ceiling, so AC_MAX_ROWS is what binds and the dropdown does not
+-- grow into a 46-row wall at full height. The derivation still earns its keep
+-- by binding FIRST if the window ever gets shorter -- if MIN_H drops, or the
+-- To box moves down the panel, the list shrinks instead of drawing over the
+-- window's footer. Proven at a height below today's minimum, because that is
+-- the only place the arithmetic is reachable.
+check(A.ui.AutoCompleteRowCount(gm.minH) == gm.ac.maxRows,
+      "at real window sizes the list's own ceiling is what binds",
+      A.ui.AutoCompleteRowCount(gm.minH))
+local tinyRows = A.ui.AutoCompleteRowCount(300)
+local tiny = A.ui.Geometry(300)
+check(tinyRows < gm.ac.maxRows,
+      "a shorter window than we allow today would shrink the list", tinyRows)
+check(tiny.ac.top + tinyRows * tiny.ac.rowH + tiny.ac.pad <= tiny.panelH,
+      "and it would still fit inside the panel")
+
+-- Leave the picker as the rest of the suite expects to find it.
+GUILD, FRIENDS = {}, {}
+guildDelivered, friendsDelivered = false, false
+inGuild = true
+A.send.guildDirty, A.send.friendDirty = true, true
+A.ui.sendTo:SetText("")
+A.ui.sendAuto:Hide()
+clearAutoRows()
+A.db.ForgetContacts()
+A.db.AddContact("Torchlyte")
+A.db.AddContact("Torchlite")
+A.db.AddContact("Subtilizer")
+A.db.AddContact("Tester")
+fire("MAIL_CLOSED")
+A.send.atMailbox = wasAtMailbox
+focusedBox = nil
+end
 
 print("== version: the title bar cannot drift from the .toc ==")
 -- Two releases shipped with the .toc bumped and this literal left behind, so
