@@ -116,6 +116,16 @@ local function DefaultAccountDB()
         -- the opposing faction is not possible either -- so a flat account-wide
         -- list would offer names that can never be valid.
         contacts   = {},
+        -- The account's OWN characters, same realm|faction key, recorded as
+        -- each one logs in with Courier installed. 1.12 has no API that
+        -- enumerates your alts -- there is no account-level anything -- so the
+        -- only way to know a character exists is to have been it.
+        --
+        -- DELIBERATELY NOT PRUNED, where contacts are. A bank alt you have not
+        -- played since March is still your bank alt, and it is exactly the
+        -- character you most want to mail; ageing it out of the list would
+        -- delete the one name the player never types in full.
+        alts       = {},
     }
 end
 
@@ -547,6 +557,45 @@ function db.AddContact(name)
     local bucket = ContactBucket()
     if not bucket then return end
     bucket[name] = time()
+end
+
+-- ---------------------------------------------------------------------------
+-- The account's own characters
+-- ---------------------------------------------------------------------------
+
+local function AltBucket()
+    if not db.account then return nil end
+    if not db.account.alts then db.account.alts = {} end
+    local key = ContactKey()
+    if not db.account.alts[key] then db.account.alts[key] = {} end
+    return db.account.alts[key]
+end
+
+-- Called once per login for the character being played.
+function db.AddAlt(name)
+    if type(name) ~= "string" or name == "" then return end
+    local bucket = AltBucket()
+    if not bucket then return end
+    bucket[name] = time()
+end
+
+-- Every character on this account and realm+faction, alphabetically. `exclude`
+-- drops one name -- the caller passes the character being played, because the
+-- server refuses mail addressed to yourself and offering it is a dead end.
+function db.Alts(exclude)
+    local out = {}
+    local bucket = AltBucket()
+    if not bucket then return out end
+    for name in pairs(bucket) do
+        if name ~= exclude then table.insert(out, name) end
+    end
+    table.sort(out)
+    return out
+end
+
+function db.ForgetAlts()
+    if not db.account then return end
+    db.account.alts[ContactKey()] = {}
 end
 
 function db.ForgetContacts()

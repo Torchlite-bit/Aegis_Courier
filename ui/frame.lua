@@ -1930,12 +1930,17 @@ local AC_MIN_ROWS  = 6
 -- own inset, its height, and the 2px gap the list is anchored with. Derived so
 -- that moving the box moves the budget with it.
 local AC_TOP       = 8 + 18 + 2
--- Section headers are rows too, and a truncated section spends one more on its
--- "and N more" note. Three of each is the worst case.
-local AC_CHROME    = 3 * 2
+-- A header costs a row, and a truncated section spends one more on its "and N
+-- more" note -- so each section on screen costs two rows of chrome. Counted
+-- per LIVE section rather than per possible one: reserving for four when two
+-- came back empty shows two names each where seven would fit.
+local AC_CHROME_PER_SECTION = 2
 local AC_SECTION_MIN = 2
 
 local SECTION_LABELS = {
+    -- Your own characters. "Alts" is what players call them; the list holds
+    -- every character on the account bar the one being played.
+    Alts    = "Alts",
     Friends = "Friends",
     Guild   = "Guild",
     -- Contacts are harvested from mail RECEIVED as well as sent, so this has
@@ -1950,7 +1955,8 @@ local SECTION_LABELS = {
 function ui.AutoCompleteMetrics()
     return { top = AC_TOP, rowH = AC_ROW_H, pad = AC_PAD,
              maxRows = AC_MAX_ROWS, minRows = AC_MIN_ROWS,
-             sectionMin = AC_SECTION_MIN }
+             sectionMin = AC_SECTION_MIN,
+             chromePerSection = AC_CHROME_PER_SECTION }
 end
 
 -- How many rows fit under the To box at this window height.
@@ -1962,10 +1968,13 @@ function ui.AutoCompleteRowCount(frameH)
     return rows
 end
 
--- Names per section, derived from that budget rather than picked: a small
--- window shows two of each and says how many it left out.
-function ui.AutoCompleteSectionCap(rows)
-    local per = math.floor((rows - AC_CHROME) / 3)
+-- Names per section, derived from that budget and from how many sections
+-- actually have somebody in them, rather than picked. A small window shows two
+-- of each and says how many it left out.
+function ui.AutoCompleteSectionCap(rows, sectionCount)
+    local n = sectionCount or 1
+    if n < 1 then n = 1 end
+    local per = math.floor((rows - n * AC_CHROME_PER_SECTION) / n)
     if per < AC_SECTION_MIN then per = AC_SECTION_MIN end
     return per
 end
@@ -2415,15 +2424,19 @@ function ui.UpdateAutoComplete(showAll)
     end
 
     local budget   = ui.AutoCompleteRowCount()
-    local perSec   = ui.AutoCompleteSectionCap(budget)
     -- THE BUTTON MEANS "SHOW ME EVERYONE", so it must not filter by whatever
     -- is already in the box. It used to pass the typed text through here like
     -- the typing path does, which meant clicking it with a complete name
     -- already typed matched exactly one contact -- itself -- and then the
     -- exact-match rule below hid the list again. The button appeared to do
     -- nothing at all, which is exactly how it was reported.
-    local sections = A.send.PickerSections(showAll and "" or typed, perSec)
+    --
+    -- Assembled UNCAPPED first: the cap depends on how many sections came back
+    -- with anybody in them, which is not knowable until they have.
+    local sections = A.send.PickerSections(showAll and "" or typed, nil)
     local total    = A.send.PickerTotal(sections)
+    A.send.CapSections(sections,
+        ui.AutoCompleteSectionCap(budget, table.getn(sections)))
 
     if showAll then
         -- The button must always visibly respond, so an empty list says so

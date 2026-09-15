@@ -479,25 +479,40 @@ guildDelivered, friendsDelivered = false, false
 guildRequests, friendRequests = 0, 0
 inGuild = true
 
--- BOTH the count and the accessor are gated on delivery, deliberately: that is
--- how the client behaves, and either one alone is enough to model it. So
--- removing one of them proves nothing -- a sabotage has to strip BOTH before
--- the async tests can tell, the same way the fail-open probe's redundant
--- guards have to be removed together.
 IsInGuild = function() return inGuild end
 GuildRoster = function()
     guildRequests = guildRequests + 1
     -- Requesting does not deliver. fire("GUILD_ROSTER_UPDATE") is the reply,
-    -- and DeliverGuild is what a test calls to make one land.
+    -- and setting guildDelivered is what makes one land.
 end
-GetNumGuildMembers = function()
-    if not guildDelivered then return 0 end
-    return table.getn(GUILD)
+
+-- "Show offline members" is NOT a display filter on the guild pane -- it
+-- filters the roster the client will answer for at all. Modelled, because a
+-- mock that always returns everyone cannot tell whether the addon remembered
+-- to ask for the offline half, and offline guildmates are most of a guild.
+guildShowOffline = false
+GetGuildRosterShowOffline = function() return guildShowOffline end
+SetGuildRosterShowOffline = function(v) guildShowOffline = v and true or false end
+
+local function guildView()
+    if not guildDelivered then return {} end
+    local out = {}
+    local i = 1
+    while i <= table.getn(GUILD) do
+        local m = GUILD[i]
+        if guildShowOffline or m.online then table.insert(out, m) end
+        i = i + 1
+    end
+    return out
 end
+
+-- ONE delivery gate, in guildView above, deliberately. It was gated here as
+-- well; that redundancy meant no single sabotage could prove any of them, and
+-- a guard nothing can prove is a guard nobody can trust.
+GetNumGuildMembers = function() return table.getn(guildView()) end
 -- name, rank, rankIndex, level, class, zone, note, officernote, online
 GetGuildRosterInfo = function(i)
-    if not guildDelivered then return nil end
-    local m = GUILD[i]
+    local m = guildView()[i]
     if not m then return nil end
     return m.name, "Member", 4, 60, "Mage", "Ironforge", "", "",
            m.online and 1 or nil
@@ -2438,22 +2453,30 @@ while gi <= table.getn(A.send.GuildNames()) do
     gi = gi + 1
 end
 check(not gnames["Tester"], "the player is filtered out of Guild")
--- But mailing yourself is still reachable: Recent carries the player's own
--- name deliberately (send.lua seeds it at load), which is why this is a
--- Guild-SECTION rule and not a global one. Seeded here because earlier tests
--- clear the contact list.
+-- And not from anywhere ELSE either. The server refuses mail addressed to
+-- yourself, so a row for the character being played can only fail -- which is
+-- why the exclusion is seeded once for the whole picker rather than applied
+-- to the Guild walk alone. Seeded into every source here on purpose: contacts
+-- really does hold it (send.lua writes it at load, and upgrading players have
+-- it), and the roster really does include it.
 A.db.AddContact("Tester")
+A.db.AddAlt("Tester")
 check(table.getn(A.db.MatchContacts("Tester", 5)) == 1,
-      "the player is still reachable through Recent")
-check(table.getn(A.send.PickerSections("Tester", 10)) == 1,
-      "and the picker offers them, from Recent")
+      "the contact list does still hold the player's own name")
+check(table.getn(A.send.PickerSections("Tester")) == 0,
+      "but the picker offers it from no section at all")
 
 print("== picker: online first, then alphabetical ==")
-check(A.send.GuildNames()[1].name == "Gladys",
-      "the online guildmate sorts first", A.send.GuildNames()[1].name)
-check(A.send.GuildNames()[2].name == "Bartho",
+-- Resolved first rather than indexed inline: this depends on the OFFLINE half
+-- of the roster being present at all, so when that breaks it should read as a
+-- failed check and not as an index error three lines further on.
+local g1 = A.send.GuildNames()[1]
+local g2 = A.send.GuildNames()[2]
+check(g1 and g1.name == "Gladys",
+      "the online guildmate sorts first", g1 and g1.name or "nil")
+check(g2 and g2.name == "Bartho",
       "ahead of the offline one, which is alphabetically FIRST",
-      A.send.GuildNames()[2].name)
+      g2 and g2.name or "nil")
 check(A.send.FriendNames()[1].name == "Fiona",
       "same for friends", A.send.FriendNames()[1].name)
 check(A.send.FriendNames()[2].name == "Bob",
@@ -2463,7 +2486,7 @@ print("== picker: sections, in order, deduped ==")
 A.db.ForgetContacts()
 A.db.AddContact("Torchlyte")
 A.db.AddContact("Gladys")     -- also a guildmate: must not appear twice
-local secs = A.send.PickerSections("", 10)
+local secs = A.send.PickerSections("")
 check(table.getn(secs) == 3, "three sections", table.getn(secs))
 check(secs[1].key == "Friends" and secs[2].key == "Guild"
       and secs[3].key == "Recent", "in the order the picker declares")
@@ -2484,7 +2507,7 @@ check(secs[2].names[1] == "Gladys",
 print("== picker: an empty section is not given a header ==")
 inGuild = false
 A.send.guildDirty = true
-secs = A.send.PickerSections("", 10)
+secs = A.send.PickerSections("")
 local keys = ""
 di = 1
 while di <= table.getn(secs) do keys = keys .. secs[di].key .. " "; di = di + 1 end
@@ -2496,7 +2519,7 @@ print("== picker: no guild and no friends degrades quietly ==")
 inGuild = false
 FRIENDS = {}
 A.send.guildDirty, A.send.friendDirty = true, true
-secs = A.send.PickerSections("", 10)
+secs = A.send.PickerSections("")
 check(table.getn(secs) == 1 and secs[1].key == "Recent",
       "only Recent is left, and nothing errored")
 inGuild = true
@@ -2669,7 +2692,9 @@ A.send.guildDirty = true
 A.ui.sendTo:SetText("")
 clearAutoRows()
 A.ui.sendAutoButton.scripts.OnClick()
-local cap = A.ui.AutoCompleteSectionCap(A.ui.AutoCompleteRowCount())
+local liveSections = table.getn(A.send.PickerSections(""))
+local cap = A.ui.AutoCompleteSectionCap(A.ui.AutoCompleteRowCount(),
+                                        liveSections)
 local guildShown = 0
 local sawMore = false
 ri = 1
@@ -2687,11 +2712,17 @@ end
 check(guildShown == cap, "the guild section is capped at the row budget",
       guildShown .. " vs " .. cap)
 check(sawMore, "and the list says how many it left out")
--- Typing narrows it, which is what the note tells you to do.
+-- Typing narrows it, which is what the note tells you to do. And with only
+-- one section left standing the cap RELAXES -- the other three sections'
+-- reserved rows are not being used, so all ten matches fit where four would
+-- have shown in the browse list.
 A.ui.sendTo:SetText("Guildie1")
 names = autoNames()
-check(table.getn(names) > 0 and table.getn(names) <= cap,
-      "typing narrows the section", table.getn(names))
+check(table.getn(names) == 10,
+      "typing narrows to Guildie10-19, all of them", table.getn(names))
+check(table.getn(names) > cap,
+      "and the cap relaxed, because only one section is left to pay for",
+      table.getn(names) .. " vs a browse cap of " .. cap)
 A.ui.sendTo:SetText("")
 
 print("== picker UI: the dropdown fits under the To box at every size ==")
@@ -2710,8 +2741,13 @@ while hi <= 3 do
           need .. " vs " .. gh.panelH)
     check(rows >= gh.ac.minRows and rows <= gh.ac.maxRows,
           "and the row count stays in its bounds at " .. heights[hi], rows)
-    check(A.ui.AutoCompleteSectionCap(rows) >= gm.ac.sectionMin,
+    check(A.ui.AutoCompleteSectionCap(rows, 4) >= gm.ac.sectionMin,
           "every section still gets at least two names at " .. heights[hi])
+    -- Four full sections plus their chrome must still fit the budget, or the
+    -- cap is promising rows the list does not have.
+    check(4 * (A.ui.AutoCompleteSectionCap(rows, 4) + gm.ac.chromePerSection)
+          <= rows,
+          "and four capped sections fit inside the budget at " .. heights[hi])
     hi = hi + 1
 end
 -- At every size the window can actually be, the panel is roomier than the
@@ -2730,6 +2766,142 @@ check(tinyRows < gm.ac.maxRows,
       "a shorter window than we allow today would shrink the list", tinyRows)
 check(tiny.ac.top + tinyRows * tiny.ac.rowH + tiny.ac.pad <= tiny.panelH,
       "and it would still fit inside the panel")
+
+print("== picker: offline guildmates are in the list ==")
+-- "Show offline members" filters the ROSTER, not the pane, so with it off the
+-- client will not answer for anyone who is logged out -- which on a mailbox is
+-- precisely who you want. The mock models that; without it this feature cannot
+-- be tested at all, because everyone would show up either way.
+guildShowOffline = false
+GUILD = { { name = "Gladys", online = true },
+          { name = "Bartho", online = false },
+          { name = "Tester", online = true } }
+guildDelivered = true
+A.send.guildDirty = true
+check(GetNumGuildMembers() == 2,
+      "with the filter off the client hides the offline member",
+      GetNumGuildMembers())
+
+send.borrowedShowOffline = false
+fire("MAIL_SHOW")
+check(guildShowOffline, "opening the mailbox turns the filter on")
+A.send.guildDirty = true
+local names = A.send.GuildNames()
+local joined = ""
+local i = 1
+while i <= table.getn(names) do joined = joined .. names[i].name .. "|"; i = i + 1 end
+check(A.util.Contains(joined, "Bartho"),
+      "so the offline guildmate is offered", joined)
+
+fire("MAIL_CLOSED")
+check(not guildShowOffline,
+      "and closing the mailbox puts the player's own setting back")
+
+-- A player who already had it on must not have it switched off underneath
+-- them: we only ever hand back what we borrowed.
+guildShowOffline = true
+fire("MAIL_SHOW")
+check(guildShowOffline, "a setting already on is left alone")
+fire("MAIL_CLOSED")
+check(guildShowOffline,
+      "and stays on afterwards -- nothing was borrowed, so nothing is returned")
+guildShowOffline = false
+
+print("== picker: Alts ==")
+-- 1.12 has no API that enumerates your own characters -- there is no
+-- account-level anything -- so the only way to know an alt exists is to have
+-- played it with Courier installed.
+A.db.ForgetAlts()
+A.db.AddAlt("Bankalt")
+A.db.AddAlt("Gladys")     -- also a guildmate: dedupe must pick one
+A.db.AddAlt("Tester")     -- the character being played
+local alts = A.db.Alts("Tester")
+check(table.getn(alts) == 2, "two alts, not counting who you are",
+      table.getn(alts))
+check(alts[1] == "Bankalt" and alts[2] == "Gladys", "alphabetical",
+      alts[1] .. "," .. alts[2])
+
+fire("MAIL_SHOW")
+local secs = A.send.PickerSections("")
+check(secs[1].key == "Alts", "Alts leads the picker", secs[1].key)
+check(secs[1].names[1] == "Bankalt", "and the bank alt is the first name",
+      tostring(secs[1].names[1]))
+-- Dedupe runs first-section-wins, so a character who is also in your guild is
+-- listed as an alt -- which is the more useful thing to be told.
+local gjoined = ""
+i = 1
+while i <= table.getn(secs) do
+    if secs[i].key == "Guild" then
+        local j = 1
+        while j <= table.getn(secs[i].names) do
+            gjoined = gjoined .. secs[i].names[j] .. "|"
+            j = j + 1
+        end
+    end
+    i = i + 1
+end
+check(not A.util.Contains(gjoined, "Gladys"),
+      "an alt who is also a guildmate is not listed twice", gjoined)
+
+print("== picker: an alt is never aged out ==")
+-- Contacts are pruned at 30 days. A bank alt you have not played since March
+-- is still your bank alt, and it is the name you least want to have to type.
+local key = GetCVar("realmName") .. "|" .. UnitFactionGroup("player")
+CourierDB.contacts[key]["Ancient"] = 1      -- epoch 1: about as stale as it gets
+CourierDB.alts[key]["Ancientalt"] = 1
+A.db.Init()
+check(CourierDB.contacts[key]["Ancient"] == nil,
+      "a 30-day-old contact is dropped at load")
+check(CourierDB.alts[key]["Ancientalt"] == 1,
+      "but an alt of the same age is kept")
+CourierDB.alts[key]["Ancientalt"] = nil
+
+print("== picker UI: Alts wins Tab ==")
+A.db.ForgetContacts()
+A.db.AddContact("Banker")       -- a contact that shares the alt's prefix
+A.db.ForgetAlts()
+A.db.AddAlt("Bankalt")
+A.send.guildDirty, A.send.friendDirty = true, true
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Send")
+A.ui.sendTo:SetText("Bank")
+check(A.ui.sendAuto:IsVisible(), "both are on offer")
+names = autoNames()
+check(table.getn(names) == 2, "two of them", table.getn(names))
+check(names[1] == "Bankalt", "the alt is first", tostring(names[1]))
+A.ui.sendTo:SetFocus()
+A.ui.sendTo.scripts.OnTabPressed()
+check(A.ui.sendTo:GetText() == "Bankalt",
+      "so Tab fills the alt, not the contact", A.ui.sendTo:GetText())
+
+print("== picker UI: the Alts header is drawn ==")
+A.ui.sendTo:SetText("")
+clearAutoRows()
+A.ui.sendAutoButton.scripts.OnClick()
+check(rawget(A.ui.sendAutoRows[1].label, "text") == "Alts",
+      "Alts heads the browse list",
+      rawget(A.ui.sendAutoRows[1].label, "text"))
+check(A.ui.sendAutoRows[2].name == "Bankalt", "with the alt under it",
+      tostring(A.ui.sendAutoRows[2].name))
+
+print("== picker: no alts recorded yet is not a section ==")
+A.db.ForgetAlts()
+secs = A.send.PickerSections("")
+check(not secs[1] or secs[1].key ~= "Alts",
+      "a fresh install has no Alts section, and nothing errored",
+      secs[1] and secs[1].key or "none")
+A.db.AddAlt("Tester")
+secs = A.send.PickerSections("")
+check(not secs[1] or secs[1].key ~= "Alts",
+      "and neither does an account with only the character you are on",
+      secs[1] and secs[1].key or "none")
+
+A.ui.sendTo:SetText("")
+A.ui.sendAuto:Hide()
+clearAutoRows()
+fire("MAIL_CLOSED")
+focusedBox = nil
 
 -- Leave the picker as the rest of the suite expects to find it.
 GUILD, FRIENDS = {}, {}

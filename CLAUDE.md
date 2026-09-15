@@ -443,12 +443,27 @@ section, which is Courier's equivalent hazard surface.
       `GetGuildRosterInfo` (`name`, `online`), the 1st and 5th of
       `GetFriendInfo` (`name`, `connected`). What follows them differs between
       builds.
-    - The guild roster **includes the player**. Filter them from the Guild
-      section only — `contacts` seeds their own name deliberately, because
-      mailing yourself is real.
+    - **"Show offline members" filters the ROSTER, not the pane.** With it off,
+      `GetNumGuildMembers` / `GetGuildRosterInfo` answer only for members
+      currently logged in — the wrong list for a mailbox, where an offline
+      guildmate is exactly who you write to. Turn it on before the request and
+      **hand it back on `MAIL_CLOSED`**, and only when it was actually
+      borrowed: silently rewriting a preference the player set in another
+      window is not a fix.
+    - The guild roster **includes the player**, and so does `contacts`. The
+      character being played is excluded from **every** section — the server
+      refuses mail addressed to yourself, so such a row can only fail. Seed the
+      exclusion into the dedupe set once rather than per section, or the next
+      section added will forget it.
+    - **Alts are a Courier list, not a client one.** 1.12 exposes nothing
+      account-level, so the only way to know a character exists is to have
+      played it: record `UnitName("player")` at load (`db.AddAlt`). That list
+      is **never pruned**, where `contacts` ages out at 30 days — a bank alt
+      untouched since March is still the name you least want to type.
     - **A mock that returns the roster immediately cannot test any of this.**
-      Gate it on a delivered flag, and note that gating both the count and the
-      accessor is redundant on purpose: a sabotage must strip both.
+      Gate it on a delivered flag, in exactly ONE place — it was gated on both
+      the count and the accessor, and that redundancy meant no single sabotage
+      could prove any of them.
 
 28. **Tab means two things in the recipient box, and the suggestion wins.**
     With a suggestion list open, Tab accepts the top name and keeps focus;
@@ -689,7 +704,9 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       fixing only the first left the button greyed and the bug alive.
 - [ ] The friends/guild rosters were REQUESTED on mailbox open and read only
       after their reply event; an open picker repaints from that event, in the
-      mode it was opened in; nothing about a roster is persisted.
+      mode it was opened in; nothing about a roster is persisted; the
+      show-offline filter is borrowed and handed back; the character being
+      played is offered by no section.
 - [ ] Tab in the recipient box accepts the suggestion when there is one and
       still walks to Subject when there is not, the override is installed after
       `ui.SetTabChain`, and what it fills is read off the rendered row.

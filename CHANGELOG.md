@@ -9,6 +9,45 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.7]
+
+Your own characters, and the offline half of your guild. `/reload`.
+
+### Added
+- **An Alts section, first in the list.** Every character on your account —
+  same realm and faction — that has logged in with Courier installed. Mailing
+  your own bank alt is the most common thing anyone opens this form to do and
+  it is the name least worth typing, so it leads the picker and it is what Tab
+  fills when the prefix matches both an alt and somebody else.
+  - 1.12 exposes nothing account-level, so there is no API that lists your
+    characters. Courier can only know about one by having **been** it: the list
+    fills in as you log in to each character once.
+  - **Alts are never aged out**, where recent contacts are dropped after 30
+    days. A bank alt you have not played since March is still your bank alt.
+
+### Fixed
+- **Offline guildmates were missing.** The guild pane's "show offline members"
+  checkbox does not filter the pane — it filters the roster the client will
+  answer for at all, so with it off Courier could only ever see whoever
+  happened to be online. That is the wrong list for a mailbox: an offline
+  guildmate is exactly who you write to, because they are not there to trade
+  with.
+  - The setting is now turned on while the mailbox is open and **put back when
+    you close it**, and only if Courier was the one that turned it on. Your own
+    preference is yours; borrowing it for the length of a mailbox visit is the
+    smallest thing that makes the list complete.
+- **The character you are playing is no longer offered**, in any section. The
+  server refuses mail addressed to yourself, so that row could only ever fail —
+  and it was there, because the contact list has always recorded your own name
+  and the guild roster includes you.
+
+### Changed
+- **How many names each section shows now depends on how many sections there
+  are.** It reserved room for every section whether or not they had anybody in
+  them, so a player with no guild saw two names per section where seven fitted.
+  Type a few letters and the list narrows to one section, which now spends the
+  whole budget on it.
+
 ## [1.9.6]
 
 Friends and guild in the recipient box. `/reload`.
