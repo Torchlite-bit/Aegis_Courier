@@ -9,6 +9,97 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.7]
+
+Your own characters, and the offline half of your guild. `/reload`.
+
+### Added
+- **An Alts section, first in the list.** Every character on your account —
+  same realm and faction — that has logged in with Courier installed. Mailing
+  your own bank alt is the most common thing anyone opens this form to do and
+  it is the name least worth typing, so it leads the picker and it is what Tab
+  fills when the prefix matches both an alt and somebody else.
+  - 1.12 exposes nothing account-level, so there is no API that lists your
+    characters. Courier can only know about one by having **been** it: the list
+    fills in as you log in to each character once.
+  - **Alts are never aged out**, where recent contacts are dropped after 30
+    days. A bank alt you have not played since March is still your bank alt.
+
+### Fixed
+- **Offline guildmates were missing.** The guild pane's "show offline members"
+  checkbox does not filter the pane — it filters the roster the client will
+  answer for at all, so with it off Courier could only ever see whoever
+  happened to be online. That is the wrong list for a mailbox: an offline
+  guildmate is exactly who you write to, because they are not there to trade
+  with.
+  - The setting is now turned on while the mailbox is open and **put back when
+    you close it**, and only if Courier was the one that turned it on. Your own
+    preference is yours; borrowing it for the length of a mailbox visit is the
+    smallest thing that makes the list complete.
+- **The character you are playing is no longer offered**, in any section. The
+  server refuses mail addressed to yourself, so that row could only ever fail —
+  and it was there, because the contact list has always recorded your own name
+  and the guild roster includes you.
+
+### Changed
+- **How many names each section shows now depends on how many sections there
+  are.** It reserved room for every section whether or not they had anybody in
+  them, so a player with no guild saw two names per section where seven fitted.
+  Type a few letters and the list narrows to one section, which now spends the
+  whole budget on it.
+
+## [1.9.6]
+
+Friends and guild in the recipient box. `/reload`.
+
+### Added
+- **The `To:` box now offers three sources of names**, not one: **Friends**,
+  **Guild** and **Recent**. The arrow button beside the box lists all three in
+  labelled sections, and typing narrows across all of them at once.
+- **Tab fills in the suggestion.** With a list open, Tab completes the top name
+  and leaves the keyboard in the box; with no list open it moves to Subject
+  exactly as it always has. A Tab that does nothing reads as a broken key, so
+  there is no third outcome.
+  - What Tab fills is read off the **row you can see** rather than recomputed,
+    so the key and the list cannot drift apart.
+- Sections are **deduped, first one wins**: a guildmate you have also friended
+  appears under Friends only. Two identical rows are noise, and a Tab that
+  fills from one of two identical-looking rows is worse than noise.
+- Friends and guildmates are listed **online first, then alphabetically**;
+  Recent keeps its most-recently-mailed order.
+- A section longer than the list says **"and N more -- keep typing"** rather
+  than silently truncating. How many rows the list uses, and how many names
+  each section gets, are derived from the window's height — 1.12 does not clip
+  children, so a dropdown taller than the panel would draw over the window's
+  own footer rather than being cut off.
+
+### Changed
+- The arrow button's tooltip no longer says "Recent recipients". Contacts are
+  harvested from mail **received** as well as sent, so that list has always
+  meant "people you have corresponded with" — now that it is a labelled
+  section, the label says the true thing.
+- **The player is filtered out of the Guild section** (the roster includes
+  them) but is still reachable through Recent, which seeds your own name
+  deliberately. Mailing yourself is a real thing; picking yourself out of your
+  guild list by accident is not.
+
+### Notes
+- **Both rosters are asynchronous on this client**, and that is the whole
+  hazard of the feature: `GetNumGuildMembers()` and `GetNumFriends()` answer
+  **zero** until the client has asked the server (`GuildRoster()` /
+  `ShowFriends()`) and the reply has landed (`GUILD_ROSTER_UPDATE` /
+  `FRIENDLIST_UPDATE`). Reading the count once concludes "no guild" for a
+  player who has one. So Courier asks on mailbox open, and a list you already
+  have open **fills in when the reply arrives** rather than waiting for your
+  next keystroke.
+- The requests are throttled server-side like `CheckInbox()`, so they are made
+  on mailbox open and nowhere else — never on a timer, and never per keystroke.
+- **Nothing is saved.** A roster is a free live read; a stored copy would keep
+  offering names that have since left the guild. Only Recent is persisted,
+  because it is the one list the client cannot tell us.
+- No guild, no friends, or neither degrades quietly: the section simply is not
+  drawn.
+
 ## [1.9.5]
 
 Two dead ends removed. `/reload`.

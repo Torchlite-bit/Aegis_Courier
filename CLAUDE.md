@@ -419,9 +419,72 @@ section, which is Courier's equivalent hazard surface.
     the recipient rather than a transfer, so it may legitimately repeat — but
     only when the user asked for that.
 
+27. **The friends and guild rosters are ASYNCHRONOUS and throttled.**
+    `GetNumGuildMembers()` and `GetNumFriends()` answer **0** until the client
+    has asked the server and the reply has landed:
+
+    | request         | reply event            |
+    | --------------- | ---------------------- |
+    | `GuildRoster()` | `GUILD_ROSTER_UPDATE`  |
+    | `ShowFriends()` | `FRIENDLIST_UPDATE`    |
+
+    Reading the count once therefore concludes "no guild" for a player who has
+    one. Request on **mailbox open** — same throttle reasoning as rule 13 for
+    `CheckInbox()`, so never on a timer and never per keystroke — and let the
+    reply event repaint anything already on screen (`ui.RefreshAutoComplete`).
+    - **A list that is already open must fill in**, not wait for the next
+      keystroke, and it must repaint in the mode it was OPENED in — an async
+      reply silently turning a browse list into a filtered one is a worse bug
+      than the empty list it replaced.
+    - **Never persist a roster.** It is a free live read; a stored copy keeps
+      offering names that have left the guild. Only `contacts` is saved,
+      because it is the one list the client cannot tell us.
+    - Read only the values you need and no further: the 1st and 9th of
+      `GetGuildRosterInfo` (`name`, `online`), the 1st and 5th of
+      `GetFriendInfo` (`name`, `connected`). What follows them differs between
+      builds.
+    - **"Show offline members" filters the ROSTER, not the pane.** With it off,
+      `GetNumGuildMembers` / `GetGuildRosterInfo` answer only for members
+      currently logged in — the wrong list for a mailbox, where an offline
+      guildmate is exactly who you write to. Turn it on before the request and
+      **hand it back on `MAIL_CLOSED`**, and only when it was actually
+      borrowed: silently rewriting a preference the player set in another
+      window is not a fix.
+    - The guild roster **includes the player**, and so does `contacts`. The
+      character being played is excluded from **every** section — the server
+      refuses mail addressed to yourself, so such a row can only fail. Seed the
+      exclusion into the dedupe set once rather than per section, or the next
+      section added will forget it.
+    - **Alts are a Courier list, not a client one.** 1.12 exposes nothing
+      account-level, so the only way to know a character exists is to have
+      played it: record `UnitName("player")` at load (`db.AddAlt`). That list
+      is **never pruned**, where `contacts` ages out at 30 days — a bank alt
+      untouched since March is still the name you least want to type.
+    - **A mock that returns the roster immediately cannot test any of this.**
+      Gate it on a delivered flag, in exactly ONE place — it was gated on both
+      the count and the accessor, and that redundancy meant no single sabotage
+      could prove any of them.
+
+28. **Tab means two things in the recipient box, and the suggestion wins.**
+    With a suggestion list open, Tab accepts the top name and keeps focus;
+    otherwise it walks to the next field, exactly as `ui.SetTabChain` wired it.
+    There is no third outcome — a Tab that silently does nothing reads as a
+    broken key.
+    - The override must be installed **after** `ui.SetTabChain`, which writes
+      `OnTabPressed` on every box it is handed, the To box included.
+    - **What Tab fills is read off the rendered ROW**, never recomputed from
+      the ranking. Two sources of truth drift, and the day they do, Tab fills a
+      name that is not the one at the top of the list.
+    - **Fill, then hide — in that order.** `SetText` re-enters
+      `OnTextChanged`, which repaints the list, so a hide issued first is
+      simply undone whenever the completed name still has neighbours.
+    - The harness's `SetText` therefore **fires `OnTextChanged`**, as the
+      client's does. A mock that swallows it passes a Tab-accept that reopens
+      the list it just closed.
+
 ### SavedVariables
 
-27. **SavedVariables are `nil` until `ADDON_LOADED` fires for
+29. **SavedVariables are `nil` until `ADDON_LOADED` fires for
     `"Aegis_Courier"`.** Do all DB setup from the ADDON_LOADED path (queue via
     `AegisCourier.OnLoad(fn)`), never at file scope.
     - `CourierDB` — account-wide (declared `## SavedVariables`).
@@ -429,9 +492,9 @@ section, which is Courier's equivalent hazard surface.
 
 ### Frames & globals
 
-28. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
+30. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
     building `"MailItem" .. n .. "Button"`).
-29. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
+31. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
     `UIPanelButtonTemplate`, `FauxScrollFrameTemplate`, `GameTooltipTemplate`.
     - **`FauxScrollFrame_OnVerticalScroll(itemHeight, updateFn)` — 2 args on
       1.12.** The frame and scroll offset are the implicit globals `this` /
@@ -639,6 +702,14 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       only against the function. `send.Validate` is called twice — once by
       `send.Start` and once by `ui.RefreshSend` to enable the Send button — and
       fixing only the first left the button greyed and the bug alive.
+- [ ] The friends/guild rosters were REQUESTED on mailbox open and read only
+      after their reply event; an open picker repaints from that event, in the
+      mode it was opened in; nothing about a roster is persisted; the
+      show-offline filter is borrowed and handed back; the character being
+      played is offered by no section.
+- [ ] Tab in the recipient box accepts the suggestion when there is one and
+      still walks to Subject when there is not, the override is installed after
+      `ui.SetTabChain`, and what it fills is read off the rendered row.
 - [ ] `lua5.1 tests/harness.lua` passes.
 - [ ] DB touched only after `ADDON_LOADED` for `"Aegis_Courier"`.
 - [ ] No read or write of `AegisExchangeDB`; integration goes through

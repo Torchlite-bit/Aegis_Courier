@@ -964,13 +964,308 @@ function send.HarvestContacts()
     return added
 end
 
+-- ---------------------------------------------------------------------------
+-- The recipient picker's name sources: Friends, Guild, Recent
+-- ---------------------------------------------------------------------------
+--
+-- BOTH ROSTERS ARE ASYNCHRONOUS ON 1.12, and this is the whole hazard of the
+-- feature. GetNumGuildMembers() answers 0 and GetNumFriends() answers 0 until
+-- the client has ASKED the server for the list and the reply has landed:
+--
+--     request                reply event
+--     GuildRoster()          GUILD_ROSTER_UPDATE
+--     ShowFriends()          FRIENDLIST_UPDATE
+--
+-- So a first mailbox open genuinely has nothing to show, and reading the count
+-- once concludes "no guild" for a player who has one. The picker must fill in
+-- when the reply arrives instead -- which is why the UI repaints from those
+-- events rather than only from a keystroke.
+--
+-- The requests are throttled server-side, exactly like CheckInbox() (rule 13),
+-- so they are issued on mailbox open and nowhere else. Never on a timer, and
+-- never per keystroke.
+--
+-- NOTHING HERE IS PERSISTED. A roster is a free live read; a stored copy would
+-- keep offering names that have since left the guild. Contacts stay in the DB
+-- because they are the one list the client cannot tell us.
+
+send.guildNames  = {}
+send.friendNames = {}
+-- Rebuilt lazily rather than on the event. GUILD_ROSTER_UPDATE fires several
+-- times as a big roster settles, and walking 500 members each time is wasted
+-- when nothing reads the list in between.
+send.guildDirty  = true
+send.friendDirty = true
+
+-- The guild pane's "show offline members" checkbox is not a display filter on
+-- the pane -- it filters the ROSTER ITSELF, so with it off `GetNumGuildMembers`
+-- and `GetGuildRosterInfo` only ever answer for the members currently logged
+-- in. That is the wrong list for a mailbox: an offline guildmate is exactly
+-- who you mail, because they are not there to trade with.
+--
+-- So it is turned on while the mailbox is open and PUT BACK on close. The
+-- player's own setting is theirs; borrowing it for the length of a mailbox
+-- visit is the smallest thing that makes the list complete, and leaving it
+-- flipped would silently rewrite a preference they set in another window.
+send.borrowedShowOffline = false
+
+local function BorrowShowOffline()
+    if send.borrowedShowOffline then return end
+    if not (GetGuildRosterShowOffline and SetGuildRosterShowOffline) then return end
+    if GetGuildRosterShowOffline() then return end
+    SetGuildRosterShowOffline(true)
+    send.borrowedShowOffline = true
+end
+
+local function ReturnShowOffline()
+    if not send.borrowedShowOffline then return end
+    send.borrowedShowOffline = false
+    if SetGuildRosterShowOffline then SetGuildRosterShowOffline(false) end
+end
+
+function send.RequestRosters()
+    if IsInGuild and IsInGuild() and GuildRoster then
+        -- Before the request, so the reply is built with offline members in it.
+        BorrowShowOffline()
+        GuildRoster()
+    end
+    if ShowFriends then ShowFriends() end
+end
+
+function send.ReleaseRosters()
+    ReturnShowOffline()
+end
+
+-- Online first, then alphabetical -- one comparator rather than a sort plus a
+-- partition, because Lua 5.0's table.sort is not stable and a partition would
+-- scramble the alphabetical order it was handed.
+local function SortRoster(list)
+    table.sort(list, function(a, b)
+        if a.online ~= b.online then return a.online end
+        return a.name < b.name
+    end)
+end
+
+-- 1.12 signature, as FrameXML's GuildFrame.lua reads it:
+--   name, rank, rankIndex, level, class, zone, note, officernote, online
+-- Only the 1st and the 9th are read here. Whether anything follows `online`
+-- differs between builds, so nothing depends on it -- positional reads past
+-- the last value you actually need are how a roster walk starts returning
+-- nonsense on a server that appends one.
+function send.GuildNames()
+    if not send.guildDirty then return send.guildNames end
+    send.guildNames = {}
+    send.guildDirty = false
+    if not (IsInGuild and IsInGuild()) then return send.guildNames end
+    if not (GetNumGuildMembers and GetGuildRosterInfo) then
+        return send.guildNames
+    end
+    -- The roster includes the player. Mailing yourself is a real thing --
+    -- db.AddContact(UnitName("player")) at the bottom of this file exists for
+    -- exactly that -- so this is a Guild-SECTION rule, not a global one: your
+    -- own name is still reachable through Recent.
+    local me = UnitName and UnitName("player") or nil
+    local n = GetNumGuildMembers() or 0
+    local i = 1
+    while i <= n do
+        local name, _, _, _, _, _, _, _, online = GetGuildRosterInfo(i)
+        if name and name ~= "" and name ~= me then
+            table.insert(send.guildNames,
+                { name = name, online = online and true or false })
+        end
+        i = i + 1
+    end
+    SortRoster(send.guildNames)
+    return send.guildNames
+end
+
+-- 1.12 signature, as FrameXML's FriendsFrame.lua reads it:
+--   name, level, class, area, connected
+-- Only the 1st and the 5th are read, for the same reason as the guild walk.
+function send.FriendNames()
+    if not send.friendDirty then return send.friendNames end
+    send.friendNames = {}
+    send.friendDirty = false
+    if not (GetNumFriends and GetFriendInfo) then return send.friendNames end
+    local n = GetNumFriends() or 0
+    local i = 1
+    while i <= n do
+        local name, _, _, _, connected = GetFriendInfo(i)
+        if name and name ~= "" then
+            table.insert(send.friendNames,
+                { name = name, online = connected and true or false })
+        end
+        i = i + 1
+    end
+    SortRoster(send.friendNames)
+    return send.friendNames
+end
+
+-- Section order, and therefore also Tab's precedence: the picker fills in the
+-- first name of the first section, so this table IS the ranking.
+--
+-- ALTS LEAD. Mailing your own bank alt is the single most common thing anyone
+-- opens this form to do, and it is the name least worth making them type --
+-- a guildmate you can at least ask, a bank alt is just a string you have to
+-- remember exactly.
+send.PICKER_ORDER = { "Alts", "Friends", "Guild", "Recent" }
+
+-- The character being played. Never offered by the picker, in ANY section:
+-- the server refuses mail addressed to yourself, so a row for it is a row that
+-- can only fail.
+function send.SelfName()
+    if not UnitName then return nil end
+    return UnitName("player")
+end
+
+local function PlainNames(recs)
+    local out = {}
+    local n = table.getn(recs)
+    local i = 1
+    while i <= n do
+        table.insert(out, recs[i].name)
+        i = i + 1
+    end
+    return out
+end
+
+-- The picker's contents: an ordered array of
+--   { key = "Friends", names = { ... }, total = n }
+-- holding only the sections that actually have somebody in them. `prefix`
+-- filters by leading letters, case-insensitively; "" means everyone.
+-- Uncapped: `send.CapSections` below is the one place that trims, because the
+-- right cap depends on how many sections came back non-empty and that is not
+-- knowable from in here. `total` on each section is therefore also the count
+-- before any trim, so the caller can say "and 214 more".
+--
+-- DEDUPED ACROSS SECTIONS, first section wins: a guildmate you have also
+-- friended appears under Friends only. Two identical rows in a short dropdown
+-- are noise, and Tab filling from one of two identical-looking rows is worse
+-- than noise.
+function send.PickerSections(prefix)
+    if type(prefix) ~= "string" then prefix = "" end
+    local lower = string.lower(prefix)
+    local plen  = string.len(lower)
+    local seen, out = {}, {}
+    -- Seeded rather than special-cased, so the exclusion holds in every
+    -- section at once and cannot be forgotten in a new one.
+    local me = send.SelfName()
+    if me then seen[me] = true end
+
+    local function collect(key, names)
+        local kept, total = {}, 0
+        local n = table.getn(names)
+        local i = 1
+        while i <= n do
+            local name = names[i]
+            if not seen[name]
+               and (plen == 0
+                    or string.sub(string.lower(name), 1, plen) == lower) then
+        
+                seen[name] = true
+                total = total + 1
+                table.insert(kept, name)
+            end
+            i = i + 1
+        end
+        if total > 0 then
+            table.insert(out, { key = key, names = kept, total = total })
+        end
+    end
+
+    local i = 1
+    local n = table.getn(send.PICKER_ORDER)
+    while i <= n do
+        local key = send.PICKER_ORDER[i]
+        if key == "Alts" then
+            collect(key, A.db.Alts(me))
+        elseif key == "Friends" then
+            collect(key, PlainNames(send.FriendNames()))
+        elseif key == "Guild" then
+            collect(key, PlainNames(send.GuildNames()))
+        elseif key == "Recent" then
+            -- Already prefix-filtered and sorted most-recently-seen first;
+            -- collect re-filters harmlessly and does the dedupe.
+            collect(key, A.db.MatchContacts(prefix, nil))
+        end
+        i = i + 1
+    end
+    return out
+end
+
+-- Trim each section to `perSection` names, in place. Separate from the
+-- assembly above because the right cap DEPENDS on how many sections came back
+-- with anybody in them: reserving room for four when two are empty shows two
+-- names each where seven would fit. `total` is untouched, so a trimmed section
+-- can still say how many it left out.
+function send.CapSections(sections, perSection)
+    if not perSection then return sections end
+    local i, n = 1, table.getn(sections)
+    while i <= n do
+        local names = sections[i].names
+        while table.getn(names) > perSection do
+            table.remove(names)
+        end
+        i = i + 1
+    end
+    return sections
+end
+
+-- Total names on offer, before any per-section cap. The typing path's "an
+-- exact single match is not a suggestion" rule needs this, and it has to count
+-- across sections or the rule fires on a name that is merely alone in its own.
+function send.PickerTotal(sections)
+    local total = 0
+    local n = table.getn(sections)
+    local i = 1
+    while i <= n do
+        total = total + sections[i].total
+        i = i + 1
+    end
+    return total
+end
+
+-- The reply events. Mark dirty, then let the picker repaint itself if it is
+-- open -- a list the player is looking at when the roster lands must fill in,
+-- not sit there empty until the next keystroke.
+local function RosterArrived()
+    if A.ui and A.ui.RefreshAutoComplete then A.ui.RefreshAutoComplete() end
+end
+A.RegisterEvent("GUILD_ROSTER_UPDATE", function()
+    send.guildDirty = true
+    RosterArrived()
+end)
+A.RegisterEvent("FRIENDLIST_UPDATE", function()
+    send.friendDirty = true
+    RosterArrived()
+end)
+
 -- The mail session, tracked here rather than read off the UI: send.IsMailable
 -- probes the real attachment slot and must never do so without a live session.
 send.atMailbox = false
-A.RegisterEvent("MAIL_SHOW",   function() send.atMailbox = true  end)
-A.RegisterEvent("MAIL_CLOSED", function() send.atMailbox = false end)
+A.RegisterEvent("MAIL_SHOW",   function()
+    send.atMailbox = true
+    -- Ask for both rosters here and only here. They are throttled
+    -- server-side, and the reply events below are what actually fill
+    -- the picker in.
+    send.guildDirty  = true
+    send.friendDirty = true
+    send.RequestRosters()
+end)
+A.RegisterEvent("MAIL_CLOSED", function()
+    send.atMailbox = false
+    send.ReleaseRosters()
+end)
 
 A.OnLoad(function()
     send.InstallHooks()
-    if UnitName then A.db.AddContact(UnitName("player")) end
+    if UnitName then
+        -- Both lists, for different reasons. The alt list is what the Alts
+        -- section reads; the contact entry is what players upgrading from
+        -- before this existed still have, so their other characters keep
+        -- showing up under Recent until each one has logged in once and
+        -- moved itself into Alts.
+        A.db.AddAlt(UnitName("player"))
+        A.db.AddContact(UnitName("player"))
+    end
 end)
