@@ -115,16 +115,18 @@ function inbox.NumItems()
     return GetInboxNumItems() or 0
 end
 
--- NOTE ON CACHING. A single flush still reads every header about five times
--- over (UnreadCount, HasWork x3, All, Summary). Memoising those within one
--- flush was tried and DELIBERATELY NOT SHIPPED: the measured saving was small
--- next to the coalescing below (which removes 99.8% of the work in the
--- harness's 200-event storm -- 169,200 header reads down to 282), and
--- a header memo is precisely the kind of stale mail state this addon's
--- correctness depends on never trusting -- the take engine re-reads after
--- every action because "I took it, therefore it is empty" is false. If it is
--- revisited, it must be provably scoped to a read-only flush and never
--- visible to a mutating path.
+-- NOTE ON CACHING. A flush used to read every header FIVE times over --
+-- UnreadCount, HasWork x3, and the paint's own All plus Summary -- which at 70
+-- mails is 351 reads per frame, each trying about seven subject patterns.
+--
+-- It is one walk now, and NOT by memoising. A memo was rejected and stays
+-- rejected: a stale header is exactly the state this addon's correctness
+-- depends on never trusting, because the take engine re-reads after every
+-- action and "I took it, therefore it is empty" is false. Instead the flush
+-- walks ONCE and PASSES the headers to the read-only consumers that want them
+-- (inbox.Summary, inbox.UnreadCount, take.HasWork, ui.RefreshInbox). A
+-- parameter cannot leak: no mutating path takes one, so none can be handed
+-- yesterday's mailbox by accident.
 
 -- Read one mail header into a named table.
 --
@@ -222,17 +224,19 @@ end
 
 -- Counts for the window's summary line: total, unread, and total money sitting
 -- in the inbox waiting to be collected.
-function inbox.Summary()
+--
+-- `mails` is an OPTIONAL already-read walk (see inbox.Flush). Passing one costs
+-- nothing and saves a whole second pass over the mailbox; omitting it walks.
+function inbox.Summary(mails)
     local total, unread, money = 0, 0, 0
-    local n = inbox.NumItems()
+    mails = mails or inbox.All()
+    local n = table.getn(mails)
     local i = 1
     while i <= n do
-        local h = inbox.Header(i)
-        if h then
-            total = total + 1
-            if not h.wasRead then unread = unread + 1 end
-            money = money + h.money
-        end
+        local h = mails[i]
+        total = total + 1
+        if not h.wasRead then unread = unread + 1 end
+        money = money + h.money
         i = i + 1
     end
     return total, unread, money
@@ -268,8 +272,19 @@ end
 -- we were able to see.
 function inbox.Flush()
     inbox.dirty = false
-    inbox.lastUnread = inbox.UnreadCount()
-    if A.ui and A.ui.Refresh then A.ui.Refresh() end
+    -- ONE walk, handed to everything downstream. See the note on caching above
+    -- inbox.Header: this is that note's condition met, and met by passing the
+    -- headers explicitly rather than by memoising them. A parameter cannot
+    -- leak into a mutating path the way a cache can -- the take engine takes
+    -- no such argument anywhere, so it still re-reads after every action, and
+    -- "I took it, therefore it is empty" stays a question the server answers.
+    --
+    -- It was five walks: UnreadCount, HasWork x3 and the paint's own All plus
+    -- Summary. Measured at 70 mails that is 351 header reads per frame (and
+    -- about seven subject patterns tried per read) down to 70.
+    local mails = inbox.All()
+    inbox.lastUnread = inbox.UnreadCount(mails)
+    if A.ui and A.ui.Refresh then A.ui.Refresh(mails) end
 end
 
 -- Mark a mail READ on the server.
@@ -361,13 +376,14 @@ end
 -- minimap icon can be settled on close, when the inbox is no longer readable.
 inbox.lastUnread = nil
 
-function inbox.UnreadCount()
+-- `mails`, as in inbox.Summary: an optional already-read walk.
+function inbox.UnreadCount(mails)
     local unread = 0
-    local n = inbox.NumItems()
+    mails = mails or inbox.All()
+    local n = table.getn(mails)
     local i = 1
     while i <= n do
-        local h = inbox.Header(i)
-        if h and not h.wasRead then unread = unread + 1 end
+        if not mails[i].wasRead then unread = unread + 1 end
         i = i + 1
     end
     return unread
@@ -453,12 +469,17 @@ function take.Matches(h, only)
     return true
 end
 
-function take.HasWork(mode, only)
-    local n = inbox.NumItems()
+-- `mails` is the same optional already-read walk inbox.Summary takes. This is
+-- a READ-ONLY question -- it only decides whether a button is enabled -- which
+-- is why it may be answered from a walk somebody else did. Nothing that
+-- mutates mail is allowed the same shortcut.
+function take.HasWork(mode, only, mails)
+    mails = mails or inbox.All()
+    local n = table.getn(mails)
     local i = 1
     while i <= n do
-        local h = inbox.Header(i)
-        if h and not h.isGM and not (h.cod > 0) and take.Matches(h, only) then
+        local h = mails[i]
+        if not h.isGM and not (h.cod > 0) and take.Matches(h, only) then
             if mode == take.MODE_DELETE then
                 if h.wasRead and h.money == 0 and not h.hasItem then
                     return true

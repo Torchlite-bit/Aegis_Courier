@@ -9,6 +9,45 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.8]
+
+Housekeeping pass. `/reload`.
+
+### Changed
+- **The mailbox is read five times less often.** Every frame the inbox changed,
+  Courier walked every header five times over — once for the unread count,
+  three times to decide whether Open All / Take Sold / Delete Read had anything
+  to do, and twice more to paint the list. At 70 mails that is 351 header reads
+  per frame, each trying about seven subject patterns, and during a collection
+  run it is every frame. It now walks once and hands the result to everything
+  that wanted it: **351 reads down to 70**.
+  - Deliberately **not** a cache. A remembered header is exactly the thing this
+    addon's correctness depends on never trusting — the collector re-reads the
+    mail after every single action, because "I took it, so it must be empty" is
+    not true on this client. The headers are passed as an argument to the
+    read-only parts instead, which the collector does not take and therefore
+    cannot be given.
+
+### Added
+- **"Forget names"** in the Courier tab, with the count of what is stored. It
+  empties the **Recent** and **Alts** lists in the recipient box; Friends and
+  Guild are read live from the game and are not affected, and both lists fill
+  up again on their own.
+  - There was no way out before, and Alts especially needed one: contacts age
+    out after 30 days but an alt never does, on purpose, so a character you
+    deleted or renamed would sit in the picker for good.
+
+### Fixed
+- **The borrowed "show offline members" setting is handed back on logout too.**
+  Courier turns it on while the mailbox is open so it can see your whole guild,
+  and put it back when you closed the mailbox — but log out or hearth away with
+  the mailbox still open and that never happened, leaving your guild pane
+  changed for good.
+
+### Notes
+- Removed one unused helper (`util.SubjectStem`). No behaviour change; it had
+  no callers in the addon or its tests.
+
 ## [1.9.7]
 
 Your own characters, and the offline half of your guild. `/reload`.

@@ -171,7 +171,19 @@ section, which is Courier's equivalent hazard surface.
       Raise `inbox.dirty` and let the OnUpdate driver call `inbox.Flush()`
       **at most once per frame**. Measured at 70 mails, a per-event refresh
       cost 352 header reads and ~1,300 pattern parses *per event*; the
-      coalesced path costs 282 for the whole storm.
+      coalesced path costs ONE WALK for the whole storm.
+    - **One flush is one walk, and that is asserted.** It was five —
+      `UnreadCount`, `HasWork` x3, and the paint's own `All` plus `Summary` —
+      so 70 mails cost 351 header reads every dirty frame, which during a take
+      run is every frame. The flush walks once and **passes** the headers to
+      the read-only consumers (`inbox.Summary`, `inbox.UnreadCount`,
+      `take.HasWork`, `ui.RefreshInbox`, `ui.OnTakeStateChanged`).
+      - **Passing, never memoising.** A stale header is exactly what this
+        addon's correctness depends on never trusting — the take engine
+        re-reads after every action because "I took it, therefore it is empty"
+        is false. A parameter cannot leak the way a cache can: no mutating path
+        takes one, so none can be handed yesterday's mailbox by accident. Do
+        not "simplify" this into `inbox.All` memoising itself.
     - The one thing that stays **per-event** is arming the take engine
       (`take.armed`). That event is the server's acknowledgement clock and the
       run must remain one `Step` per confirmation — coalescing it drops steps.
@@ -634,7 +646,9 @@ Read their patterns for how vanilla mailbox automation is done in practice —
 - [ ] Mail being emptied is marked read via `GetInboxText`; mail merely
       displayed is not.
 - [ ] Nothing walks the inbox or repaints from `MAIL_INBOX_UPDATE` directly —
-      it storms; work is coalesced behind `inbox.dirty` / `inbox.Flush`.
+      it storms; work is coalesced behind `inbox.dirty` / `inbox.Flush`, and
+      that flush is ONE walk passed down, not five taken separately. A new
+      read-only consumer accepts the walk; a mutating one never does.
 - [ ] Every `take.Step` path issues exactly one server call **or** re-arms via
       `take.Advance`; the harness pump still clocks off `serverCalls`.
 - [ ] No body is fetched for mail that still holds something without the

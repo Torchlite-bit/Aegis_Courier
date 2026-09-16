@@ -1256,6 +1256,11 @@ A.RegisterEvent("MAIL_CLOSED", function()
     send.atMailbox = false
     send.ReleaseRosters()
 end)
+-- MAIL_CLOSED is not guaranteed: log out or hearth away with the mailbox open
+-- and it never arrives, which would leave the borrowed "show offline members"
+-- setting switched on permanently. This is the belt to that braces -- the one
+-- moment the client always gives us before the session ends.
+A.RegisterEvent("PLAYER_LEAVING_WORLD", function() send.ReleaseRosters() end)
 
 A.OnLoad(function()
     send.InstallHooks()
