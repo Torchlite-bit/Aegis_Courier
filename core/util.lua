@@ -140,21 +140,6 @@ function util.Contains(haystack, needle)
     return string.find(haystack, needle, 1, true) ~= nil
 end
 
--- Turn a client format string such as AUCTION_SOLD_MAIL_SUBJECT
--- ("Auction successful: %s") into a plain prefix by stripping the "%s"
--- placeholder -- the technique TurtleMail uses, and the reason its matching is
--- localization-proof where a hardcoded English literal is not.
---
--- Returns nil when `fmt` is not a usable string, so callers can fall back.
-function util.SubjectStem(fmt)
-    if type(fmt) ~= "string" or fmt == "" then return nil end
-    -- "%%s" is the pattern for a literal "%s".
-    local stem = string.gsub(fmt, "%%s", "")
-    stem = util.Trim(stem)
-    if stem == "" then return nil end
-    return stem
-end
-
 -- Pull the item name out of a subject given the format string it was built
 -- from. "Auction successful: %s" + "Auction successful: Silk Cloth" ->
 -- "Silk Cloth". Returns nil when the subject does not match the format.

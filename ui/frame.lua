@@ -1722,24 +1722,29 @@ end
 
 -- Enable/disable the action bar for the current state. Called by the take
 -- engine whenever a run starts or ends, and on every refresh.
-function ui.OnTakeStateChanged()
+-- `mails`: the optional already-read walk. The three HasWork questions below
+-- are the reason it is worth passing -- each one can walk the whole mailbox
+-- when the answer is no, which is exactly the common case for Take Sold and
+-- Delete Read.
+function ui.OnTakeStateChanged(mails)
     if not ui.btnOpenAll then return end
     local take = A.take
     local running = take.running and true or false
     local atMailbox = ui.mailOpen and true or false
+    if atMailbox and not running then mails = mails or A.inbox.All() end
 
     local function SetEnabled(btn, on)
         if on then btn:Enable() else btn:Disable() end
     end
 
     SetEnabled(ui.btnOpenAll,
-        atMailbox and not running and take.HasWork(take.MODE_OPEN))
+        atMailbox and not running and take.HasWork(take.MODE_OPEN, nil, mails))
     -- Asked with the SAME filter the run uses, so the button cannot light up
     -- for work the run would then step over.
     SetEnabled(ui.btnTakeSold,
-        atMailbox and not running and take.HasWork(take.MODE_OPEN, "sold"))
+        atMailbox and not running and take.HasWork(take.MODE_OPEN, "sold", mails))
     SetEnabled(ui.btnDeleteRead,
-        atMailbox and not running and take.HasWork(take.MODE_DELETE))
+        atMailbox and not running and take.HasWork(take.MODE_DELETE, nil, mails))
     SetEnabled(ui.btnStop, running)
 
     if ui.inboxCollected then
@@ -1755,7 +1760,7 @@ function ui.OnTakeStateChanged()
             ui.inboxCollected:SetText(running and "working..." or "")
         end
     end
-    ui.RefreshInbox()
+    ui.RefreshInbox(mails)
 end
 
 -- REENTRANCY GUARD, and it is load-bearing. The chain in the 1.12 FrameXML:
@@ -1788,7 +1793,10 @@ function ui.HideInboxRows()
     if ui.inboxScroll then ui.inboxScroll:Hide() end
 end
 
-function ui.RefreshInbox()
+-- `mails`: the optional already-read walk, from inbox.Flush. Note it is NOT
+-- carried across the reentrancy bounce below -- the re-entrant call returns
+-- immediately, and the outer pass is the one holding the headers.
+function ui.RefreshInbox(mails)
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.selectedSubTab ~= "Inbox" then return end
     if ui.inboxRefreshing then return end
@@ -1820,10 +1828,10 @@ function ui.RefreshInbox()
     -- during a resize is not viable.
     local rows = ui.InboxRowCount()
 
-    local mails = inbox.All()
+    mails = mails or inbox.All()
     local total = table.getn(mails)
 
-    local totalN, unread, money = inbox.Summary()
+    local totalN, unread, money = inbox.Summary(mails)
     local parts = totalN .. " mail"
     if totalN ~= 1 then parts = totalN .. " mails" end
     if unread > 0 then parts = parts .. ", " .. unread .. " unread" end
@@ -3708,6 +3716,48 @@ function ui.BuildCourierPanel()
     local stats = Label(panel, "GameFontNormalSmall", C.dim)
     stats:SetPoint("TOPLEFT", integ, "BOTTOMLEFT", 0, -18)
     ui.courierStats = stats
+
+    -- The only way out of the recipient picker. Friends and guild are live
+    -- reads that fix themselves, but the two lists Courier keeps do not: a
+    -- contact ages out after 30 days and an ALT NEVER DOES -- deliberately,
+    -- because a bank alt you have not played since March is still your bank
+    -- alt. Which leaves a character you deleted or renamed sitting in the
+    -- picker for good with nothing able to remove it. This is that something.
+    local forget = ui.MakeButton(panel, "quiet", "AegisCourierBtnForgetNames")
+    forget:SetWidth(120)
+    forget:SetHeight(20)
+    forget:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
+    forget:SetText("Forget names")
+    forget:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(forget, "ANCHOR_LEFT")
+        GameTooltip:SetText("Forget saved names")
+        GameTooltip:AddLine(
+            "Empties the Recent and Alts lists in the recipient box.",
+            1, 1, 1)
+        GameTooltip:AddLine(
+            "Friends and guild are read from the game and are not affected.",
+            0.7, 0.7, 0.7)
+        GameTooltip:AddLine(
+            "Both fill up again on their own as you send and receive mail.",
+            0.7, 0.7, 0.7)
+        GameTooltip:Show()
+    end)
+    forget:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    forget:SetScript("OnClick", function()
+        db.ForgetContacts()
+        db.ForgetAlts()
+        -- Re-seed exactly as a fresh login would, so the lists are empty
+        -- rather than wrong -- the character being played is still an alt of
+        -- this account whatever the player just cleared.
+        if UnitName then
+            db.AddAlt(UnitName("player"))
+            db.AddContact(UnitName("player"))
+        end
+        if ui.sendAuto then ui.sendAuto:Hide() end
+        A.Print("forgot every saved recipient and alt.")
+        ui.RefreshCourier()
+    end)
+    ui.btnForgetNames = forget
 end
 
 -- "1 entry" / "2 entries", so the settings tab does not read like a stub.
@@ -3759,14 +3809,23 @@ function ui.RefreshCourier()
     ui.courierStats:SetText(
         "Ledger: " .. Plural(table.getn(db.Ledger()), "entry", "entries") ..
         "   |   Log: " .. table.getn(db.Log("received")) .. " received, " ..
-        table.getn(db.SentBox()) .. " sent")
+        table.getn(db.SentBox()) .. " sent" ..
+        -- Counted the way the PICKER counts: the character being played is on
+        -- the alt list but is never offered, so including it here would name a
+        -- number the player cannot find in the dropdown.
+        "   |   Names: " .. table.getn(db.MatchContacts("", nil)) ..
+        " recent, " ..
+        table.getn(db.Alts(UnitName and UnitName("player") or nil)) .. " alts")
 end
 
 -- ---------------------------------------------------------------------------
 -- Refresh dispatch
 -- ---------------------------------------------------------------------------
 
-function ui.Refresh()
+-- `mails` is an optional already-read inbox walk, handed down from
+-- inbox.Flush so the paint does not re-read what was just read. Every other
+-- caller omits it and the readers below walk for themselves.
+function ui.Refresh(mails)
     if not ui.frame or not ui.frame:IsVisible() then return end
     if ui.footer then
         local where = ui.mailOpen and "At mailbox" or "Away from mailbox"
@@ -3775,7 +3834,7 @@ function ui.Refresh()
     if ui.selectedSubTab == "Inbox" then
         -- Updates the action bar for the current inbox contents, then repaints
         -- the list. Does not re-enter ui.Refresh.
-        ui.OnTakeStateChanged()
+        ui.OnTakeStateChanged(mails)
     elseif ui.selectedSubTab == "Send" then
         ui.RefreshSend()
     elseif ui.selectedSubTab == "Sent" then

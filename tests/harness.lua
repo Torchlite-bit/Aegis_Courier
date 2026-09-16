@@ -2921,6 +2921,61 @@ A.send.atMailbox = wasAtMailbox
 focusedBox = nil
 end
 
+do
+print("== settings: forgetting saved names ==")
+-- Friends and guild are live reads that correct themselves. The two lists
+-- Courier KEEPS do not: a contact ages out after 30 days and an alt never
+-- does, so a deleted or renamed character would sit in the picker for good.
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.db.ForgetContacts()
+A.db.ForgetAlts()
+A.db.AddContact("Someone")
+A.db.AddAlt("Deletedalt")
+-- The character being played is on the alt list too (send.lua seeds it at
+-- load). Seeded here on purpose: with only Deletedalt stored, counting the
+-- player and not counting them give the same answer, and the check below
+-- could not tell the two apart.
+A.db.AddAlt("Tester")
+A.ui.SelectSubTab("Courier")
+check(A.ui.btnForgetNames ~= nil, "the Courier tab has a Forget names button")
+check(table.getn(A.db.Alts()) == 2, "two names are stored", table.getn(A.db.Alts()))
+check(A.util.Contains(rawget(A.ui.courierStats, "text") or "", "1 alts"),
+      "but the stats line counts them the way the PICKER does, minus yourself",
+      rawget(A.ui.courierStats, "text"))
+
+check(Click(A.ui.btnForgetNames), "it is clickable")
+check(table.getn(A.db.MatchContacts("Someone", 5)) == 0, "the contact is gone")
+check(table.getn(A.db.Alts("Tester")) == 0, "and so is the alt")
+-- Empty, not WRONG: the character being played is still an alt of this
+-- account whatever the player just cleared, so it is re-seeded exactly as a
+-- fresh login would.
+check(A.db.Alts()[1] == "Tester",
+      "the character being played is re-seeded", tostring(A.db.Alts()[1]))
+check(table.getn(A.send.PickerSections("")) == 0,
+      "and the picker has nothing left to offer")
+
+print("== rosters: the borrowed setting survives a missing MAIL_CLOSED ==")
+-- Log out or hearth away with the mailbox open and MAIL_CLOSED never arrives,
+-- which would leave the player's guild pane filter switched on for good.
+guildShowOffline = false
+inGuild = true
+send.borrowedShowOffline = false
+fire("MAIL_SHOW")
+check(guildShowOffline, "borrowed on open")
+fire("PLAYER_LEAVING_WORLD")
+check(not guildShowOffline, "and handed back when the world goes away")
+check(not send.borrowedShowOffline, "with nothing still marked as borrowed")
+-- Still only ever hands back what it borrowed.
+guildShowOffline = true
+send.borrowedShowOffline = false
+fire("PLAYER_LEAVING_WORLD")
+check(guildShowOffline, "a setting it never borrowed is left alone")
+guildShowOffline = false
+fire("MAIL_CLOSED")
+
+end
+
 print("== version: the title bar cannot drift from the .toc ==")
 -- Two releases shipped with the .toc bumped and this literal left behind, so
 -- the in-game title kept reporting an old build and bug reports came in
@@ -3266,6 +3321,39 @@ check(A.inbox.dirty == false, "and the frame cleared the flag")
 headerReads = 0
 driver.scripts.OnUpdate()
 check(headerReads == 0, "an idle frame does no inbox work at all", headerReads)
+
+-- AND THAT ONE FLUSH IS ONE WALK. It was five -- UnreadCount, HasWork x3, and
+-- the paint's own All plus Summary -- so 70 mails cost 351 reads every frame
+-- the inbox was dirty, which during a take run is every frame. The flush now
+-- walks once and passes the headers to the read-only consumers.
+--
+-- Asserted as a RATIO of the mailbox size, not a magic number: at exactly one
+-- walk this is 70, and any consumer that starts re-reading for itself pushes
+-- it straight back to a multiple.
+check(oneFlush == A.inbox.NumItems(),
+      "a flush reads every header exactly ONCE, not five times over",
+      oneFlush .. " reads for " .. A.inbox.NumItems() .. " mails")
+
+-- The saving has to survive the questions that walk FURTHEST. Take Sold and
+-- Delete Read both scan to the end when the answer is no, which is the common
+-- case in a mailbox of ordinary letters -- so a box with no sales and nothing
+-- read-and-empty is the shape that used to cost the most.
+INBOX = {}
+local plainN = 1
+while plainN <= 70 do
+    table.insert(INBOX, mail({ sender = "Player" .. plainN,
+                               subject = "hello " .. plainN, item = "Thing" }))
+    plainN = plainN + 1
+end
+A.inbox.MarkDirty()
+driver.scripts.OnUpdate()          -- settle
+A.inbox.MarkDirty()
+headerReads = 0
+driver.scripts.OnUpdate()
+check(headerReads == 70,
+      "still one walk when every HasWork has to scan to the end", headerReads)
+check(not A.ui.btnTakeSold:IsEnabled(),
+      "and Take Sold correctly found nothing to do")
 
 print("== storm: the take engine still steps once per confirmation ==")
 -- Coalescing must not reach the take engine's clock. MAIL_INBOX_UPDATE is the
