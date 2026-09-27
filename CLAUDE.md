@@ -531,6 +531,23 @@ section, which is Courier's equivalent hazard surface.
       referenced with **no file extension** — the format and the path
       convention already proven by `media/ResizeGrip.tga`. A texture is not a
       `.toc` line, so adding one costs no client restart.
+    - **A minimap icon is ~20–30 pixels, and that is the whole problem.** No
+      source resolution survives it: 20px is 400 pixels, 0.04% of a 1024²
+      logo. The levers are (a) give the art more pixels and (b) put less in
+      them — not a bigger source file.
+      - **Skip `MiniMap-TrackingBorder` when the art already has a ring.**
+        That border exists to frame a 20px icon inside a 31px button; art that
+        is already round can take the whole button instead, which is 30px —
+        two and a quarter times the pixels. Assert the fill as a
+        **proportion** of the button, so a later resize cannot shrink the art
+        back into the middle.
+      - **Match the texture size to the DRAW size; do not maximise it.** A
+        `.tga` has no mipmaps (a `.blp` does), so the client minifies one
+        image straight to display size and over-large art shimmers. 64px
+        crushed into 20 shipped as mush. If it ever looks SOFT rather than
+        noisy, raise the texture size — the two failures look different.
+      - **Keep the generator in the repo.** An icon nobody can rebuild is an
+        icon nobody can adjust; see `media/make-minimap-icon.py`.
 
 ### SavedVariables
 

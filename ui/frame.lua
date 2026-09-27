@@ -4130,6 +4130,11 @@ end
 
 local MINIMAP_RADIUS = 80        -- the ring every vanilla minimap button sits on
 local MINIMAP_DEFAULT_ANGLE = 204
+-- The button, and the icon that fills it. Not the usual 31/20 split: see the
+-- note in BuildMinimapButton -- this logo brings its own ring, so it takes the
+-- whole button and Blizzard's border is not drawn at all.
+local MINIMAP_BUTTON_SIZE = 32
+local MINIMAP_ICON_SIZE   = 30
 
 -- Normalised into 0..360. math.mod, not `%` -- Lua 5.0 has no modulo operator.
 local function NormaliseAngle(deg)
@@ -4183,8 +4188,8 @@ function ui.BuildMinimapButton()
     if not Minimap then return nil end
 
     local b = CreateFrame("Button", "AegisCourierMinimapButton", Minimap)
-    b:SetWidth(31)
-    b:SetHeight(31)
+    b:SetWidth(MINIMAP_BUTTON_SIZE)
+    b:SetHeight(MINIMAP_BUTTON_SIZE)
     b:SetFrameStrata("MEDIUM")
     b:SetFrameLevel(Minimap:GetFrameLevel() + 8)
     -- The pfUI skin swaps a button's textures for a flat backdrop, which on an
@@ -4200,29 +4205,34 @@ function ui.BuildMinimapButton()
     -- click still arrives as OnClick.
     b:RegisterForDrag("LeftButton")
 
-    local icon = b:CreateTexture(nil, "BACKGROUND")
-    icon:SetWidth(20)
-    icon:SetHeight(20)
-    icon:SetPoint("CENTER", b, "CENTER", 0, 1)
+    -- THE ICON GETS THE WHOLE BUTTON, and that is the single thing that makes
+    -- this legible. The usual shape is a 20px icon inside Blizzard's
+    -- MiniMap-TrackingBorder ring -- but this logo IS a ring already, gold
+    -- rim and all, so the border would be a second ring drawn around a first
+    -- one and the emblem would be squeezed into the middle of its own button.
+    --
+    -- Dropping it takes the draw size from 20px to 30px: two and a quarter
+    -- times the pixels, which at this scale is the difference between an
+    -- emblem and a smudge. The source art is 1024x1024 and spotless; 400
+    -- pixels was always the problem, not the picture.
+    local icon = b:CreateTexture(nil, "ARTWORK")
+    icon:SetWidth(MINIMAP_ICON_SIZE)
+    icon:SetHeight(MINIMAP_ICON_SIZE)
+    icon:SetPoint("CENTER", b, "CENTER", 0, 0)
     -- No file extension, matching the resize grip: the client appends .blp or
-    -- .tga itself, and ours is a .tga -- 32-bit uncompressed, 64x64, exactly
-    -- the format already proven by media/ResizeGrip.tga.
+    -- .tga itself, and ours is a .tga -- 32-bit uncompressed and a power of
+    -- two, exactly the format already proven by media/ResizeGrip.tga. Its
+    -- size is matched to the draw size rather than maximised; see
+    -- media/make-minimap-icon.py for why that is the right way round.
     icon:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\minimap")
     b.icon = icon
 
-    -- The standard ring, so it reads as a minimap button rather than a sticker
-    -- on the map. Drawn OVER the icon, and deliberately larger than the
-    -- button: the art has transparent margins and sizing it to 31 would leave
-    -- the visible ring too small for the icon inside it.
-    local border = b:CreateTexture(nil, "OVERLAY")
-    border:SetWidth(53)
-    border:SetHeight(53)
-    border:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
-    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
-    b.border = border
-
+    -- Hover feedback still wanted, just sized to the button rather than to
+    -- Blizzard's ring.
     b:SetHighlightTexture(
         "Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+    local hl = b:GetHighlightTexture()
+    if hl then hl:SetAllPoints(b) end
 
     b:SetScript("OnEnter", function()
         GameTooltip:SetOwner(b, "ANCHOR_LEFT")

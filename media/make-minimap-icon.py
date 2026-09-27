@@ -4,24 +4,26 @@
 Kept in the repo because an icon nobody can rebuild is an icon nobody can
 adjust. Needs Pillow; nothing in the addon runs it.
 
-THREE THINGS MATTER HERE, and the first version got two of them wrong.
+THE WHOLE PROBLEM IS THAT THE DESTINATION IS TINY. The source art is 1024 x
+1024 and perfectly clean -- a 20px minimap icon is 400 pixels, which is 0.04%
+of it. No amount of source quality survives that reduction, so the only real
+lever is giving the logo MORE PIXELS to land in.
 
-1. THE CROP. The button draws the icon at TWENTY PIXELS. The full logo is a
-   rune ring, an inner gold ring, a shield, wings, an envelope and the word
-   AEGIS -- and all of it has to land inside those twenty pixels, where the
-   ring and the lettering turn to noise and crowd out the part you would
-   actually recognise. So the source is cropped to the shield and wings and
-   the outer rings are dropped. The minimap border draws its own ring anyway.
+So the button does not use Blizzard's MiniMap-TrackingBorder. That ring is
+drawn around a 20px icon inside a 31px button, and this logo already has a
+gold ring of its own -- it is shaped like a minimap button already. Dropping
+the border lets the emblem have the whole button instead of the middle of it:
+30px instead of 20px, which is two and a quarter times the pixels.
 
-2. THE TEXTURE SIZE. A .tga carries no mipmaps -- only .blp does -- so the
-   client is minifying a single image straight down to display size, and the
-   further that has to travel the more it shimmers. 32x32 against a ~20px
-   draw is a mild reduction; 64x64 is three times over and reads as noise.
-   Still a power of two, which 1.12 requires either way.
+TEXTURE SIZE IS MATCHED TO THE DRAW SIZE, not maximised. A .tga carries no
+mipmaps where a .blp does, so the client minifies one image straight down to
+whatever size it is drawn at, and the further that has to travel the more it
+shimmers -- the first version was 64px crushed into 20 and read as mush.
+32px against a 30px draw is as close to 1:1 as a power of two gets. If it ever
+looks SOFT rather than noisy, the answer is to raise SIZE, not lower it.
 
-3. SHARPENING AFTER THE DOWNSCALE. A large LANCZOS reduction always softens.
-   At this size soft reads as blurry, so a modest unsharp pass goes back over
-   it -- modest, because overdoing it puts halos on the gold edges.
+A modest unsharp pass goes back over it because a large LANCZOS reduction
+always softens; modest, because overdoing it puts halos on the gold edges.
 
 Output format matches media/ResizeGrip.tga, which is already proven on the
 1.12 client: uncompressed true-colour, 32-bit, bottom-up, BGRA.
@@ -35,9 +37,12 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 SRC = os.path.join(HERE, "minimap-source.jpg")
 DST = os.path.join(HERE, "minimap.tga")
 
-SIZE = 32                 # see note 2
-CENTRE = (512, 470)       # the winged envelope sits a little above centre
-RADIUS = 320              # inside the rings -- see note 1
+SIZE = 32                 # matched to the ~30px the button draws it at
+# The WHOLE logo, rings and all. Cropping in buys legibility at 20px, but at
+# 30px there is room for the emblem as drawn, and the rings are what make it
+# read as this addon rather than as a generic envelope.
+CENTRE = (512, 512)
+RADIUS = 500              # just inside the edge, so the circle does not clip flat
 SS = 8                    # supersample factor for the circular mask
 
 
@@ -48,7 +53,7 @@ def build_icon():
 
     big = im.resize((SIZE * SS, SIZE * SS), Image.LANCZOS)
     icon = big.resize((SIZE, SIZE), Image.LANCZOS)
-    icon = icon.filter(ImageFilter.UnsharpMask(radius=1.0, percent=90,
+    icon = icon.filter(ImageFilter.UnsharpMask(radius=0.8, percent=70,
                                                threshold=2))
 
     mask = Image.new("L", (SIZE * SS, SIZE * SS), 0)

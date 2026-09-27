@@ -54,6 +54,22 @@ local function newRegion()
     end
     function r:SetText(t) rawset(self, "text", t) end
     function r:GetText() return rawget(self, "text") end
+    -- REAL size on regions too, not just on frames. A texture's dimensions are
+    -- the whole question for anything that has to FILL its parent -- an icon
+    -- sized to 20 inside a 32px button looks nothing like one sized to 30, and
+    -- with these falling through to the CamelCase no-op the difference was
+    -- unanswerable.
+    function r:SetWidth(w) rawset(self, "w", w) end
+    function r:SetHeight(h) rawset(self, "h", h) end
+    function r:GetWidth() return rawget(self, "w") or 0 end
+    function r:GetHeight() return rawget(self, "h") or 0 end
+    function r:SetAllPoints(other)
+        rawset(self, "allPoints", other or true)
+        if type(other) == "table" and other.GetWidth then
+            rawset(self, "w", other:GetWidth())
+            rawset(self, "h", other:GetHeight())
+        end
+    end
     function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
     function r:SetTexture(t) self.texture = t end
     function r:Show() self.visible = true end
@@ -3099,6 +3115,21 @@ check(mb.courierNoSkin == true,
 local iconPath = mb.icon and rawget(mb.icon, "texture") or nil
 check(iconPath == "Interface\\AddOns\\Aegis_Courier\\media\\minimap",
       "the icon points at our own art", tostring(iconPath))
+
+-- THE ICON FILLS THE BUTTON. The usual shape is a 20px icon inside Blizzard's
+-- tracking-border ring, but this logo is a ring already -- so the border is
+-- not drawn and the emblem gets the whole button instead of the middle of it.
+-- That is 30px rather than 20px, two and a quarter times the pixels, and it
+-- is the only real lever there is: a 20px icon is 400 pixels, 0.04% of the
+-- 1024x1024 source. Assert it as a PROPORTION, so a future resize of the
+-- button cannot quietly shrink the art back into the middle.
+local bw = mb:GetWidth()
+local iw = mb.icon and mb.icon:GetWidth() or 0
+check(bw > 0 and iw / bw > 0.9,
+      "the icon fills its button rather than sitting in the middle of it",
+      iw .. " of " .. bw)
+check(mb.border == nil,
+      "and Blizzard's border ring is not drawn over the logo's own")
 local f = io.open("media/minimap.tga", "rb")
 check(f ~= nil, "and that art is really in the repo")
 if f then
