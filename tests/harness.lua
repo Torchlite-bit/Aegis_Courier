@@ -245,11 +245,16 @@ cursorX, cursorY = 1000, 500
 GetCursorPosition = function() return cursorX * uiScale, cursorY * uiScale end
 
 -- The cursor comes back in SCREEN coordinates, which are the frame's own
--- multiplied by the effective UI scale. Modelled rather than left at 1: an
--- addon that forgets to divide it out tracks the mouse at the wrong rate on
--- any scale but 1, and at 1 the bug is invisible.
+-- multiplied by the effective scale. Modelled rather than left at 1: an addon
+-- that forgets to divide it out tracks the mouse at the wrong rate on any
+-- scale but 1, and at 1 the bug is invisible.
+--
+-- On BOTH frames, because the minimap can be rescaled independently of
+-- UIParent -- plenty of UI addons do exactly that -- and the drag has to use
+-- the minimap's, since that is whose centre it is measuring from.
 uiScale = 1
 function UIParent:GetEffectiveScale() return uiScale end
+function Minimap:GetEffectiveScale() return uiScale end
 
 shiftDown = false
 IsShiftKeyDown = function() return shiftDown end
@@ -3130,6 +3135,36 @@ check(bw > 0 and iw / bw > 0.9,
       iw .. " of " .. bw)
 check(mb.border == nil,
       "and Blizzard's border ring is not drawn over the logo's own")
+
+-- The hover ring, the pressed nudge and the drag maths are all ported from
+-- Aegis: Pathfinder's MinimapButton.lua, so that two Aegis buttons on the
+-- same minimap behave the same way under the same mouse.
+check(mb.ring ~= nil, "there is a hover ring of our own")
+check(mb.ring and not mb.ring:IsVisible(), "hidden until hovered")
+local ringTex = mb.ring and rawget(mb.ring, "texture") or nil
+check(ringTex == "Interface\\AddOns\\Aegis_Courier\\media\\minimap-ring",
+      "and it is our art, not Blizzard's highlight", tostring(ringTex))
+local rf = io.open("media/minimap-ring.tga", "rb")
+check(rf ~= nil, "which is really in the repo")
+if rf then rf:close() end
+check(hover(mb), "hovering works")
+check(mb.ring and mb.ring:IsVisible(), "and shows the ring")
+unhover(mb)
+check(mb.ring and not mb.ring:IsVisible(), "which goes again on leave")
+
+-- Pressed: the logo sinks a pixel. On a button with no plate behind it this
+-- is the only thing that makes a click feel like one.
+local function iconOffset()
+    local pts = rawget(mb.icon, "points") or {}
+    local last = pts[table.getn(pts)]
+    if not last then return nil end
+    return (last.x or 0) .. "," .. (last.y or 0)
+end
+check(iconOffset() == "0,0", "the logo sits centred at rest", iconOffset())
+mb.scripts.OnMouseDown()
+check(iconOffset() == "1,-1", "and sinks a pixel when pressed", iconOffset())
+mb.scripts.OnMouseUp()
+check(iconOffset() == "0,0", "then comes back up", iconOffset())
 local f = io.open("media/minimap.tga", "rb")
 check(f ~= nil, "and that art is really in the repo")
 if f then
@@ -3138,7 +3173,13 @@ if f then
     local hdr = f:read(18)
     f:close()
     local function byte(i) return string.byte(hdr, i) end
-    check(byte(3) == 2, "uncompressed true-colour TGA", byte(3))
+    -- Type 10 is RLE true-colour, which is what every texture in Aegis:
+    -- Pathfinder's media folder is. Courier's older ResizeGrip.tga is type 2
+    -- (uncompressed) and also loads fine -- both work on 1.12, and matching
+    -- the sibling addon's pipeline is worth more than matching our own older
+    -- file. Anything OTHER than these two would not load at all.
+    check(byte(3) == 10 or byte(3) == 2,
+          "a true-colour TGA the 1.12 client can load", byte(3))
     check(byte(17) == 32, "32-bit, so it has an alpha channel", byte(17))
     local w = byte(13) + byte(14) * 256
     local h = byte(15) + byte(16) * 256
@@ -3151,6 +3192,22 @@ if f then
     check(pow2(w) and w == h, "square and a power of two", w .. "x" .. h)
     check(w <= 64, "and not far above the size it is drawn at", w)
 end
+
+-- The default spot is deliberately NOT Aegis: Pathfinder's, which is 215.
+-- A 32px button orbiting at radius 80 spans about 23 degrees, so two Aegis
+-- addons defaulting to the same place would stack on top of each other for
+-- anyone running both -- and they are written to be run together.
+check(A.ui.MinimapAngle ~= nil, "there is a default angle")
+A.db.SaveMinimapAngle(nil)
+local defaultAngle = A.ui.MinimapAngle()
+local function angleGap(a, b)
+    local d = math.abs(a - b)
+    if d > 180 then d = 360 - d end
+    return d
+end
+check(angleGap(defaultAngle, 215) > 23,
+      "and it clears Pathfinder's default by more than a button's width",
+      defaultAngle .. " vs 215, gap " .. angleGap(defaultAngle, 215))
 
 print("== minimap: the angle is remembered ==")
 A.ui.SetMinimapAngle(90)
@@ -3167,8 +3224,11 @@ print("== minimap: dragging follows the cursor ==")
 -- Straight up from the centre is 90 degrees. The cursor is converted out of
 -- screen coordinates first, which is why the scale below matters.
 A.ui.SetMinimapAngle(0)
+hover(mb)
 mb.scripts.OnDragStart()
 check(mb.dragging == true, "the drag started")
+check(not GameTooltip:IsVisible(),
+      "and the tooltip got out of the way of the thing being dragged")
 check(mb.scripts.OnUpdate ~= nil, "and it tracks the mouse per frame")
 -- Same reason as above: a missing tracker should read as the check it failed,
 -- not as an error inside the next line.

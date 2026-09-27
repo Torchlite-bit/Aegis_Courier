@@ -46,6 +46,17 @@ A minimap button. `/reload`.
 - Away from a mailbox the Inbox reads empty, because the client genuinely has
   nothing to read — there is no session to ask. The button's tooltip says which
   tabs are inert rather than leaving it to be found by a dead button.
+- **The button is built the way Aegis: Pathfinder's is**, ported from its
+  `MinimapButton.lua` and `Tools/make_assets.py` — same 32px size, same orbit
+  radius, same RLE TGA format, a hover ring of our own instead of Blizzard's
+  highlight, and the logo sinking a pixel when pressed. Two Aegis buttons on
+  one minimap should feel like two Aegis buttons.
+  - The default spot is **not** Pathfinder's, deliberately: a 32px button on
+    that ring spans about 23 degrees, so sharing a default would stack them on
+    top of each other for anyone running both.
+  - The icon is reduced by **halving the source repeatedly** rather than in one
+    jump. A single 1024 to 64 reduction aliases — fine detail lands between
+    output pixels and turns to grain, which is exactly what read as pixelated.
 - **The logo gets the whole button.** The usual shape is a 20px icon inside
   Blizzard's tracking-border ring — but this logo *is* a ring, gold rim and
   all, so that would be a second ring drawn around the first with the emblem
@@ -55,16 +66,12 @@ A minimap button. `/reload`.
   - That is the only real lever there is. A 20px icon is 400 pixels — 0.04% of
     the 1024x1024 source art, which is itself spotless. The destination was
     always the problem, never the picture.
-- The icon is a 32x32 32-bit TGA in `media/`, the same format as the resize
-  grip that has shipped since 1.6.0. A texture is not a `.toc` line, so this
-  costs no client restart.
-  - Its size is **matched to the draw size rather than maximised**: a `.tga`
-    carries no mipmaps where a `.blp` does, so the client minifies one image
-    straight down to whatever size it is drawn at, and the further that has to
-    travel the more it shimmers. 32 against a 30px draw is as close to 1:1 as
-    a power of two gets.
-  - `media/make-minimap-icon.py` regenerates it from the source art beside it,
-    if you want a different crop or size.
+- The icon is a 64x64 32-bit RLE TGA in `media/`, the format every texture in
+  Pathfinder uses. A texture is not a `.toc` line, so this costs no client
+  restart.
+  - `media/make-minimap-icon.py` regenerates it from the source art beside it;
+    `media/README.md` documents the format and the two things worth knowing
+    before changing the art.
 
 ## [1.9.8]
 

@@ -527,7 +527,15 @@ section, which is Courier's equivalent hazard surface.
     - A click that asks for a named tab **opens**, it does not toggle: it asked
       for that tab to be in front of you, and closing the window because it was
       already open is the wrong answer to that question.
-    - Art is a **32-bit uncompressed TGA with power-of-two dimensions**,
+    - **BUILT THE WAY AEGIS: PATHFINDER'S IS**, and that is not a style
+      preference: the two addons put buttons on the same minimap, so size,
+      orbit radius, texture format, the hover ring and the pressed nudge are
+      ported from its `MinimapButton.lua` and `Tools/make_assets.py` rather
+      than invented here. The one thing deliberately NOT shared is the default
+      angle — a 32px button on an 80px ring spans ~23°, so a shared default
+      stacks the two buttons for anyone running both.
+    - Art is a **32-bit TGA with power-of-two dimensions** (RLE type 10, as
+      Pathfinder writes; the older uncompressed type 2 also loads),
       referenced with **no file extension** — the format and the path
       convention already proven by `media/ResizeGrip.tga`. A texture is not a
       `.toc` line, so adding one costs no client restart.
@@ -541,11 +549,13 @@ section, which is Courier's equivalent hazard surface.
         two and a quarter times the pixels. Assert the fill as a
         **proportion** of the button, so a later resize cannot shrink the art
         back into the middle.
-      - **Match the texture size to the DRAW size; do not maximise it.** A
-        `.tga` has no mipmaps (a `.blp` does), so the client minifies one
-        image straight to display size and over-large art shimmers. 64px
-        crushed into 20 shipped as mush. If it ever looks SOFT rather than
-        noisy, raise the texture size — the two failures look different.
+      - **REDUCE BY HALVING, not in one jump.** A single 1024 → 64 LANCZOS
+        pass aliases: fine detail lands between output pixels and turns to
+        grain, which is exactly what reads as "pixelated". Halve repeatedly
+        first, so each level averages into the next — what a mipmap chain
+        does, and a `.tga` carries no mipmaps. This, not the texture size, was
+        the actual fault; 64px art is what Pathfinder ships and it reads
+        cleanly.
       - **Keep the generator in the repo.** An icon nobody can rebuild is an
         icon nobody can adjust; see `media/make-minimap-icon.py`.
 

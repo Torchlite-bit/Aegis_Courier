@@ -4128,13 +4128,16 @@ end
 -- with "not at a mailbox" so the Send button is dead too. Opening the window
 -- from here can therefore only show you things, never half-do something.
 
-local MINIMAP_RADIUS = 80        -- the ring every vanilla minimap button sits on
-local MINIMAP_DEFAULT_ANGLE = 204
--- The button, and the icon that fills it. Not the usual 31/20 split: see the
--- note in BuildMinimapButton -- this logo brings its own ring, so it takes the
--- whole button and Blizzard's border is not drawn at all.
+-- These are Aegis: Pathfinder's numbers, from its MinimapButton.lua, because
+-- the two addons' buttons should sit on the same ring and feel the same to
+-- use. 32px is the stock minimap buttons' size, and 80 is where they orbit.
 local MINIMAP_BUTTON_SIZE = 32
-local MINIMAP_ICON_SIZE   = 30
+local MINIMAP_RADIUS = 80
+-- Degrees anticlockwise from east. NOT Pathfinder's 215: a 32px button on an
+-- 80px ring spans about 23 degrees, so two Aegis addons defaulting to the same
+-- spot would stack on top of each other for anyone running both. Due west
+-- leaves a clear 35 degrees between them, and either can still be dragged.
+local MINIMAP_DEFAULT_ANGLE = 180
 
 -- Normalised into 0..360. math.mod, not `%` -- Lua 5.0 has no modulo operator.
 local function NormaliseAngle(deg)
@@ -4174,11 +4177,15 @@ local function MinimapDragUpdate()
     if not mx then return end
     local cx, cy = GetCursorPosition()
     if not cx then return end
-    local scale = UIParent and UIParent:GetEffectiveScale() or 1
+    -- The MINIMAP'S effective scale, which is what Pathfinder uses -- the
+    -- cursor comes back in screen coordinates and the centre above is in the
+    -- minimap's own, so the two have to be brought into the same space before
+    -- they can be subtracted. Scaling by UIParent's instead is right only
+    -- while nothing has rescaled the minimap itself, which plenty of UI
+    -- addons do.
+    local scale = Minimap:GetEffectiveScale()
     if not scale or scale == 0 then scale = 1 end
-    cx = cx / scale
-    cy = cy / scale
-    ui.SetMinimapAngle(math.deg(math.atan2(cy - my, cx - mx)))
+    ui.SetMinimapAngle(math.deg(math.atan2(cy / scale - my, cx / scale - mx)))
 end
 
 function ui.BuildMinimapButton()
@@ -4205,36 +4212,48 @@ function ui.BuildMinimapButton()
     -- click still arrives as OnClick.
     b:RegisterForDrag("LeftButton")
 
-    -- THE ICON GETS THE WHOLE BUTTON, and that is the single thing that makes
-    -- this legible. The usual shape is a 20px icon inside Blizzard's
-    -- MiniMap-TrackingBorder ring -- but this logo IS a ring already, gold
-    -- rim and all, so the border would be a second ring drawn around a first
-    -- one and the emblem would be squeezed into the middle of its own button.
+    -- THE LOGO IS THE BUTTON FACE, at full size. Pathfinder's shape exactly:
+    -- the art is a dark disc with its own red and gold rune ring, so it needs
+    -- no border of ours -- Blizzard's MiniMap-TrackingBorder would be a
+    -- second ring drawn around the first, with the emblem squeezed into the
+    -- middle of its own button at 20px instead of 32.
     --
-    -- Dropping it takes the draw size from 20px to 30px: two and a quarter
-    -- times the pixels, which at this scale is the difference between an
-    -- emblem and a smudge. The source art is 1024x1024 and spotless; 400
-    -- pixels was always the problem, not the picture.
+    -- That squeeze was the whole complaint. The source art is 1024x1024 and
+    -- spotless; 400 pixels was the problem, not the picture.
     local icon = b:CreateTexture(nil, "ARTWORK")
-    icon:SetWidth(MINIMAP_ICON_SIZE)
-    icon:SetHeight(MINIMAP_ICON_SIZE)
+    icon:SetWidth(MINIMAP_BUTTON_SIZE)
+    icon:SetHeight(MINIMAP_BUTTON_SIZE)
     icon:SetPoint("CENTER", b, "CENTER", 0, 0)
-    -- No file extension, matching the resize grip: the client appends .blp or
-    -- .tga itself, and ours is a .tga -- 32-bit uncompressed and a power of
-    -- two, exactly the format already proven by media/ResizeGrip.tga. Its
-    -- size is matched to the draw size rather than maximised; see
-    -- media/make-minimap-icon.py for why that is the right way round.
+    -- No file extension: the client appends .blp or .tga itself. Ours is a
+    -- 64x64 32-bit RLE TGA written by media/make-minimap-icon.py, the same
+    -- format every texture in Aegis: Pathfinder's media folder uses.
     icon:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\minimap")
     b.icon = icon
 
-    -- Hover feedback still wanted, just sized to the button rather than to
-    -- Blizzard's ring.
-    b:SetHighlightTexture(
-        "Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
-    local hl = b:GetHighlightTexture()
-    if hl then hl:SetAllPoints(b) end
+    -- Hover: a gold ring just outside the logo's own, rather than Blizzard's
+    -- zoom-button highlight. Pathfinder does the same with its accent colour,
+    -- and a white mask tinted in Lua keeps the colour in the palette where it
+    -- can be seen instead of baked into a file where it cannot.
+    local ring = b:CreateTexture(nil, "OVERLAY")
+    ring:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\minimap-ring")
+    ring:SetPoint("TOPLEFT", b, "TOPLEFT", -2, 2)
+    ring:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 2, -2)
+    ring:SetVertexColor(C.gold[1], C.gold[2], C.gold[3])
+    ring:Hide()
+    b.ring = ring
+
+    -- Pressed: the logo sinks a pixel, as a button face would. Straight from
+    -- Pathfinder -- it is the only thing that makes a bare texture feel like
+    -- a button when it has no plate behind it.
+    b:SetScript("OnMouseDown", function()
+        icon:SetPoint("CENTER", b, "CENTER", 1, -1)
+    end)
+    b:SetScript("OnMouseUp", function()
+        icon:SetPoint("CENTER", b, "CENTER", 0, 0)
+    end)
 
     b:SetScript("OnEnter", function()
+        ring:Show()
         GameTooltip:SetOwner(b, "ANCHOR_LEFT")
         GameTooltip:SetText("Aegis: Courier")
         GameTooltip:AddLine("Click to open the mailbox window.", 1, 1, 1)
@@ -4249,10 +4268,14 @@ function ui.BuildMinimapButton()
         end
         GameTooltip:Show()
     end)
-    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    b:SetScript("OnLeave", function()
+        ring:Hide()
+        GameTooltip:Hide()
+    end)
 
     b:SetScript("OnDragStart", function()
         b.dragging = true
+        GameTooltip:Hide()
         b:SetScript("OnUpdate", MinimapDragUpdate)
     end)
     b:SetScript("OnDragStop", function()

@@ -1,91 +1,155 @@
 #!/usr/bin/env python3
-"""Regenerate media/minimap.tga from media/minimap-source.jpg.
+"""Regenerate the minimap button's art.
 
-Kept in the repo because an icon nobody can rebuild is an icon nobody can
-adjust. Needs Pillow; nothing in the addon runs it.
+PORTED FROM AEGIS: PATHFINDER's Tools/make_assets.py, which is the sibling
+addon's asset pipeline and is already proven to look right on a 1.12 client.
+Where this differs from it, the difference is noted and has a reason -- these
+two should not drift, the same way the two CLAUDE.md files do not.
 
-THE WHOLE PROBLEM IS THAT THE DESTINATION IS TINY. The source art is 1024 x
-1024 and perfectly clean -- a 20px minimap icon is 400 pixels, which is 0.04%
-of it. No amount of source quality survives that reduction, so the only real
-lever is giving the logo MORE PIXELS to land in.
+    pip install Pillow && python3 media/make-minimap-icon.py
 
-So the button does not use Blizzard's MiniMap-TrackingBorder. That ring is
-drawn around a 20px icon inside a 31px button, and this logo already has a
-gold ring of its own -- it is shaped like a minimap button already. Dropping
-the border lets the emblem have the whole button instead of the middle of it:
-30px instead of 20px, which is two and a quarter times the pixels.
+Nothing in the addon runs this. It exists because an icon nobody can rebuild
+is an icon nobody can adjust.
 
-TEXTURE SIZE IS MATCHED TO THE DRAW SIZE, not maximised. A .tga carries no
-mipmaps where a .blp does, so the client minifies one image straight down to
-whatever size it is drawn at, and the further that has to travel the more it
-shimmers -- the first version was 64px crushed into 20 and read as mush.
-32px against a 30px draw is as close to 1:1 as a power of two gets. If it ever
-looks SOFT rather than noisy, the answer is to raise SIZE, not lower it.
+WHAT PATHFINDER GETS RIGHT, AND WHY EACH PART MATTERS
 
-A modest unsharp pass goes back over it because a large LANCZOS reduction
-always softens; modest, because overdoing it puts halos on the gold edges.
+  * 64x64 output, drawn at 32. Not "match the texture to the draw size" --
+    that was my own inference and it was worse. Pathfinder ships 64 and reads
+    cleanly, so 64 it is.
 
-Output format matches media/ResizeGrip.tga, which is already proven on the
-1.12 client: uncompressed true-colour, 32-bit, bottom-up, BGRA.
+  * HALVED STEP BY STEP, never one big jump. A single 1024 -> 64 LANCZOS
+    reduction aliases: fine detail (runes, wing feathers, lettering) lands
+    between output pixels and turns to noise, which is exactly what "looks
+    pixelated" was. Repeated halving averages each level into the next, which
+    is what a mipmap chain does and why this reads as detail rather than
+    grain.
+
+  * RLE truecolor (TGA type 10), 32-bit, bottom-left origin, powers of two.
+    Matches every texture Pathfinder ships. Courier's own ResizeGrip.tga is
+    uncompressed (type 2) and also loads fine; both work, and matching the
+    sibling is worth more than matching our own older file.
+
+  * THE LOGO NEEDS NO BORDER OF OURS. It is a disc with its own gold and red
+    rune ring, so Blizzard's MiniMap-TrackingBorder would be a second ring
+    drawn around the first. The button draws the icon at full size and skips
+    it, exactly as Pathfinder does.
+
+THE ONE REAL DIFFERENCE. Pathfinder's source art is a disc on transparency,
+so it needs no mask. Ours is a JPEG with hard black square corners, which
+would draw as a black box behind the emblem -- so a circular alpha mask is
+applied here. Supersampled, or the circle's edge is a staircase.
 """
 
 import os
 import struct
-from PIL import Image, ImageDraw, ImageFilter
+from PIL import Image, ImageDraw
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "minimap-source.jpg")
-DST = os.path.join(HERE, "minimap.tga")
-
-SIZE = 32                 # matched to the ~30px the button draws it at
-# The WHOLE logo, rings and all. Cropping in buys legibility at 20px, but at
-# 30px there is room for the emblem as drawn, and the rings are what make it
-# read as this addon rather than as a generic envelope.
-CENTRE = (512, 512)
-RADIUS = 500              # just inside the edge, so the circle does not clip flat
-SS = 8                    # supersample factor for the circular mask
+SOURCE = os.path.join(HERE, "minimap-source.jpg")
+SS = 8                    # supersample factor for generated shapes
+WHITE = (255, 255, 255)
 
 
-def build_icon():
-    src = Image.open(SRC).convert("RGB")
-    cx, cy = CENTRE
-    im = src.crop((cx - RADIUS, cy - RADIUS, cx + RADIUS, cy + RADIUS))
+# --------------------------------------------------------------------------
+# TGA writing -- a verbatim port of Pathfinder's Tools/make_assets.py
+# --------------------------------------------------------------------------
 
-    big = im.resize((SIZE * SS, SIZE * SS), Image.LANCZOS)
-    icon = big.resize((SIZE, SIZE), Image.LANCZOS)
-    icon = icon.filter(ImageFilter.UnsharpMask(radius=0.8, percent=70,
-                                               threshold=2))
+def _rle_scanline(pixels):
+    """Encode one scanline as TGA RLE packets (max 128 pixels per packet)."""
+    out = bytearray()
+    i, n = 0, len(pixels)
+    while i < n:
+        run = 1
+        while run < 128 and i + run < n and pixels[i + run] == pixels[i]:
+            run += 1
+        if run > 1:
+            out.append(0x80 | (run - 1))
+            b, g, r, a = pixels[i][2], pixels[i][1], pixels[i][0], pixels[i][3]
+            out += bytes((b, g, r, a))
+            i += run
+            continue
+        start = i
+        while (i < n and i - start < 128 and
+               not (i + 1 < n and pixels[i] == pixels[i + 1])):
+            i += 1
+        chunk = pixels[start:i]
+        out.append(len(chunk) - 1)
+        for r, g, b, a in chunk:
+            out += bytes((b, g, r, a))
+    return out
 
-    mask = Image.new("L", (SIZE * SS, SIZE * SS), 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, SIZE * SS - 1, SIZE * SS - 1), fill=255)
-    icon = icon.convert("RGBA")
-    icon.putalpha(mask.resize((SIZE, SIZE), Image.LANCZOS))
-    return icon
 
-
-def write_tga(path, im):
-    w, h = im.size
-    assert w & (w - 1) == 0 and h & (h - 1) == 0, "1.12 needs powers of two"
-    px = im.load()
-    hdr = struct.pack("<BBBHHBHHHHBB",
-                      0,        # no id field
-                      0,        # no colour map
-                      2,        # uncompressed true-colour
-                      0, 0, 0,  # colour map spec
-                      0, 0,     # x/y origin
-                      w, h,
-                      32,       # bits per pixel
-                      8)        # 8 alpha bits, origin bottom-left
+def write_tga(img, path):
+    """Write an RGBA image as a 32-bit RLE TGA, bottom-left origin."""
+    img = img.convert("RGBA")
+    w, h = img.size
+    for label, value in (("width", w), ("height", h)):
+        if value == 0 or value & (value - 1):
+            raise ValueError("%s: %s %d is not a power of two" % (path, label, value))
+    header = struct.pack(
+        "<BBBHHBHHHHBB",
+        0,        # ID length
+        0,        # no colour map
+        10,       # RLE truecolor
+        0, 0, 0,  # colour map spec
+        0, 0,     # x/y origin
+        w, h,
+        32,       # bits per pixel
+        0x08,     # 8 alpha bits, bottom-left origin
+    )
+    px = img.load()
     body = bytearray()
-    for y in range(h - 1, -1, -1):        # bottom row first
-        for x in range(w):
-            r, g, b, a = px[x, y]
-            body += bytes((b, g, r, a))   # TGA is BGRA
-    with open(path, "wb") as f:
-        f.write(hdr + bytes(body))
-    return len(hdr) + len(body)
+    for y in range(h - 1, -1, -1):        # bottom-left origin: last row first
+        body += _rle_scanline([px[x, y] for x in range(w)])
+    with open(path, "wb") as fh:
+        fh.write(header)
+        fh.write(body)
+    return os.path.getsize(path)
+
+
+# --------------------------------------------------------------------------
+# The two textures
+# --------------------------------------------------------------------------
+
+def minimap_logo(size=64):
+    """The button face: the full-colour logo, a disc with its own ring.
+
+    Halved step by step rather than in one go, so the fine detail -- the
+    runes, the wing feathers -- averages out instead of aliasing.
+    """
+    img = Image.open(SOURCE).convert("RGBA")
+    side = min(img.size)
+    img = img.crop(((img.size[0] - side) // 2, (img.size[1] - side) // 2,
+                    (img.size[0] + side) // 2, (img.size[1] + side) // 2))
+    while img.size[0] >= size * 4:
+        img = img.resize((img.size[0] // 2, img.size[1] // 2), Image.LANCZOS)
+    img = img.resize((size, size), Image.LANCZOS)
+
+    # Ours only: the source is a JPEG on hard black, so without this the
+    # emblem draws inside a black square. Built at the pre-halved size and
+    # brought down with the art, so its edge is as smooth as the art's.
+    mask = Image.new("L", (size * SS, size * SS), 0)
+    ImageDraw.Draw(mask).ellipse((0, 0, size * SS - 1, size * SS - 1), fill=255)
+    img.putalpha(mask.resize((size, size), Image.LANCZOS))
+    return write_tga(img, os.path.join(HERE, "minimap.tga"))
+
+
+def minimap_ring(size=32, width=2, pad=1):
+    """Hover ring, sitting just outside the logo's own.
+
+    A WHITE MASK, tinted in Lua with SetVertexColor -- Pathfinder's whole
+    media folder works this way, and it means the accent colour lives in one
+    place in the code rather than baked into a file nobody can see.
+    """
+    img = Image.new("RGBA", (size * SS, size * SS), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    p = pad * SS
+    d.ellipse([p, p, size * SS - 1 - p, size * SS - 1 - p],
+              outline=WHITE + (255,), width=width * SS)
+    img = img.resize((size, size), Image.LANCZOS)
+    return write_tga(img, os.path.join(HERE, "minimap-ring.tga"))
 
 
 if __name__ == "__main__":
-    n = write_tga(DST, build_icon())
-    print("wrote %s -- %dx%d, %d bytes" % (DST, SIZE, SIZE, n))
+    print("minimap.tga      %6d bytes" % minimap_logo())
+    print("minimap-ring.tga %6d bytes" % minimap_ring())
