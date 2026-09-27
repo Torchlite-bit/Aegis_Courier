@@ -9,6 +9,70 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.9]
+
+A minimap button. `/reload`.
+
+### Added
+- **A minimap button**, so the window is reachable without walking to a
+  mailbox. Everything on the Sent, Log, Ledger and Courier tabs is worth
+  looking at nowhere near one — what did I mail my bank alt, what did that
+  sell for, turn the skin off — and until now the only way in was `/courier`,
+  which is not a door most people find.
+  - **Click** for the window, on whichever tab you left it on.
+  - **Right-click** straight to **Sent** mail.
+  - **Shift-click** straight to **settings**.
+  - **Drag** it anywhere around the minimap; the position is remembered per
+    character, because which side is free depends on what else that character
+    is running.
+  - A click that asks for a tab **opens** — it does not toggle the window shut
+    because it happened to be open already.
+- **"Show minimap button"** in the Courier tab, on by default. A button you
+  have to know to switch on is one nobody finds; a player who already has a
+  ring of them has every right to refuse another.
+
+### Fixed
+- **The Send button could be pressed away from a mailbox.** Everything else was
+  already gated — Open All, Take Sold and Delete Read all grey out with no
+  mailbox in sight — but a complete letter could be sent into nothing, and it
+  failed silently, which is the worst way for it to fail. The form now says
+  "not at a mailbox" and the button is dead.
+  - This was reachable before this release, since `/courier` opens the window
+    anywhere. A minimap button makes it a normal path rather than a corner.
+  - **Queuing attachments away from a mailbox still works** and is meant to:
+    only the send itself needs a live session.
+
+### Notes
+- Away from a mailbox the Inbox reads empty, because the client genuinely has
+  nothing to read — there is no session to ask. The button's tooltip says which
+  tabs are inert rather than leaving it to be found by a dead button.
+- **The button is built the way Aegis: Pathfinder's is**, ported from its
+  `MinimapButton.lua` and `Tools/make_assets.py` — same 32px size, same orbit
+  radius, same RLE TGA format, a hover ring of our own instead of Blizzard's
+  highlight, and the logo sinking a pixel when pressed. Two Aegis buttons on
+  one minimap should feel like two Aegis buttons.
+  - The default spot is **not** Pathfinder's, deliberately: a 32px button on
+    that ring spans about 23 degrees, so sharing a default would stack them on
+    top of each other for anyone running both.
+  - The icon is reduced by **halving the source repeatedly** rather than in one
+    jump. A single 1024 to 64 reduction aliases — fine detail lands between
+    output pixels and turns to grain, which is exactly what read as pixelated.
+- **The logo gets the whole button.** The usual shape is a 20px icon inside
+  Blizzard's tracking-border ring — but this logo *is* a ring, gold rim and
+  all, so that would be a second ring drawn around the first with the emblem
+  squeezed into the middle of its own button. Without it the icon draws at
+  30px instead of 20px: **two and a quarter times the pixels**, which at this
+  size is the difference between an emblem and a smudge.
+  - That is the only real lever there is. A 20px icon is 400 pixels — 0.04% of
+    the 1024x1024 source art, which is itself spotless. The destination was
+    always the problem, never the picture.
+- The icon is a 64x64 32-bit RLE TGA in `media/`, the format every texture in
+  Pathfinder uses. A texture is not a `.toc` line, so this costs no client
+  restart.
+  - `media/make-minimap-icon.py` regenerates it from the source art beside it;
+    `media/README.md` documents the format and the two things worth knowing
+    before changing the art.
+
 ## [1.9.8]
 
 Housekeeping pass. `/reload`.

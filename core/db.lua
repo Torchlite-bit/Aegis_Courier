@@ -65,6 +65,10 @@ local SETTING_DEFAULTS = {
     -- a log you have to know to switch on is one you never have when you want
     -- it. (TurtleMail defaults its log off.)
     logEnabled   = true,
+    -- Show the minimap button. On by default -- a button you have to know to
+    -- switch on is one nobody finds -- but switchable, because a player with a
+    -- ring of them already has every right to refuse another.
+    minimapIcon  = true,
 }
 
 -- Entries retained per direction. Two capped arrays, so the log cannot grow
@@ -691,6 +695,20 @@ end
 function db.GetWindowScale()
     local u = db.char and db.char.ui
     return u and u.scale or nil
+end
+
+-- Where the minimap button sits, as an angle in degrees around the ring.
+-- Per character, like the window's own position and scale: which side of the
+-- minimap is free depends on what else that character is running.
+function db.SaveMinimapAngle(deg)
+    if not db.char then return end
+    if not db.char.ui then db.char.ui = {} end
+    db.char.ui.minimapAngle = deg
+end
+
+function db.GetMinimapAngle()
+    local u = db.char and db.char.ui
+    return u and u.minimapAngle or nil
 end
 
 function db.GetWindowPoint()

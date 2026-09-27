@@ -54,6 +54,22 @@ local function newRegion()
     end
     function r:SetText(t) rawset(self, "text", t) end
     function r:GetText() return rawget(self, "text") end
+    -- REAL size on regions too, not just on frames. A texture's dimensions are
+    -- the whole question for anything that has to FILL its parent -- an icon
+    -- sized to 20 inside a 32px button looks nothing like one sized to 30, and
+    -- with these falling through to the CamelCase no-op the difference was
+    -- unanswerable.
+    function r:SetWidth(w) rawset(self, "w", w) end
+    function r:SetHeight(h) rawset(self, "h", h) end
+    function r:GetWidth() return rawget(self, "w") or 0 end
+    function r:GetHeight() return rawget(self, "h") or 0 end
+    function r:SetAllPoints(other)
+        rawset(self, "allPoints", other or true)
+        if type(other) == "table" and other.GetWidth then
+            rawset(self, "w", other:GetWidth())
+            rawset(self, "h", other:GetHeight())
+        end
+    end
     function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
     function r:SetTexture(t) self.texture = t end
     function r:Show() self.visible = true end
@@ -213,6 +229,35 @@ setglobal = function(n, v) _G[n] = v end
 
 UIParent = CreateFrame("Frame", "UIParent")
 UISpecialFrames = {}
+
+-- ---- minimap ---------------------------------------------------------------
+-- The minimap button is placed by an ANGLE around the ring, and dragged by
+-- comparing the cursor to the minimap's centre -- so a mock that cannot report
+-- either a centre or a cursor cannot test the placement at all, and a
+-- CamelCase no-op would quietly answer nil to both.
+Minimap = CreateFrame("Frame", "Minimap")
+Minimap:SetWidth(140)
+Minimap:SetHeight(140)
+minimapCX, minimapCY = 1000, 500
+function Minimap:GetCenter() return minimapCX, minimapCY end
+
+cursorX, cursorY = 1000, 500
+GetCursorPosition = function() return cursorX * uiScale, cursorY * uiScale end
+
+-- The cursor comes back in SCREEN coordinates, which are the frame's own
+-- multiplied by the effective scale. Modelled rather than left at 1: an addon
+-- that forgets to divide it out tracks the mouse at the wrong rate on any
+-- scale but 1, and at 1 the bug is invisible.
+--
+-- On BOTH frames, because the minimap can be rescaled independently of
+-- UIParent -- plenty of UI addons do exactly that -- and the drag has to use
+-- the minimap's, since that is whose centre it is measuring from.
+uiScale = 1
+function UIParent:GetEffectiveScale() return uiScale end
+function Minimap:GetEffectiveScale() return uiScale end
+
+shiftDown = false
+IsShiftKeyDown = function() return shiftDown end
 DEFAULT_CHAT_FRAME = { messages = {} }
 function DEFAULT_CHAT_FRAME:AddMessage(m) table.insert(self.messages, m) end
 
@@ -398,12 +443,36 @@ function GameTooltip:SetHyperlink(link)
 end
 function GameTooltip:SetText(t)
     rawset(self, "shown", { kind = "text", text = t })
+    -- SetText starts a fresh tooltip, so it clears the body with it.
+    rawset(self, "lines", {})
+end
+-- REAL AddLine, because a multi-line tooltip IS the documentation for anything
+-- with more than one click behaviour. This fell through to the CamelCase no-op,
+-- so a button could describe nothing at all and the suite would agree with it.
+function GameTooltip:AddLine(t)
+    local l = rawget(self, "lines")
+    if not l then l = {}; rawset(self, "lines", l) end
+    table.insert(l, tostring(t))
+end
+function GameTooltip:AddDoubleLine(a, b)
+    self:AddLine(tostring(a) .. "  " .. tostring(b))
+end
+-- Every line as one string, for a test that only cares that something was said.
+function GameTooltip:Body()
+    local l = rawget(self, "lines") or {}
+    local out, i = "", 1
+    while i <= table.getn(l) do
+        out = out .. l[i] .. " | "
+        i = i + 1
+    end
+    return out
 end
 function GameTooltip:Show() rawset(self, "visible", true) end
 function GameTooltip:Hide()
     rawset(self, "visible", false)
     rawset(self, "shown", nil)
     rawset(self, "owner", nil)
+    rawset(self, "lines", {})
 end
 
 MiniMapMailFrame = CreateFrame("Frame", "MiniMapMailFrame")
@@ -1644,6 +1713,12 @@ check(send.TotalCost(5000, true) == 90, "COD gold is collected, not spent",
 
 print("== send: validation ==")
 stockBags()
+-- A LIVE MAIL SESSION IS PART OF THE FIXTURE. These checks used to run with
+-- send.atMailbox false, which is a state the player cannot actually be in when
+-- the Send button is in front of them -- so every one of them was answering
+-- the wrong question and none could see the missing session guard.
+local wasAt = send.atMailbox
+send.atMailbox = true
 local ok, why = send.Validate("", 0, false)
 check(not ok and why == "no recipient", "empty recipient rejected", why)
 ok, why = send.Validate("   ", 0, false)
@@ -1677,6 +1752,20 @@ playerMoney = 10000000
 print("== send: one item, one mail ==")
 stockBags()
 send.Attach(0, 1)
+-- THE SESSION ITSELF. /courier opens the window anywhere and the minimap
+-- button makes that a normal thing to do, so "no mailbox" is a real state the
+-- form can be looked at in -- and with no session SendMail posts into nothing
+-- and fails silently, which is the worst way for it to fail.
+send.atMailbox = false
+ok, why = send.Validate("Bob", 0, false, "hi", "there")
+check(not ok and why == "not at a mailbox",
+      "a mail that is fine in every other way still needs a mailbox", why)
+check(not send.Start("Bob", "hi", "there", 0, false, false),
+      "and Start refuses outright")
+send.atMailbox = true
+ok, why = send.Validate("Bob", 0, false, "hi", "there")
+check(ok, "at a mailbox the same mail is fine", why)
+
 check(send.Start("Bob", "hello", "body text", 0, false, false), "send started")
 pumpSend()
 check(not send.sending, "finished")
@@ -1694,6 +1783,7 @@ print("== send: a plain letter, no attachment and no gold ==")
 stockBags()
 SENT = {}
 check(send.Count() == 0, "nothing attached")
+send.atMailbox = true   -- sending needs a live session
 check(send.Start("Torchlyte", "How are you?", "long time no see", 0, false,
       false), "a letter starts sending")
 pumpSend()
@@ -1708,6 +1798,7 @@ check(send.MailCount() == 1, "a letter is one mail for postage", send.MailCount(
 print("== send: three items become three mails ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "stuff", "", 0, false, false)
 pumpSend()
 check(table.getn(SENT) == 3, "three mails", table.getn(SENT))
@@ -1720,6 +1811,7 @@ check(send.sentCount == 3, "count tracked")
 print("== send: blank subject auto-names from the item ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 3)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "", "", 0, false, false)
 pumpSend()
 check(SENT[1].subject == "Silk Cloth (20)", "stack count included",
@@ -1730,6 +1822,7 @@ check(SENT[2].subject == "Black Lotus", "single item has no count suffix",
 print("== send: gold rides the FIRST mail only ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "gold", "", 5000, false, false)
 pumpSend()
 check(table.getn(SENT) == 2, "two mails")
@@ -1739,6 +1832,7 @@ check(SENT[2].money == 0, "second does NOT resend it", SENT[2].money)
 print("== send: COD on the first vs on every mail ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "cod", "", 5000, true, false)
 pumpSend()
 check(SENT[1].cod == 5000, "COD on the first", SENT[1].cod)
@@ -1746,6 +1840,7 @@ check(SENT[2].cod == 0, "not on the second", SENT[2].cod)
 
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "cod", "", 5000, true, true)
 pumpSend()
 check(SENT[1].cod == 5000 and SENT[2].cod == 5000, "codAll charges every mail",
@@ -1759,6 +1854,7 @@ print("== send: a stack the server has LOCKED is waited for, not abandoned ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 BAGS[0][2].locked = 1                 -- the server is holding Copper Ore
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend(8)
 check(send.sending, "the run is still alive, waiting on the lock")
@@ -1777,6 +1873,7 @@ print("== send: a lock that never clears costs one item, not the batch ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 BAGS[0][1].locked = 1                 -- stuck forever
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend(200)
 BAGS[0][1].locked = nil
@@ -1793,6 +1890,7 @@ send.Attach(0, 1)                     -- Silk Cloth at slot 1
 send.Attach(0, 2)
 BAGS[0][7] = BAGS[0][1]               -- player reshuffles: Silk Cloth -> slot 7
 BAGS[0][1] = nil
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 check(not send.sending, "run finished")
@@ -1811,6 +1909,7 @@ send.Attach(0, 1)                     -- queue Silk Cloth
 send.Attach(0, 2)                     -- and Copper Ore
 -- Silk Cloth leaves the bags entirely; Black Lotus takes its slot.
 BAGS[0][1] = { name = "Black Lotus", texture = "t9", count = 1 }
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 check(not send.sending, "run finished")
@@ -1836,6 +1935,7 @@ print("== send: a last-instant swap is caught AFTER the attach ==")
 stockBags()
 send.Attach(0, 1)                      -- queue Silk Cloth, slot verified fine
 swapPickupWith = { bag = 0, slot = 3 } -- server hands over Black Lotus instead
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 swapPickupWith = nil
@@ -1849,6 +1949,7 @@ stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 BAGS[0][2] = nil                      -- Copper Ore is gone
 DEFAULT_CHAT_FRAME.messages = {}
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 check(send.skipped == 1, "one skipped", send.skipped)
@@ -1866,6 +1967,7 @@ print("== send: an item the game refuses to attach costs only that item ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 failAttach = true
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
 failAttach = false
@@ -1889,6 +1991,9 @@ print("== send: a healthy batch never walks the bags ==")
 stockBags()
 send.atMailbox = false                 -- no mailable probe; measuring the SEND
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+-- Queued away from a mailbox and sent at one, which is also how a player does
+-- it. Sending needs the session: with none, SendMail posts into nothing.
+send.atMailbox = true
 containerInfoCalls, containerLinkCalls = 0, 0
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
@@ -1924,6 +2029,7 @@ end
 BAGS[0][1].staleLock = true
 BAGS[0][2].staleLock = true
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true                  -- queued away, sent at a mailbox
 send.Start("Ann", "x", "", 0, false, false)
 -- ONE pump tick per mail plus its confirmation. If the run consulted the stale
 -- flag it would arm a LOCK_WAIT instead and still be going.
@@ -1938,9 +2044,11 @@ print("== send: a FAILED attach still pays for the careful path ==")
 -- A stack that moved is still found and still mailed -- it just costs the walk
 -- only when it is actually needed.
 stockBags()
+send.atMailbox = false                 -- no probe; the recovery path is the subject
 send.Attach(0, 1)
 BAGS[0][9] = BAGS[0][1]                -- the player reshuffles before sending
 BAGS[0][1] = nil
+send.atMailbox = true
 containerInfoCalls, containerLinkCalls = 0, 0
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend()
@@ -1964,6 +2072,7 @@ print("== send: a pickup the server silently ignores is WAITED for ==")
 stockBags()
 BAGS[0][1].serverHolds = true         -- cache says free; the server disagrees
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend(8)
 check(send.sending, "the run is still alive rather than blaming the item")
@@ -1982,6 +2091,7 @@ print("== send: a pickup that never lands still costs one item, not the batch ==
 stockBags()
 BAGS[0][1].serverHolds = true         -- stuck forever
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 pumpSend(400)
 check(not send.sending, "the run finished rather than hanging")
@@ -2119,6 +2229,7 @@ send.atMailbox = true
 print("== send: MAIL_FAILED aborts the batch ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()          -- first mail issued
@@ -2141,6 +2252,7 @@ A.db.ClearLog()
 send.Attach(0, 1); send.Attach(0, 2)
 failSendCount = 0
 sendAttempts = 0
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "batch", "", 0, false, false)
 -- Let the first mail go, then make the server refuse exactly once.
 arg1 = 5
@@ -2163,6 +2275,7 @@ print("== send: a retry does not renumber or duplicate gold ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 sendAttempts = 0
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "gold", "", 5000, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()
@@ -2179,6 +2292,7 @@ stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 sendAttempts = 0
 failSendCount = 99         -- the server refuses everything
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "doomed", "", 0, false, false)
 local spins = pumpSend(80)
 failSendCount = 0
@@ -2193,6 +2307,7 @@ print("== send: the retry budget is per mail, not per batch ==")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 sendAttempts = 0
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "long", "", 0, false, false)
 local sent, guard3 = 0, 0
 while send.sending and guard3 < 200 do
@@ -2219,6 +2334,7 @@ stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 sendAttempts = 0
 moneyCalls, codCalls = 0, 0
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "g", "", 5000, false, false)
 pumpSend()
 check(table.getn(SENT) == 2, "two mails sent")
@@ -2231,6 +2347,7 @@ stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 sendAttempts = 0
 moneyCalls, codCalls = 0, 0
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "c", "", 2500, true, false)
 pumpSend()
 check(moneyCalls == 0, "SetSendMailMoney was never called for a COD send",
@@ -2250,6 +2367,7 @@ check(table.getn(A.db.MatchContacts("", 2)) == 2, "limit respected")
 -- A successful send remembers the recipient.
 stockBags()
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Carlos", "hi", "", 0, false, false)
 pumpSend()
 check(table.getn(A.db.MatchContacts("Carl", 5)) == 1, "recipient remembered")
@@ -2976,6 +3094,256 @@ fire("MAIL_CLOSED")
 
 end
 
+do
+print("== minimap: the button exists and sits on the ring ==")
+local mb = A.ui.minimapButton
+check(mb ~= nil, "the minimap button was built at load")
+-- Guarded rather than indexed straight: everything below depends on the button
+-- existing, and an index error two lines down is a worse report than a failed
+-- check that names the cause.
+if not mb then
+    -- A stand-in with inert scripts, so every check below reports itself
+    -- rather than the block dying on the first nil handler.
+    mb = CreateFrame("Button", "MissingMinimapButton")
+    mb.scripts.OnDragStart = function() end
+    mb.scripts.OnDragStop = function() end
+    mb.scripts.OnClick = function() end
+    mb.scripts.OnEnter = function() end
+end
+check(mb:AnchorTarget() == Minimap, "parented and anchored to the minimap")
+check(mb.courierNoSkin == true,
+      "it opts out of the pfUI skin -- skinning a button ERASES its icon")
+
+-- The texture path has to resolve to a file that is actually shipped. A typo
+-- renders nothing at all in game and errors nowhere, so this is the only place
+-- it can be caught.
+local iconPath = mb.icon and rawget(mb.icon, "texture") or nil
+check(iconPath == "Interface\\AddOns\\Aegis_Courier\\media\\minimap",
+      "the icon points at our own art", tostring(iconPath))
+
+-- THE ICON FILLS THE BUTTON. The usual shape is a 20px icon inside Blizzard's
+-- tracking-border ring, but this logo is a ring already -- so the border is
+-- not drawn and the emblem gets the whole button instead of the middle of it.
+-- That is 30px rather than 20px, two and a quarter times the pixels, and it
+-- is the only real lever there is: a 20px icon is 400 pixels, 0.04% of the
+-- 1024x1024 source. Assert it as a PROPORTION, so a future resize of the
+-- button cannot quietly shrink the art back into the middle.
+local bw = mb:GetWidth()
+local iw = mb.icon and mb.icon:GetWidth() or 0
+check(bw > 0 and iw / bw > 0.9,
+      "the icon fills its button rather than sitting in the middle of it",
+      iw .. " of " .. bw)
+check(mb.border == nil,
+      "and Blizzard's border ring is not drawn over the logo's own")
+
+-- The hover ring, the pressed nudge and the drag maths are all ported from
+-- Aegis: Pathfinder's MinimapButton.lua, so that two Aegis buttons on the
+-- same minimap behave the same way under the same mouse.
+check(mb.ring ~= nil, "there is a hover ring of our own")
+check(mb.ring and not mb.ring:IsVisible(), "hidden until hovered")
+local ringTex = mb.ring and rawget(mb.ring, "texture") or nil
+check(ringTex == "Interface\\AddOns\\Aegis_Courier\\media\\minimap-ring",
+      "and it is our art, not Blizzard's highlight", tostring(ringTex))
+local rf = io.open("media/minimap-ring.tga", "rb")
+check(rf ~= nil, "which is really in the repo")
+if rf then rf:close() end
+check(hover(mb), "hovering works")
+check(mb.ring and mb.ring:IsVisible(), "and shows the ring")
+unhover(mb)
+check(mb.ring and not mb.ring:IsVisible(), "which goes again on leave")
+
+-- Pressed: the logo sinks a pixel. On a button with no plate behind it this
+-- is the only thing that makes a click feel like one.
+local function iconOffset()
+    local pts = rawget(mb.icon, "points") or {}
+    local last = pts[table.getn(pts)]
+    if not last then return nil end
+    return (last.x or 0) .. "," .. (last.y or 0)
+end
+check(iconOffset() == "0,0", "the logo sits centred at rest", iconOffset())
+mb.scripts.OnMouseDown()
+check(iconOffset() == "1,-1", "and sinks a pixel when pressed", iconOffset())
+mb.scripts.OnMouseUp()
+check(iconOffset() == "0,0", "then comes back up", iconOffset())
+local f = io.open("media/minimap.tga", "rb")
+check(f ~= nil, "and that art is really in the repo")
+if f then
+    -- Same format as media/ResizeGrip.tga, which is already proven on the
+    -- 1.12 client: uncompressed true-colour, 32-bit, powers of two.
+    local hdr = f:read(18)
+    f:close()
+    local function byte(i) return string.byte(hdr, i) end
+    -- Type 10 is RLE true-colour, which is what every texture in Aegis:
+    -- Pathfinder's media folder is. Courier's older ResizeGrip.tga is type 2
+    -- (uncompressed) and also loads fine -- both work on 1.12, and matching
+    -- the sibling addon's pipeline is worth more than matching our own older
+    -- file. Anything OTHER than these two would not load at all.
+    check(byte(3) == 10 or byte(3) == 2,
+          "a true-colour TGA the 1.12 client can load", byte(3))
+    check(byte(17) == 32, "32-bit, so it has an alpha channel", byte(17))
+    local w = byte(13) + byte(14) * 256
+    local h = byte(15) + byte(16) * 256
+    -- A power of two, which 1.12 requires -- and deliberately CLOSE to the
+    -- 20px the button draws it at. A .tga carries no mipmaps (only .blp
+    -- does), so the client minifies a single image straight down to display
+    -- size, and the further that has to travel the more it shimmers. 64x64
+    -- was three times over and read as noise.
+    local function pow2(n) return n > 0 and math.mod(n, 2) == 0 end
+    check(pow2(w) and w == h, "square and a power of two", w .. "x" .. h)
+    check(w <= 64, "and not far above the size it is drawn at", w)
+end
+
+-- The default spot is deliberately NOT Aegis: Pathfinder's, which is 215.
+-- A 32px button orbiting at radius 80 spans about 23 degrees, so two Aegis
+-- addons defaulting to the same place would stack on top of each other for
+-- anyone running both -- and they are written to be run together.
+check(A.ui.MinimapAngle ~= nil, "there is a default angle")
+A.db.SaveMinimapAngle(nil)
+local defaultAngle = A.ui.MinimapAngle()
+local function angleGap(a, b)
+    local d = math.abs(a - b)
+    if d > 180 then d = 360 - d end
+    return d
+end
+check(angleGap(defaultAngle, 215) > 23,
+      "and it clears Pathfinder's default by more than a button's width",
+      defaultAngle .. " vs 215, gap " .. angleGap(defaultAngle, 215))
+
+print("== minimap: the angle is remembered ==")
+A.ui.SetMinimapAngle(90)
+check(A.db.GetMinimapAngle() == 90, "a new angle is saved",
+      A.db.GetMinimapAngle())
+check(A.ui.MinimapAngle() == 90, "and read back")
+-- Wrapped, not clamped: dragging past 360 keeps going round.
+A.ui.SetMinimapAngle(380)
+check(A.ui.MinimapAngle() == 20, "past a full turn it wraps", A.ui.MinimapAngle())
+A.ui.SetMinimapAngle(-30)
+check(A.ui.MinimapAngle() == 330, "and backwards too", A.ui.MinimapAngle())
+
+print("== minimap: dragging follows the cursor ==")
+-- Straight up from the centre is 90 degrees. The cursor is converted out of
+-- screen coordinates first, which is why the scale below matters.
+A.ui.SetMinimapAngle(0)
+hover(mb)
+mb.scripts.OnDragStart()
+check(mb.dragging == true, "the drag started")
+check(not GameTooltip:IsVisible(),
+      "and the tooltip got out of the way of the thing being dragged")
+check(mb.scripts.OnUpdate ~= nil, "and it tracks the mouse per frame")
+-- Same reason as above: a missing tracker should read as the check it failed,
+-- not as an error inside the next line.
+if not mb.scripts.OnUpdate then mb.scripts.OnUpdate = function() end end
+cursorX, cursorY = minimapCX, minimapCY + 50
+mb.scripts.OnUpdate()
+check(A.ui.MinimapAngle() == 90, "cursor above the centre puts it at the top",
+      A.ui.MinimapAngle())
+cursorX, cursorY = minimapCX - 50, minimapCY
+mb.scripts.OnUpdate()
+check(A.ui.MinimapAngle() == 180, "and to the left, on the left",
+      A.ui.MinimapAngle())
+
+-- THE SCALE. GetCursorPosition answers in screen coordinates; a frame's centre
+-- is in its own. At scale 1 the two agree and the bug hides, so this checks it
+-- somewhere else.
+uiScale = 2
+cursorX, cursorY = minimapCX, minimapCY - 50
+mb.scripts.OnUpdate()
+check(A.ui.MinimapAngle() == 270,
+      "the cursor is still tracked correctly at a different UI scale",
+      A.ui.MinimapAngle())
+uiScale = 1
+
+mb.scripts.OnDragStop()
+check(mb.dragging == false, "the drag stopped")
+check(mb.scripts.OnUpdate == nil, "and it stopped tracking")
+
+print("== minimap: the three clicks ==")
+A.ui.CloseWindow()
+shiftDown = false
+arg1 = "LeftButton"
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible(), "left-click opens the window")
+arg1 = "LeftButton"
+mb.scripts.OnClick()
+check(not A.ui.frame:IsVisible(), "and left-click again closes it")
+
+arg1 = "RightButton"
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible() and A.ui.selectedSubTab == "Sent",
+      "right-click goes straight to Sent", A.ui.selectedSubTab)
+-- A click that asks for a TAB must not toggle the window shut: it asked for
+-- that tab to be in front of you, and it already is.
+arg1 = "RightButton"
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible() and A.ui.selectedSubTab == "Sent",
+      "and again leaves it open on Sent, rather than closing")
+
+shiftDown = true
+arg1 = "LeftButton"
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible() and A.ui.selectedSubTab == "Courier",
+      "shift-click goes to the settings tab", A.ui.selectedSubTab)
+shiftDown = false
+
+print("== minimap: away from a mailbox nothing is half-done ==")
+-- The reason this button is safe to add. Everything that needs a live mail
+-- session is already gated, so opening the window from the minimap can only
+-- show you things.
+A.ui.mailOpen = false
+A.send.atMailbox = false
+arg1 = "LeftButton"
+A.ui.CloseWindow()
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible(), "the window opens with no mailbox in sight")
+A.ui.SelectSubTab("Inbox")
+check(not A.ui.btnOpenAll:IsEnabled(), "Open All is dead")
+check(not A.ui.btnTakeSold:IsEnabled(), "Take Sold is dead")
+check(not A.ui.btnDeleteRead:IsEnabled(), "Delete Read is dead")
+A.ui.SelectSubTab("Send")
+A.ui.sendTo:SetText("Bob")
+A.ui.sendSubject:SetText("hello")
+A.ui.RefreshSend()
+check(not A.ui.btnSend:IsEnabled(),
+      "and Send is dead, however complete the form")
+A.ui.sendTo:SetText("")
+A.ui.sendSubject:SetText("")
+-- The tabs that do not need a mailbox still work.
+A.ui.SelectSubTab("Sent")
+check(A.ui.selectedSubTab == "Sent", "the Sent tab still opens")
+A.ui.SelectSubTab("Courier")
+check(A.ui.selectedSubTab == "Courier", "and so does settings")
+-- The tooltip says so rather than leaving it to be discovered.
+check(hover(mb), "the button takes a hover")
+local shown = rawget(GameTooltip, "shown") or {}
+check(shown.text == "Aegis: Courier", "the tooltip names the addon",
+      tostring(shown.text))
+local joined = GameTooltip:Body()
+check(A.util.Contains(joined, "Right-click"), "and documents right-click", joined)
+check(A.util.Contains(joined, "Shift-click"), "and shift-click")
+check(A.util.Contains(joined, "Drag"), "and that it can be dragged")
+check(A.util.Contains(joined, "need a mailbox"),
+      "and warns which tabs are inert away from a mailbox", joined)
+unhover(mb)
+
+print("== minimap: the icon can be switched off ==")
+A.ui.SelectSubTab("Courier")
+check(A.ui.checkMinimap ~= nil, "the Courier tab has the toggle")
+check(A.ui.checkMinimap:GetChecked(), "on by default")
+A.ui.checkMinimap:SetChecked(false)
+A.ui.checkMinimap.scripts.OnClick()
+check(not A.db.Setting("minimapIcon"), "clicking it stores the setting off")
+check(A.ui.minimapButton and not A.ui.minimapButton:IsVisible(),
+      "and the button goes away")
+A.ui.checkMinimap:SetChecked(true)
+A.ui.checkMinimap.scripts.OnClick()
+check(A.db.Setting("minimapIcon"), "and back on")
+check(A.ui.minimapButton and A.ui.minimapButton:IsVisible(),
+      "the button returns")
+
+A.ui.CloseWindow()
+
+end
+
 print("== version: the title bar cannot drift from the .toc ==")
 -- Two releases shipped with the .toc bumped and this literal left behind, so
 -- the in-game title kept reporting an old build and bug reports came in
@@ -3059,6 +3427,9 @@ print("== send UI: the Send BUTTON is clickable for a letter ==")
 -- player actually has to be able to press.
 A.ui.SelectSubTab("Send")
 A.send.ClearAttachments()
+-- At a mailbox, because that is where a player presses this button. The block
+-- below adds the case where they are NOT.
+A.send.atMailbox = true
 A.ui.sendCOD:SetChecked(false)
 A.ui.sendCODAll:SetChecked(false)
 A.ui.sendMoney:SetText("")
@@ -3071,6 +3442,22 @@ check(not A.ui.btnSend:IsEnabled(), "an empty form cannot be sent")
 A.ui.sendTo:SetText("Subtilizer")
 A.ui.RefreshSend()
 check(not A.ui.btnSend:IsEnabled(), "a recipient alone is not enough")
+
+-- AND THE SESSION IS A BUTTON RULE TOO. ui.RefreshSend asks send.Validate
+-- whether the button may be pressed, so a guard added only to the engine would
+-- leave a live Send button that posts into nothing. That is the exact shape of
+-- the bug this whole block exists to remember, so it is asserted on the
+-- BUTTON and not only on the function.
+A.ui.sendSubject:SetText("test")
+A.send.atMailbox = false
+A.ui.RefreshSend()
+check(not A.ui.btnSend:IsEnabled(),
+      "away from a mailbox the Send button is dead, however complete the form")
+A.send.atMailbox = true
+A.ui.RefreshSend()
+check(A.ui.btnSend:IsEnabled(), "and live again at one")
+A.ui.sendSubject:SetText("")
+A.ui.RefreshSend()
 
 A.ui.sendSubject:SetText("test")
 A.ui.RefreshSend()
@@ -4266,17 +4653,20 @@ print("== pacing: a batch starts at full speed and earns any delay ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "quick", "", 0, false, false)
 check(send.SETTLE == 0, "a batch pays no settle", send.SETTLE)
 pumpSend()
 check(send.SETTLE == 0, "and a clean run never slows itself down", send.SETTLE)
 
 print("== pacing: a batch reports its own elapsed time ==")
+send.atMailbox = true   -- a batch is sent AT a mailbox; Validate needs the session
 -- "Did the speed change?" was not answerable by feel. A batch that measures
 -- itself turns it into a number.
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
 DEFAULT_CHAT_FRAME.messages = {}
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "timed", "", 0, false, false)
 pumpSend()
 check(send.lastElapsed ~= nil, "the batch measured itself",
@@ -4315,6 +4705,7 @@ send.armed = false
 check(send.SETTLE == 0, "and there is no settle to pay", send.SETTLE)
 
 print("== pacing: the driver stays live across the server's latency ==")
+send.atMailbox = true   -- a batch is sent AT a mailbox; Validate needs the session
 -- With a real server the acknowledgement does not come back in the same frame
 -- the mail went out -- there are frames of waiting in between. A driver that
 -- hides itself the moment it has nothing to do must then be Shown again when
@@ -4330,6 +4721,7 @@ SENT = {}
 -- wake-up cost this measures is already paid and invisible.
 sdriver:Hide()
 rawset(sdriver, "justShown", nil)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "laggy", "", 0, false, false)
 local LATENCY = 4                  -- frames between SendMail and its answer
 local lagFrames, ackIn = 0, LATENCY
@@ -4365,6 +4757,7 @@ check(lagFrames == floorFrames,
       lagFrames .. " frames, floor is " .. floorFrames)
 
 print("== pacing: ONE refusal does not tax the rest of the batch ==")
+send.atMailbox = true   -- a batch is sent AT a mailbox; Validate needs the session
 -- Courier used to escalate: every MAIL_FAILED added 0.3s and KEPT it for the
 -- remaining mails, so a single hiccup on mail two cost every mail after it --
 -- nearly nine seconds on a twelve-item send. TurtleMail has no such delay and
@@ -4374,6 +4767,7 @@ stockBags()
 send.atMailbox = false
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
 failSendCount = 1                  -- the server refuses the first mail once
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "bumpy", "", 0, false, false)
 pumpSend()
 failSendCount = 0
@@ -4392,6 +4786,7 @@ check(send.RETRY_WAIT <= 0.5,
 -- per mail and nothing more.
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "clean", "", 0, false, false)
 -- The first mail is already out -- send.Start issued it synchronously, as
 -- TurtleMail's button does -- so only the SECOND and THIRD cost a frame.
@@ -4421,12 +4816,14 @@ fire("MAIL_FAILED")                -- not sending, so this must be inert
 check(not send.sending, "MAIL_FAILED outside a run changes nothing")
 
 print("== sent box: a batch is ONE record carrying its items ==")
+send.atMailbox = true   -- a batch is sent AT a mailbox; Validate needs the session
 -- Vanilla mail has one attachment per message, so mailing two items is two
 -- mails and the server has no notion they belong together. The grouping is
 -- ours, and it can only be captured at send time.
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "supplies", "", 5000, false, false)
 pumpSend()
 local box = A.db.SentBox()
@@ -4469,6 +4866,7 @@ SENT = {}; attachSlot, cursor = nil, nil
 send.atMailbox = false
 send.ClearAttachments()
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("subtilizer", "kit", "", 0, false, false)
 pumpSend()
 local box = A.db.SentBox()
@@ -4561,6 +4959,7 @@ A.db.ClearLog()
 stockBags()
 send.atMailbox = false
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "supplies", "", 0, false, false)
 pumpSend()
 A.ui.SelectSubTab("Sent")
@@ -4585,6 +4984,7 @@ check(GameTooltip.shown == nil, "and closes again")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)          -- a TWO-item batch first
+send.atMailbox = true   -- sending needs a live session
 send.Start("Bob", "two things", "", 0, false, false)
 pumpSend()
 A.ui.OpenSentRecord(1)
@@ -4592,6 +4992,7 @@ check(A.ui.sentItemRows[2].visible == true, "row 2 carried the second item")
 check(A.ui.sentItemRows[2].itemName ~= nil, "and remembers its name")
 
 send.Attach(0, 3)                              -- then a ONE-item batch
+send.atMailbox = true   -- sending needs a live session
 send.Start("Cid", "one thing", "", 0, false, false)
 pumpSend()
 -- The box is appended in order, so the one-item batch is record 2.
@@ -4608,6 +5009,7 @@ print("== sent box: COD is recorded as COD, not as gold ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "cod parcel", "", 2500, true, false)
 pumpSend()
 rec = A.db.SentBox()[1]
@@ -4618,6 +5020,7 @@ print("== sent box: nothing is recorded until the server confirms ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "x", "", 0, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()      -- first mail issued, not yet confirmed
@@ -4638,6 +5041,7 @@ print("== sent box: a batch abandoned halfway keeps what did go ==")
 A.db.ClearLog()
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "partial", "", 0, false, false)
 arg1 = 5
 sdriver.scripts.OnUpdate()
@@ -4663,6 +5067,7 @@ A.db.ClearLog()
 A.db.SetSetting("logEnabled", false)
 stockBags()
 send.Attach(0, 1)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Ann", "quiet", "", 0, false, false)
 pumpSend()
 check(table.getn(A.db.SentBox()) == 0, "logging off records nothing")
@@ -4862,6 +5267,7 @@ A.ui.OpenWindow()
 A.ui.SelectSubTab("Sent")
 stockBags()
 send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.atMailbox = true   -- sending needs a live session
 send.Start("Torchbank", "supplies", "letters and parcels", 0, false, false)
 pumpSend()
 A.ui.sentFind:SetText("")
