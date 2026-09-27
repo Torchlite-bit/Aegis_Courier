@@ -494,9 +494,47 @@ section, which is Courier's equivalent hazard surface.
       client's does. A mock that swallows it passes a Tab-accept that reopens
       the list it just closed.
 
+29. **The window is reachable with NO MAIL SESSION, so anything needing one
+    must say so.** `/courier` always opened it anywhere, and the minimap button
+    makes that the normal way in — so "window open, nowhere near a mailbox" is
+    a state every panel is looked at in, not an edge case.
+    - The take buttons were already gated on `ui.mailOpen`. **Sending was
+      not:** `send.Validate` now refuses with `"not at a mailbox"`, which is
+      the one place that answers both `send.Start` and the Send button's
+      enabled state — with no session `SendMail` posts into nothing and fails
+      silently, the worst way for it to fail.
+    - Inbox reads empty away from a mailbox because the client has nothing to
+      read, which is correct and needs no guard of its own.
+    - **Attaching is different from sending.** `send.IsMailable` needs a live
+      session and skips its probe without one, so queuing items away from a
+      mailbox is fine and deliberate — a test that turns the session off to
+      skip the probe must turn it back on before `send.Start`.
+30. **The minimap button is placed by an ANGLE, and dragged against the
+    minimap's centre.** A corner anchor cannot survive the player moving it.
+    `GetCursorPosition()` answers in SCREEN coordinates — divide by
+    `UIParent:GetEffectiveScale()` before comparing with `Minimap:GetCenter()`,
+    or the button tracks the mouse at the wrong rate on any scale but 1 (and at
+    1 the bug is invisible, so the harness models a second scale).
+    - `RegisterForClicks("LeftButtonUp", "RightButtonUp")` or right-click never
+      arrives; `RegisterForDrag("LeftButton")` alongside it is fine, because
+      the client only raises `OnDragStart` once the mouse actually moves.
+    - **1.12 passes the mouse button in the global `arg1`**, not as an
+      argument — same rule as every other event on this client.
+    - `courierNoSkin = true`, always. pfUI's button skin replaces textures with
+      a flat backdrop, which on an ICON button **erases the icon** — the fault
+      that shipped the recipient dropdown as an empty box in v1.1.0.
+    - Angle normalisation uses **`math.mod`**, never `%`.
+    - A click that asks for a named tab **opens**, it does not toggle: it asked
+      for that tab to be in front of you, and closing the window because it was
+      already open is the wrong answer to that question.
+    - Art is a **32-bit uncompressed TGA with power-of-two dimensions**,
+      referenced with **no file extension** — the format and the path
+      convention already proven by `media/ResizeGrip.tga`. A texture is not a
+      `.toc` line, so adding one costs no client restart.
+
 ### SavedVariables
 
-29. **SavedVariables are `nil` until `ADDON_LOADED` fires for
+31. **SavedVariables are `nil` until `ADDON_LOADED` fires for
     `"Aegis_Courier"`.** Do all DB setup from the ADDON_LOADED path (queue via
     `AegisCourier.OnLoad(fn)`), never at file scope.
     - `CourierDB` — account-wide (declared `## SavedVariables`).
@@ -504,9 +542,9 @@ section, which is Courier's equivalent hazard surface.
 
 ### Frames & globals
 
-30. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
+32. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
     building `"MailItem" .. n .. "Button"`).
-31. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
+33. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
     `UIPanelButtonTemplate`, `FauxScrollFrameTemplate`, `GameTooltipTemplate`.
     - **`FauxScrollFrame_OnVerticalScroll(itemHeight, updateFn)` — 2 args on
       1.12.** The frame and scroll offset are the implicit globals `this` /
@@ -721,6 +759,11 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       mode it was opened in; nothing about a roster is persisted; the
       show-offline filter is borrowed and handed back; the character being
       played is offered by no section.
+- [ ] Anything needing a live mail session refuses without one, and the rule
+      lives where the BUTTON reads it: the window opens anywhere, from
+      `/courier` and from the minimap button.
+- [ ] A minimap or icon button set `courierNoSkin`, reads its mouse button from
+      `arg1`, and divides `GetCursorPosition()` by the effective UI scale.
 - [ ] Tab in the recipient box accepts the suggestion when there is one and
       still walks to Subject when there is not, the override is installed after
       `ui.SetTabChain`, and what it fills is read off the rendered row.

@@ -3694,9 +3694,19 @@ function ui.BuildCourierPanel()
     -- A rule between the two groups. Without it -- and with the Integration
     -- heading previously anchored to `push` rather than to the last checkbox --
     -- the heading was drawn straight on top of the log option.
+    local minimapCheck = MakeCheck(panel, "Minimap", "Show minimap button",
+        "minimapIcon", function() ui.RefreshMinimapButton() end)
+    minimapCheck:SetPoint("TOPLEFT", scaleHint, "BOTTOMLEFT", -4, -10)
+    ui.checkMinimap = minimapCheck
+
+    local minimapHint = Label(panel, "GameFontNormalSmall", C.dim)
+    minimapHint:SetPoint("TOPLEFT", minimapCheck, "BOTTOMLEFT", 26, 0)
+    minimapHint:SetText("Click it for the window, right-click for Sent mail, " ..
+        "shift-click for these settings.")
+
     local divider = panel:CreateTexture(nil, "ARTWORK")
     divider:SetHeight(1)
-    divider:SetPoint("TOPLEFT", scaleHint, "BOTTOMLEFT", 0, -14)
+    divider:SetPoint("TOPLEFT", minimapHint, "BOTTOMLEFT", -26, -14)
     divider:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
     divider:SetTexture(C.goldDim[1], C.goldDim[2], C.goldDim[3], 0.35)
 
@@ -3775,6 +3785,9 @@ function ui.RefreshCourier()
     ui.checkLog:SetChecked(db.Setting("logEnabled") and true or false)
     ui.checkPfSkin:SetChecked(db.Setting("pfSkin") and true or false)
     ui.checkAutoRead:SetChecked(db.Setting("autoReadBody") and true or false)
+    if ui.checkMinimap then
+        ui.checkMinimap:SetChecked(db.Setting("minimapIcon") and true or false)
+    end
 
     if ui.scaleText then
         -- Shown as a percentage: "85%" is easier to reason about than "0.85".
@@ -4087,6 +4100,197 @@ end
 -- client on a large inbox.
 
 -- ---------------------------------------------------------------------------
+-- Minimap button
+-- ---------------------------------------------------------------------------
+--
+-- There is no LibDBIcon here and no minimap-button library worth depending on,
+-- so this is the hand-rolled vanilla shape: a Button parented to Minimap,
+-- placed by an ANGLE around the ring rather than by a corner, because that is
+-- the only placement that survives the player dragging it somewhere else.
+--
+-- WHAT IT IS FOR. The window was reachable at a mailbox, or by typing
+-- /courier. Everything on the Sent, Log, Ledger and Courier tabs is worth
+-- looking at nowhere near a mailbox -- what did I mail my bank alt, what did
+-- that sell for, turn the skin off -- and a slash command is not a door most
+-- people find. So:
+--
+--   left click          the window, on whichever tab you left it on
+--   right click         the Sent tab
+--   shift + left click  the Courier tab (settings)
+--   drag                move it around the ring
+--
+-- The tooltip says all of that, because a button with three behaviours and no
+-- tooltip has one behaviour and two surprises.
+--
+-- INBOX AND COMPOSE ARE INERT AWAY FROM A MAILBOX and that is load-bearing,
+-- not a shrug: the inbox reads empty because the client has nothing to read,
+-- every take button is already gated on ui.mailOpen, and send.Validate refuses
+-- with "not at a mailbox" so the Send button is dead too. Opening the window
+-- from here can therefore only show you things, never half-do something.
+
+local MINIMAP_RADIUS = 80        -- the ring every vanilla minimap button sits on
+local MINIMAP_DEFAULT_ANGLE = 204
+
+-- Normalised into 0..360. math.mod, not `%` -- Lua 5.0 has no modulo operator.
+local function NormaliseAngle(deg)
+    if type(deg) ~= "number" then return MINIMAP_DEFAULT_ANGLE end
+    deg = math.mod(deg, 360)
+    if deg < 0 then deg = deg + 360 end
+    return deg
+end
+
+function ui.MinimapAngle()
+    return NormaliseAngle(db.GetMinimapAngle() or MINIMAP_DEFAULT_ANGLE)
+end
+
+-- Place the button at `deg` around the minimap, saving it as the new home.
+function ui.SetMinimapAngle(deg)
+    deg = NormaliseAngle(deg)
+    db.SaveMinimapAngle(deg)
+    local b = ui.minimapButton
+    if not b or not Minimap then return end
+    local rad = math.rad(deg)
+    b:ClearAllPoints()
+    b:SetPoint("CENTER", Minimap, "CENTER",
+        MINIMAP_RADIUS * math.cos(rad),
+        MINIMAP_RADIUS * math.sin(rad))
+end
+
+-- Follow the cursor while dragging. The angle comes from the cursor's offset
+-- from the MINIMAP'S centre, so the button tracks the mouse instead of jumping
+-- by the grab offset.
+--
+-- GetCursorPosition returns screen coordinates that are NOT in the same space
+-- as a frame's -- they have to be divided by the effective UI scale first, or
+-- the button chases the mouse at the wrong rate on any scale but 1.
+local function MinimapDragUpdate()
+    if not Minimap then return end
+    local mx, my = Minimap:GetCenter()
+    if not mx then return end
+    local cx, cy = GetCursorPosition()
+    if not cx then return end
+    local scale = UIParent and UIParent:GetEffectiveScale() or 1
+    if not scale or scale == 0 then scale = 1 end
+    cx = cx / scale
+    cy = cy / scale
+    ui.SetMinimapAngle(math.deg(math.atan2(cy - my, cx - mx)))
+end
+
+function ui.BuildMinimapButton()
+    if ui.minimapButton then return ui.minimapButton end
+    -- A UI replacement with no Minimap is not an error, it is a client we
+    -- simply have no button on.
+    if not Minimap then return nil end
+
+    local b = CreateFrame("Button", "AegisCourierMinimapButton", Minimap)
+    b:SetWidth(31)
+    b:SetHeight(31)
+    b:SetFrameStrata("MEDIUM")
+    b:SetFrameLevel(Minimap:GetFrameLevel() + 8)
+    -- The pfUI skin swaps a button's textures for a flat backdrop, which on an
+    -- ICON button erases the icon -- the fault that made the recipient
+    -- dropdown render as an empty box in v1.1.0, and the resize grip opt out
+    -- for the same reason.
+    b.courierNoSkin = true
+
+    -- Right click has to be registered for or it never reaches OnClick.
+    b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+    -- LeftButton for BOTH drag and click is deliberate and it works: the
+    -- client only raises OnDragStart once the mouse actually moves, so a plain
+    -- click still arrives as OnClick.
+    b:RegisterForDrag("LeftButton")
+
+    local icon = b:CreateTexture(nil, "BACKGROUND")
+    icon:SetWidth(20)
+    icon:SetHeight(20)
+    icon:SetPoint("CENTER", b, "CENTER", 0, 1)
+    -- No file extension, matching the resize grip: the client appends .blp or
+    -- .tga itself, and ours is a .tga -- 32-bit uncompressed, 64x64, exactly
+    -- the format already proven by media/ResizeGrip.tga.
+    icon:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\minimap")
+    b.icon = icon
+
+    -- The standard ring, so it reads as a minimap button rather than a sticker
+    -- on the map. Drawn OVER the icon, and deliberately larger than the
+    -- button: the art has transparent margins and sizing it to 31 would leave
+    -- the visible ring too small for the icon inside it.
+    local border = b:CreateTexture(nil, "OVERLAY")
+    border:SetWidth(53)
+    border:SetHeight(53)
+    border:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+    border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+    b.border = border
+
+    b:SetHighlightTexture(
+        "Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+
+    b:SetScript("OnEnter", function()
+        GameTooltip:SetOwner(b, "ANCHOR_LEFT")
+        GameTooltip:SetText("Aegis: Courier")
+        GameTooltip:AddLine("Click to open the mailbox window.", 1, 1, 1)
+        GameTooltip:AddLine("Right-click for Sent mail.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Shift-click for settings.", 0.8, 0.8, 0.8)
+        GameTooltip:AddLine("Drag to move this button.", 0.5, 0.5, 0.5)
+        -- Said plainly rather than left to be discovered by a dead button.
+        if not ui.mailOpen then
+            GameTooltip:AddLine(
+                "Away from a mailbox: Sent, Log, Ledger and settings work; " ..
+                "Inbox and Compose need a mailbox.", 0.6, 0.6, 0.6)
+        end
+        GameTooltip:Show()
+    end)
+    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+
+    b:SetScript("OnDragStart", function()
+        b.dragging = true
+        b:SetScript("OnUpdate", MinimapDragUpdate)
+    end)
+    b:SetScript("OnDragStop", function()
+        b.dragging = false
+        b:SetScript("OnUpdate", nil)
+    end)
+
+    -- 1.12 passes the mouse button in the GLOBAL arg1, not as a parameter.
+    b:SetScript("OnClick", function()
+        if arg1 == "RightButton" then
+            ui.OpenTab("Sent")
+        elseif IsShiftKeyDown and IsShiftKeyDown() then
+            ui.OpenTab("Courier")
+        else
+            ui.Toggle()
+        end
+    end)
+
+    ui.minimapButton = b
+    ui.SetMinimapAngle(ui.MinimapAngle())
+    ui.RefreshMinimapButton()
+    return b
+end
+
+-- Open the window ON a named tab. Used by the minimap button's right and
+-- shift clicks, and it OPENS rather than toggling: a click that asks for a
+-- specific tab has asked for that tab to be in front of you, so closing the
+-- window because it happened to be open already would be the wrong answer to
+-- the question.
+function ui.OpenTab(key)
+    ui.OpenWindow()
+    ui.SelectSubTab(key)
+end
+
+-- Show or hide the button to match the setting. Built lazily, so a player who
+-- has it switched off never pays for the frame at all.
+function ui.RefreshMinimapButton()
+    local want = db.Setting("minimapIcon") and true or false
+    if want and not ui.minimapButton then
+        ui.BuildMinimapButton()
+        return
+    end
+    local b = ui.minimapButton
+    if not b then return end
+    if want then b:Show() else b:Hide() end
+end
+
+-- ---------------------------------------------------------------------------
 -- Slash command
 -- ---------------------------------------------------------------------------
 
@@ -4094,6 +4298,9 @@ A.OnLoad(function()
     -- MailFrame exists at this point (plain FrameXML), so the hooks can go on
     -- immediately rather than waiting for the first mailbox.
     ui.HookMailFrame()
+    -- Built at load, not at the first mailbox: the whole point of it is to
+    -- reach the window when there is no mailbox in sight.
+    ui.RefreshMinimapButton()
 
     SLASH_AEGISCOURIER1 = "/courier"
     SLASH_AEGISCOURIER2 = "/acr"

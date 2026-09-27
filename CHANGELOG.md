@@ -9,6 +9,47 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.9]
+
+A minimap button. `/reload`.
+
+### Added
+- **A minimap button**, so the window is reachable without walking to a
+  mailbox. Everything on the Sent, Log, Ledger and Courier tabs is worth
+  looking at nowhere near one — what did I mail my bank alt, what did that
+  sell for, turn the skin off — and until now the only way in was `/courier`,
+  which is not a door most people find.
+  - **Click** for the window, on whichever tab you left it on.
+  - **Right-click** straight to **Sent** mail.
+  - **Shift-click** straight to **settings**.
+  - **Drag** it anywhere around the minimap; the position is remembered per
+    character, because which side is free depends on what else that character
+    is running.
+  - A click that asks for a tab **opens** — it does not toggle the window shut
+    because it happened to be open already.
+- **"Show minimap button"** in the Courier tab, on by default. A button you
+  have to know to switch on is one nobody finds; a player who already has a
+  ring of them has every right to refuse another.
+
+### Fixed
+- **The Send button could be pressed away from a mailbox.** Everything else was
+  already gated — Open All, Take Sold and Delete Read all grey out with no
+  mailbox in sight — but a complete letter could be sent into nothing, and it
+  failed silently, which is the worst way for it to fail. The form now says
+  "not at a mailbox" and the button is dead.
+  - This was reachable before this release, since `/courier` opens the window
+    anywhere. A minimap button makes it a normal path rather than a corner.
+  - **Queuing attachments away from a mailbox still works** and is meant to:
+    only the send itself needs a live session.
+
+### Notes
+- Away from a mailbox the Inbox reads empty, because the client genuinely has
+  nothing to read — there is no session to ask. The button's tooltip says which
+  tabs are inert rather than leaving it to be found by a dead button.
+- The icon is a 64x64 32-bit TGA in `media/`, the same format as the resize
+  grip that has shipped since 1.6.0. A texture is not a `.toc` line, so this
+  costs no client restart.
+
 ## [1.9.8]
 
 Housekeeping pass. `/reload`.

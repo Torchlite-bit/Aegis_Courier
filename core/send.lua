@@ -405,6 +405,17 @@ end
 -- Can this be sent? Returns (ok, reasonText).
 function send.Validate(to, money, isCOD, subject, body)
     if send.sending then return false, "already sending" end
+    -- THERE HAS TO BE A LIVE MAIL SESSION. The send API is engine-level and
+    -- works with MailFrame hidden (rule 25), but "hidden" is not "absent": with
+    -- no session open SendMail has nowhere to post and fails silently, which is
+    -- the worst way for it to fail.
+    --
+    -- This was reachable before the minimap icon -- /courier opens the window
+    -- anywhere -- and is a normal path now that a button does. The check lives
+    -- HERE rather than in the UI because ui.RefreshSend asks this same function
+    -- whether the Send button may be pressed, so one guard answers both and
+    -- they cannot disagree.
+    if not send.atMailbox then return false, "not at a mailbox" end
     if type(to) ~= "string" or util.Trim(to) == "" then
         return false, "no recipient"
     end
