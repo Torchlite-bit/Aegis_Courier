@@ -3111,8 +3111,14 @@ if f then
     check(byte(17) == 32, "32-bit, so it has an alpha channel", byte(17))
     local w = byte(13) + byte(14) * 256
     local h = byte(15) + byte(16) * 256
-    check(w == 64 and h == 64, "64x64 -- a power of two, which 1.12 requires",
-          w .. "x" .. h)
+    -- A power of two, which 1.12 requires -- and deliberately CLOSE to the
+    -- 20px the button draws it at. A .tga carries no mipmaps (only .blp
+    -- does), so the client minifies a single image straight down to display
+    -- size, and the further that has to travel the more it shimmers. 64x64
+    -- was three times over and read as noise.
+    local function pow2(n) return n > 0 and math.mod(n, 2) == 0 end
+    check(pow2(w) and w == h, "square and a power of two", w .. "x" .. h)
+    check(w <= 64, "and not far above the size it is drawn at", w)
 end
 
 print("== minimap: the angle is remembered ==")

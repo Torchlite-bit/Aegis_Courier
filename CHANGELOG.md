@@ -46,9 +46,18 @@ A minimap button. `/reload`.
 - Away from a mailbox the Inbox reads empty, because the client genuinely has
   nothing to read — there is no session to ask. The button's tooltip says which
   tabs are inert rather than leaving it to be found by a dead button.
-- The icon is a 64x64 32-bit TGA in `media/`, the same format as the resize
+- The icon is a 32x32 32-bit TGA in `media/`, the same format as the resize
   grip that has shipped since 1.6.0. A texture is not a `.toc` line, so this
   costs no client restart.
+  - **It is cropped to the shield and wings rather than the whole logo.** The
+    button draws it at twenty pixels, and a rune ring, an inner ring, a shield,
+    wings, an envelope and the word AEGIS do not fit in twenty pixels — the
+    rings and the lettering turn to noise and crowd out the part you would
+    actually recognise. The minimap border draws its own ring anyway.
+  - **And it is 32px, not 64.** A `.tga` carries no mipmaps, where a `.blp`
+    does, so the client minifies one image straight down to display size and
+    the further that has to travel the more it shimmers. `media/make-minimap-icon.py`
+    regenerates it from the source art if you want a different crop.
 
 ## [1.9.8]
 
