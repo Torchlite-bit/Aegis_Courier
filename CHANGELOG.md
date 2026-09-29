@@ -9,6 +9,41 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.10]
+
+Two bag addons at the mailbox, and bigger text. `/reload`.
+
+### Added
+- **"Close bags when the mailbox opens"** in the Courier tab, **off by
+  default**. For anyone running two bag addons and getting two bag windows
+  every time they walk up to a mailbox.
+  - **Courier does not open your bags. It never has — there is not one bag
+    call anywhere in it.** What opens one is the client: vanilla's own mail
+    code runs `OpenBackpack()` the moment a mailbox opens. Every bag
+    replacement hooks that, so with two installed both answer the same call
+    and you get both windows.
+  - Which means Courier **cannot** pick one over the other — that is between
+    those two addons, and reaching into one to disable half of it is how you
+    break it silently later. What Courier can do is decline the backpack that
+    was opened on behalf of a window Courier replaced, which is what this
+    setting does. Open whichever bag addon you prefer with your own key.
+  - It works with the takeover switched off too.
+- **A text size control**, next to window scale in the Courier tab: 100% to
+  140%, per character, applied live.
+  - Scale and text size answer different questions and that is why they are
+    two controls. Scale makes the same window bigger; this makes the text
+    bigger in the window you already have.
+  - Rows are a fixed height, so at the largest sizes a very long subject may
+    crop sooner than it used to. The hint under the control says so.
+
+### Notes
+- If you were given a snippet to paste into `core/init.lua` that registers
+  `MAIL_SHOW` and calls `CloseAllBags()` behind an `IsAnyBagOpen()` check:
+  **`IsAnyBagOpen` does not exist on this client.** The guard is never true,
+  so that block never closed anything — whatever stopped the double window was
+  something else, most likely the reload itself. Delete it and use the setting
+  instead; it is one function call in a file the next update will overwrite.
+
 ## [1.9.9]
 
 A minimap button. `/reload`.

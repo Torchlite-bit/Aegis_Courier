@@ -65,6 +65,16 @@ local SETTING_DEFAULTS = {
     -- a log you have to know to switch on is one you never have when you want
     -- it. (TurtleMail defaults its log off.)
     logEnabled   = true,
+    -- Close the bags a moment after the mailbox opens.
+    --
+    -- OFF by default, because it changes behaviour the client has always had
+    -- and most players want their bags there to drag from. It exists for the
+    -- ones running two bag addons: 1.12's own MailFrame_OnEvent calls
+    -- OpenBackpack() on MAIL_SHOW, every bag replacement hooks that, and two
+    -- of them both answering is two bag windows in your face. Courier cannot
+    -- pick between them -- it never opens a bag itself -- but it can decline
+    -- the one Blizzard opened on behalf of a window Courier replaced.
+    closeBagsAtMailbox = false,
     -- Show the minimap button. On by default -- a button you have to know to
     -- switch on is one nobody finds -- but switchable, because a player with a
     -- ring of them already has every right to refuse another.
@@ -690,6 +700,24 @@ function db.SaveWindowScale(v)
     if not db.char then return end
     if not db.char.ui then db.char.ui = {} end
     db.char.ui.scale = v
+end
+
+-- Text size, as a multiplier on whatever font object each string was born
+-- with. Per character, like the window's scale and size.
+--
+-- SEPARATE FROM WINDOW SCALE, and they answer different questions: scale makes
+-- the same window bigger, text size makes the TEXT bigger in the window you
+-- already have. Someone who wants to read the subject line without a 140%
+-- window has no other way to ask for it.
+function db.SaveFontScale(v)
+    if not db.char then return end
+    if not db.char.ui then db.char.ui = {} end
+    db.char.ui.fontScale = v
+end
+
+function db.GetFontScale()
+    local u = db.char and db.char.ui
+    return u and u.fontScale or nil
 end
 
 function db.GetWindowScale()

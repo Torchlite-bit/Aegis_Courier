@@ -502,12 +502,88 @@ function ui.SetTabChain(boxes)
     end
 end
 
+-- ---------------------------------------------------------------------------
+-- Text size
+-- ---------------------------------------------------------------------------
+--
+-- Courier draws almost everything in GameFontNormalSmall, which is small --
+-- reported, fairly, as hard to read. The window already scales, but scale and
+-- TEXT SIZE answer different questions: scale makes the same window bigger,
+-- this makes the text bigger in the window you already have.
+--
+-- Every string Courier creates is registered here with the font object it was
+-- BORN with, and the scale is applied against that rather than against
+-- whatever it currently has. Scaling the current size compounds: press plus
+-- five times and the fifth press is multiplying an already-multiplied number,
+-- so the steps get further apart and going back to 100% never quite gets you
+-- back. Re-deriving from the birth font every time makes every scale exact and
+-- reversible.
+local FONT_MIN, FONT_MAX, FONT_STEP = 1.0, 1.4, 0.1
+
+ui.fontStrings = {}
+
+-- `obj` is anything with SetFont: a FontString, or an EditBox.
+function ui.RegisterFont(obj, template)
+    if not obj then return obj end
+    table.insert(ui.fontStrings,
+        { obj = obj, template = template or "GameFontNormalSmall" })
+    ui.ApplyFontTo(obj, template)
+    return obj
+end
+
+function ui.FontScale()
+    local v = db.GetFontScale() or FONT_MIN
+    if v < FONT_MIN then v = FONT_MIN end
+    if v > FONT_MAX then v = FONT_MAX end
+    return v
+end
+
+function ui.ApplyFontTo(obj, template)
+    local scale = ui.FontScale()
+    if scale == FONT_MIN then return end
+    local base = getglobal(template or "GameFontNormalSmall")
+    if not base or not base.GetFont then return end
+    local path, size, flags = base:GetFont()
+    -- A font object with no font yet is not an error -- it is a client that
+    -- has not resolved it. Leave the string alone rather than blanking it.
+    if not path or not size then return end
+    if obj.SetFont then obj:SetFont(path, size * scale, flags) end
+end
+
+function ui.ApplyFontScale()
+    local n = table.getn(ui.fontStrings)
+    local i = 1
+    while i <= n do
+        local e = ui.fontStrings[i]
+        if e and e.obj then
+            -- Back to the birth font first, so the scale below is applied to
+            -- the original size and not to the last one we set.
+            if e.obj.SetFontObject then e.obj:SetFontObject(e.template) end
+            ui.ApplyFontTo(e.obj, e.template)
+        end
+        i = i + 1
+    end
+    -- Clipped text is measured with GetStringWidth, so every truncation in
+    -- every list has to be recomputed against the new metrics.
+    ui.Refresh()
+end
+
+function ui.SetFontScale(v)
+    if v < FONT_MIN then v = FONT_MIN end
+    if v > FONT_MAX then v = FONT_MAX end
+    db.SaveFontScale(v)
+    ui.ApplyFontScale()
+    return v
+end
+
+function ui.FontScaleBounds() return FONT_MIN, FONT_MAX, FONT_STEP end
+
 local function Label(parent, template, color)
-    local fs = parent:CreateFontString(nil, "OVERLAY",
-        template or "GameFontNormalSmall")
+    template = template or "GameFontNormalSmall"
+    local fs = parent:CreateFontString(nil, "OVERLAY", template)
     local c = color or C.text
     fs:SetTextColor(c[1], c[2], c[3])
-    return fs
+    return ui.RegisterFont(fs, template)
 end
 
 -- ---------------------------------------------------------------------------
@@ -742,7 +818,8 @@ function ui.MakeButton(parent, kind, name)
     -- frame with the same font. SetButtonKind only ever changes colours, so
     -- the font a button is born with is the font it keeps.
     b.courierFont = (BTN_KIND[b.courierKind] or BTN_KIND.quiet).font
-    local fs = b:CreateFontString(nil, "OVERLAY", b.courierFont)
+    local fs = ui.RegisterFont(
+        b:CreateFontString(nil, "OVERLAY", b.courierFont), b.courierFont)
     fs:SetPoint("CENTER", b, "CENTER", 0, 0)
     b.label = fs
 
@@ -2051,6 +2128,8 @@ local function MakeMoneyGSC(name, parent, onChange)
         e:SetNumeric(true)
         e:SetJustifyH("RIGHT")
         e:SetFontObject("GameFontHighlightSmall")
+        ui.RegisterFont(e, "GameFontHighlightSmall")
+        ui.RegisterFont(e, "GameFontHighlightSmall")
         e:SetScript("OnEnterPressed", function() e:ClearFocus() end)
         e:SetScript("OnEscapePressed", function() e:ClearFocus() end)
         e:SetScript("OnTextChanged", function()
@@ -2122,6 +2201,7 @@ local function MakeEditBox(name, parent, width, multiline)
     e:SetHeight(multiline and 96 or 18)
     e:SetAutoFocus(false)      -- otherwise opening the tab steals the keyboard
     e:SetFontObject("GameFontHighlightSmall")
+    ui.RegisterFont(e, "GameFontHighlightSmall")
     if multiline then
         e:SetMultiLine(true)
         e:SetMaxLetters(500)
@@ -3691,12 +3771,61 @@ function ui.BuildCourierPanel()
     scaleHint:SetText("Scale resizes the whole window; drag the corner to " ..
         "show more mail at once.")
 
+    -- ---- text size ------------------------------------------------------
+    -- Its own control, next to scale and not folded into it, because the two
+    -- answer different questions: scale makes the same window bigger, this
+    -- makes the text bigger in the window you already have.
+    local fontLbl = Label(panel, "GameFontNormal", C.gold)
+    fontLbl:SetPoint("TOPLEFT", scaleHint, "BOTTOMLEFT", 0, -12)
+    fontLbl:SetText("Text size")
+
+    local _, _, FONT_UI_STEP = ui.FontScaleBounds()
+
+    local fontDown = ui.MakeButton(panel, "quiet", "AegisCourierFontDown")
+    fontDown:SetWidth(24)
+    fontDown:SetHeight(20)
+    fontDown:SetPoint("LEFT", fontLbl, "RIGHT", 12, 0)
+    fontDown:SetText("-")
+    fontDown:SetScript("OnClick", function()
+        ui.SetFontScale(ui.FontScale() - FONT_UI_STEP)
+    end)
+    ui.btnFontDown = fontDown
+
+    local fontText = Label(panel, "GameFontHighlightSmall", C.text)
+    fontText:SetPoint("LEFT", fontDown, "RIGHT", 8, 0)
+    fontText:SetWidth(44)
+    fontText:SetJustifyH("CENTER")
+    ui.fontText = fontText
+
+    local fontUp = ui.MakeButton(panel, "quiet", "AegisCourierFontUp")
+    fontUp:SetWidth(24)
+    fontUp:SetHeight(20)
+    fontUp:SetPoint("LEFT", fontText, "RIGHT", 8, 0)
+    fontUp:SetText("+")
+    fontUp:SetScript("OnClick", function()
+        ui.SetFontScale(ui.FontScale() + FONT_UI_STEP)
+    end)
+    ui.btnFontUp = fontUp
+
+    local fontReset = ui.MakeButton(panel, "quiet", "AegisCourierFontReset")
+    fontReset:SetWidth(56)
+    fontReset:SetHeight(20)
+    fontReset:SetPoint("LEFT", fontUp, "RIGHT", 10, 0)
+    fontReset:SetText("Reset")
+    fontReset:SetScript("OnClick", function() ui.SetFontScale(1.0) end)
+    ui.btnFontReset = fontReset
+
+    local fontHint = Label(panel, "GameFontNormalSmall", C.dim)
+    fontHint:SetPoint("TOPLEFT", fontLbl, "BOTTOMLEFT", 0, -6)
+    fontHint:SetText("Larger text in the same window. Rows are a fixed " ..
+        "height, so very large text may crop a long subject.")
+
     -- A rule between the two groups. Without it -- and with the Integration
     -- heading previously anchored to `push` rather than to the last checkbox --
     -- the heading was drawn straight on top of the log option.
     local minimapCheck = MakeCheck(panel, "Minimap", "Show minimap button",
         "minimapIcon", function() ui.RefreshMinimapButton() end)
-    minimapCheck:SetPoint("TOPLEFT", scaleHint, "BOTTOMLEFT", -4, -10)
+    minimapCheck:SetPoint("TOPLEFT", fontHint, "BOTTOMLEFT", -4, -10)
     ui.checkMinimap = minimapCheck
 
     local minimapHint = Label(panel, "GameFontNormalSmall", C.dim)
@@ -3704,9 +3833,19 @@ function ui.BuildCourierPanel()
     minimapHint:SetText("Click it for the window, right-click for Sent mail, " ..
         "shift-click for these settings.")
 
+    local bagsCheck = MakeCheck(panel, "CloseBags",
+        "Close bags when the mailbox opens", "closeBagsAtMailbox")
+    bagsCheck:SetPoint("TOPLEFT", minimapHint, "BOTTOMLEFT", -26, -10)
+    ui.checkCloseBags = bagsCheck
+
+    local bagsHint = Label(panel, "GameFontNormalSmall", C.dim)
+    bagsHint:SetPoint("TOPLEFT", bagsCheck, "BOTTOMLEFT", 26, 0)
+    bagsHint:SetText("The client opens your backpack at a mailbox, and two " ..
+        "bag addons will both answer it. Courier opens none of them.")
+
     local divider = panel:CreateTexture(nil, "ARTWORK")
     divider:SetHeight(1)
-    divider:SetPoint("TOPLEFT", minimapHint, "BOTTOMLEFT", -26, -14)
+    divider:SetPoint("TOPLEFT", bagsHint, "BOTTOMLEFT", -26, -14)
     divider:SetPoint("RIGHT", panel, "RIGHT", -8, 0)
     divider:SetTexture(C.goldDim[1], C.goldDim[2], C.goldDim[3], 0.35)
 
@@ -3787,6 +3926,13 @@ function ui.RefreshCourier()
     ui.checkAutoRead:SetChecked(db.Setting("autoReadBody") and true or false)
     if ui.checkMinimap then
         ui.checkMinimap:SetChecked(db.Setting("minimapIcon") and true or false)
+    end
+    if ui.checkCloseBags then
+        ui.checkCloseBags:SetChecked(
+            db.Setting("closeBagsAtMailbox") and true or false)
+    end
+    if ui.fontText then
+        ui.fontText:SetText(math.floor(ui.FontScale() * 100 + 0.5) .. "%")
     end
 
     if ui.scaleText then
@@ -3895,9 +4041,52 @@ hider:SetScript("OnUpdate", function()
     if ui.TakeoverActive() and MailFrame and MailFrame:IsVisible() then
         ui.HideBlizzardMail()
     end
+    -- Same tick, same reason: whatever else wanted to happen on MAIL_SHOW has
+    -- happened by now. See ui.CloseBagsAtMailbox.
+    if ui.closeBagsQueued then
+        ui.closeBagsQueued = false
+        ui.CloseBagsAtMailbox()
+    end
 end)
 
 function ui.QueueHideBlizzard()
+    hider:Show()
+end
+
+-- COURIER NEVER OPENS A BAG. Not one call, anywhere in the addon -- which is
+-- worth stating plainly, because "Courier opens two bag windows" is how this
+-- arrives as a bug report and the premise is wrong.
+--
+-- What opens one is the CLIENT. 1.12's MailFrame_OnEvent, MAIL_SHOW branch,
+-- verbatim: ShowUIPanel, the IsVisible guard, a GuildRoster() top-up, then
+--
+--     OpenBackpack();
+--
+-- Every bag replacement hooks or replaces that path, so with two of them
+-- installed both answer the same call and the player gets two bag windows.
+-- That is between those two addons; Courier cannot choose for them and must
+-- not try -- reaching into another addon to disable half of it is how you
+-- break it silently three releases later.
+--
+-- What Courier CAN do is decline. It replaced the window that backpack was
+-- opened for, so offering to close it again is squarely its business. This is
+-- the whole feature: one deferred CloseAllBags, behind a setting, off by
+-- default.
+--
+-- DEFERRED, because handler order between FrameXML and an addon is not a
+-- promise. Closing inline can run before OpenBackpack() and be undone by it;
+-- a tick later everything that wanted to open has opened.
+function ui.CloseBagsAtMailbox()
+    if not db.Setting("closeBagsAtMailbox") then return end
+    if not ui.mailOpen then return end
+    if CloseAllBags then CloseAllBags() end
+end
+
+-- Called from the MAIL_SHOW handler. Shows the same one-shot frame the
+-- takeover hide uses, so this works with the takeover switched off too.
+function ui.QueueCloseBags()
+    if not db.Setting("closeBagsAtMailbox") then return end
+    ui.closeBagsQueued = true
     hider:Show()
 end
 
@@ -4039,6 +4228,10 @@ A.RegisterEvent("MAIL_SHOW", function()
     A.inbox.lastUnread = nil
     -- Harvest contacts once per visit rather than per inbox update.
     if A.send and A.send.HarvestContacts then A.send.HarvestContacts() end
+    -- BEFORE the takeover early-return below: a player who has turned the
+    -- takeover off still has two bag addons fighting over the client's
+    -- OpenBackpack(), and is arguably the one who needs this most.
+    ui.QueueCloseBags()
     if not ui.TakeoverActive() then return end
     -- Queue rather than hide inline. Our own MAIL_SHOW handler runs after the
     -- client's IsVisible guard so a synchronous hide would in fact be safe

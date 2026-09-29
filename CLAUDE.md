@@ -559,9 +559,49 @@ section, which is Courier's equivalent hazard surface.
       - **Keep the generator in the repo.** An icon nobody can rebuild is an
         icon nobody can adjust; see `media/make-minimap-icon.py`.
 
+31. **COURIER OPENS NO BAGS — the client does.** 1.12's `MailFrame_OnEvent`
+    MAIL_SHOW branch is, verbatim after the `IsVisible` guard:
+    ```
+    if ( IsInGuild() and GetNumGuildMembers() == 0 ) then GuildRoster(); end
+    OpenBackpack();
+    SendMailFrame_Update();
+    MailFrameTab_OnClick(1);
+    CheckInbox();
+    ```
+    So "Courier opens two bag windows" arrives as a bug report with a false
+    premise: there is not one bag API call anywhere in this addon. Two bag
+    replacements both hooking `OpenBackpack` is two windows, and that is
+    between **them** — Courier cannot choose one and must not try, the same
+    rule as never reaching into Aegis: Exchange.
+    - What Courier legitimately owns is **declining**: it replaced the window
+      that backpack was opened for. `closeBagsAtMailbox`, **off by default**
+      because it changes behaviour the client has always had, fires ONE
+      `CloseAllBags()` **a tick after** MAIL_SHOW — inline would run before
+      `OpenBackpack()` and be undone by it.
+    - Queue it **before** the takeover early-return: a player with the
+      takeover off has the same two-bag problem.
+    - Note that branch also calls `GuildRoster()` itself, which is a second
+      reason rule 27's request is cheap — the client was going to ask anyway.
+32. **`GameFontNormalSmall` is small, and the window's SCALE is not the answer
+    to that.** Scale makes the same window bigger; text size makes the text
+    bigger in the window you already have. They are separate controls
+    (`db.GetFontScale`, per character) for separate questions.
+    - **Scale against the font each string was BORN with, never against what
+      it currently has.** Register every string with its font object
+      (`ui.RegisterFont`, which `Label`, `ui.MakeButton` and `MakeEditBox` all
+      funnel through) and re-derive on every change: compounding makes the
+      steps drift apart and 100% never comes back exactly.
+    - `fs:SetFont(path, size, flags)` needs the path and flags from the font
+      OBJECT's `GetFont()`; a nil path means the client has not resolved it,
+      which is not an error — leave the string alone rather than blanking it.
+    - Re-`ui.Refresh()` afterwards: every truncation is measured with
+      `GetStringWidth`, so all of them have to be recomputed.
+    - A mock whose `SetFont`/`SetFontObject` fall through to a no-op cannot
+      tell a working setting from one that changes nothing.
+
 ### SavedVariables
 
-31. **SavedVariables are `nil` until `ADDON_LOADED` fires for
+33. **SavedVariables are `nil` until `ADDON_LOADED` fires for
     `"Aegis_Courier"`.** Do all DB setup from the ADDON_LOADED path (queue via
     `AegisCourier.OnLoad(fn)`), never at file scope.
     - `CourierDB` — account-wide (declared `## SavedVariables`).
@@ -569,9 +609,9 @@ section, which is Courier's equivalent hazard surface.
 
 ### Frames & globals
 
-32. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
+34. Use **`getglobal()` / `setglobal()`** for dynamic frame names (e.g.
     building `"MailItem" .. n .. "Button"`).
-33. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
+35. Build frames with **`CreateFrame`** using **vanilla templates only**, e.g.
     `UIPanelButtonTemplate`, `FauxScrollFrameTemplate`, `GameTooltipTemplate`.
     - **`FauxScrollFrame_OnVerticalScroll(itemHeight, updateFn)` — 2 args on
       1.12.** The frame and scroll offset are the implicit globals `this` /
@@ -791,6 +831,13 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       `/courier` and from the minimap button.
 - [ ] A minimap or icon button set `courierNoSkin`, reads its mouse button from
       `arg1`, and divides `GetCursorPosition()` by the effective UI scale.
+- [ ] Nothing in the addon opens a bag. The backpack at a mailbox is the
+      CLIENT's `OpenBackpack()`; Courier may decline it behind
+      `closeBagsAtMailbox` (deferred a tick, queued before the takeover
+      early-return) and may never pick between two bag addons.
+- [ ] Text size scales against the font each string was BORN with, via
+      `ui.RegisterFont`; every new creation path registers, or it silently
+      stays small.
 - [ ] Tab in the recipient box accepts the suggestion when there is one and
       still walks to Subject when there is not, the override is installed after
       `ui.SetTabChain`, and what it fills is read off the rendered row.
