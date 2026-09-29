@@ -54,6 +54,30 @@ local function newRegion()
     end
     function r:SetText(t) rawset(self, "text", t) end
     function r:GetText() return rawget(self, "text") end
+    -- REAL fonts. SetFont and SetFontObject both fell through to the
+    -- CamelCase no-op, so "is this string actually bigger" -- the entire
+    -- question a text-size setting exists to answer -- was unanswerable, and a
+    -- setting that changed nothing at all would have passed.
+    function r:SetFont(path, size, flags)
+        rawset(self, "font", { path = path, size = size, flags = flags })
+    end
+    function r:GetFont()
+        local f = rawget(self, "font")
+        if not f then return nil end
+        return f.path, f.size, f.flags
+    end
+    function r:SetFontObject(t)
+        rawset(self, "fontObject", t)
+        -- The client resolves the object's font onto the string; without this
+        -- a reset-to-birth-font would leave the old size in place and the
+        -- compounding bug would be invisible.
+        local o = type(t) == "string" and _G[t] or t
+        if type(o) == "table" and o.GetFont then
+            local path, size, flags = o:GetFont()
+            rawset(self, "font", { path = path, size = size, flags = flags })
+        end
+    end
+    function r:GetFontObject() return rawget(self, "fontObject") end
     -- REAL size on regions too, not just on frames. A texture's dimensions are
     -- the whole question for anything that has to FILL its parent -- an icon
     -- sized to 20 inside a 32px button looks nothing like one sized to 30, and
@@ -111,6 +135,26 @@ CreateFrame = function(kind, name, parent, template)
     function f:IsMouseEnabled() return rawget(self, "mouseEnabled") end
     function f:GetChecked() return self.checked end
     function f:SetChecked(v) self.checked = v and true or false end
+    -- Fonts, same as on regions: an EditBox is a FRAME, so a text-size setting
+    -- that reaches labels but not input boxes would look right in every test
+    -- that only measured a label.
+    function f:SetFont(path, size, flags)
+        rawset(self, "font", { path = path, size = size, flags = flags })
+    end
+    function f:GetFont()
+        local ft = rawget(self, "font")
+        if not ft then return nil end
+        return ft.path, ft.size, ft.flags
+    end
+    function f:SetFontObject(t)
+        rawset(self, "fontObject", t)
+        local o = type(t) == "string" and _G[t] or t
+        if type(o) == "table" and o.GetFont then
+            local path, size, flags = o:GetFont()
+            rawset(self, "font", { path = path, size = size, flags = flags })
+        end
+    end
+    function f:GetFontObject() return rawget(self, "fontObject") end
     -- EditBoxes are frames, so text lives here too, not only on regions.
     -- rawget throughout: see the note above newRegion.
     --
@@ -229,6 +273,32 @@ setglobal = function(n, v) _G[n] = v end
 
 UIParent = CreateFrame("Frame", "UIParent")
 UISpecialFrames = {}
+
+-- ---- font objects ----------------------------------------------------------
+-- The real ones are FontStrings the client creates from FontFamily XML. All
+-- that matters here is that GetFont answers a path, a SIZE and flags, because
+-- the text-size setting scales that size.
+local function FontObject(name, size)
+    local o = { name = name }
+    function o:GetFont() return "Fonts\\FRIZQT__.TTF", size, "" end
+    _G[name] = o
+    return o
+end
+FontObject("GameFontNormalSmall", 10)
+FontObject("GameFontHighlightSmall", 10)
+FontObject("GameFontNormal", 12)
+FontObject("GameFontNormalLarge", 16)
+
+-- ---- bags ------------------------------------------------------------------
+-- Courier opens NO bags. What opens one is the client: 1.12's
+-- MailFrame_OnEvent calls OpenBackpack() in its MAIL_SHOW branch. Modelled so
+-- a test can play that part -- without it there is no bag to close and the
+-- setting tests nothing.
+bagsOpen = 0
+OpenBackpack = function() bagsOpen = bagsOpen + 1 end
+OpenAllBags = function() bagsOpen = bagsOpen + 1 end
+CloseAllBags = function() bagsOpen = 0 end
+IsBagOpen = function() return bagsOpen > 0 and 1 or nil end
 
 -- ---- minimap ---------------------------------------------------------------
 -- The minimap button is placed by an ANGLE around the ring, and dragged by
@@ -3341,6 +3411,176 @@ check(A.ui.minimapButton and A.ui.minimapButton:IsVisible(),
       "the button returns")
 
 A.ui.CloseWindow()
+
+end
+
+do
+print("== bags: Courier opens none, and can close the one the client opens ==")
+-- THE PREMISE OF THE BUG REPORT IS WRONG AND THAT IS THE POINT. Courier has
+-- no bag API call anywhere. The backpack at a mailbox is 1.12's own
+-- MailFrame_OnEvent, MAIL_SHOW branch, calling OpenBackpack() -- and two bag
+-- addons both hooking that is two bag windows, which is between them.
+-- The DEFAULT first, before anything in this block touches it: off, because it
+-- changes behaviour the client has always had and most players want their bags
+-- there to drag from. Asserted here rather than after the first SetSetting,
+-- which would only ever prove that SetSetting works.
+check(A.db.Setting("closeBagsAtMailbox") == false,
+      "the option is OFF by default",
+      tostring(A.db.Setting("closeBagsAtMailbox")))
+
+A.ui.mailOpen = false
+A.db.SetSetting("closeBagsAtMailbox", false)
+bagsOpen = 0
+fire("MAIL_SHOW")
+hider.scripts.OnUpdate()
+check(bagsOpen == 0, "Courier opened no bag of its own", bagsOpen)
+
+-- Now play the client's part: this is the call Courier does not make.
+OpenBackpack()
+check(bagsOpen == 1, "the CLIENT is what opens one")
+hider.scripts.OnUpdate()
+check(bagsOpen == 1, "and with the setting off Courier leaves it alone")
+fire("MAIL_CLOSED")
+
+-- With the setting on, Courier declines the backpack the client opened on
+-- behalf of the window Courier replaced.
+A.db.SetSetting("closeBagsAtMailbox", true)
+bagsOpen = 0
+fire("MAIL_SHOW")
+OpenBackpack()          -- the client, during the same event
+OpenBackpack()          -- and a second bag addon answering the same call
+check(bagsOpen == 2, "two bag addons, two windows", bagsOpen)
+hider.scripts.OnUpdate()
+check(bagsOpen == 0, "one deferred close takes care of both", bagsOpen)
+
+-- DEFERRED, not inline: closing during MAIL_SHOW would run before the client's
+-- own handler and simply be undone by it. Nothing may have closed until the
+-- tick after.
+A.db.SetSetting("closeBagsAtMailbox", true)
+bagsOpen = 0
+fire("MAIL_CLOSED")
+fire("MAIL_SHOW")
+check(bagsOpen == 0, "nothing open yet")
+OpenBackpack()
+check(bagsOpen == 1, "the client opens one after our handler ran")
+check(A.ui.closeBagsQueued == true, "and the close is still only QUEUED")
+hider.scripts.OnUpdate()
+check(bagsOpen == 0, "the tick after is what closes it")
+
+-- It must work with the takeover OFF too: a player running two bag addons has
+-- the same problem whether or not they let Courier replace the mail window.
+fire("MAIL_CLOSED")
+A.db.SetSetting("takeover", false)
+bagsOpen = 0
+fire("MAIL_SHOW")
+OpenBackpack()
+hider.scripts.OnUpdate()
+check(bagsOpen == 0, "and it still closes with the takeover switched off")
+A.db.SetSetting("takeover", true)
+fire("MAIL_CLOSED")
+A.db.SetSetting("closeBagsAtMailbox", false)
+
+-- And it never fires away from a mailbox: the player's bags are their own
+-- business everywhere else in the game.
+A.db.SetSetting("closeBagsAtMailbox", true)
+A.ui.mailOpen = false
+bagsOpen = 3
+A.ui.CloseBagsAtMailbox()
+check(bagsOpen == 3, "bags away from a mailbox are left alone", bagsOpen)
+
+-- The setting is checked in TWO places -- once before queueing and once before
+-- closing -- so neither can be proved through the queue alone. Called directly,
+-- at a mailbox, with the setting off: the guard inside is the only thing that
+-- can stop this.
+A.db.SetSetting("closeBagsAtMailbox", false)
+A.ui.mailOpen = true
+bagsOpen = 3
+A.ui.CloseBagsAtMailbox()
+check(bagsOpen == 3,
+      "and refuses on its own account when the setting is off", bagsOpen)
+A.ui.mailOpen = false
+
+print("== settings: the bag option is in the Courier tab ==")
+A.ui.mailOpen = true
+A.ui.OpenWindow()
+A.ui.SelectSubTab("Courier")
+check(A.ui.checkCloseBags ~= nil, "there is a checkbox for it")
+check(not A.ui.checkCloseBags:GetChecked(),
+      "off by default -- it changes behaviour the client has always had")
+A.ui.checkCloseBags:SetChecked(true)
+A.ui.checkCloseBags.scripts.OnClick()
+check(A.db.Setting("closeBagsAtMailbox"), "clicking it stores the setting")
+A.ui.checkCloseBags:SetChecked(false)
+A.ui.checkCloseBags.scripts.OnClick()
+check(not A.db.Setting("closeBagsAtMailbox"), "and back off")
+
+print("== text size: the setting actually changes the font ==")
+-- A font string is registered with the object it was BORN with, and the scale
+-- is applied against that -- see ui.ApplyFontScale.
+local sample = A.ui.inboxSummary
+check(sample ~= nil, "a string to measure")
+A.ui.SetFontScale(1.0)
+local _, base = sample:GetFont()
+check(base ~= nil, "it has a font at 100%", tostring(base))
+
+A.ui.SetFontScale(1.2)
+local _, bigger = sample:GetFont()
+-- Guarded rather than compared straight: if the scale never applies at all
+-- these come back nil, and that should read as the check it failed rather than
+-- as an error on the comparison.
+check(base and bigger and bigger > base, "at 120% it is bigger",
+      tostring(base) .. " -> " .. tostring(bigger))
+check(base and bigger and math.abs(bigger - base * 1.2) < 0.001,
+      "and by exactly the scale asked for", tostring(bigger))
+
+-- THE COMPOUNDING TRAP. Scaling whatever size the string currently has means
+-- the fifth press multiplies an already-multiplied number: the steps drift
+-- apart and 100% never comes back. Re-deriving from the birth font makes
+-- every scale exact whatever route you took to it.
+A.ui.SetFontScale(1.1)
+A.ui.SetFontScale(1.2)
+A.ui.SetFontScale(1.3)
+A.ui.SetFontScale(1.2)
+local _, afterWandering = sample:GetFont()
+check(afterWandering and bigger and math.abs(afterWandering - bigger) < 0.001,
+      "120% is 120% however many steps you took to get there",
+      tostring(bigger) .. " vs " .. tostring(afterWandering))
+A.ui.SetFontScale(1.0)
+local _, backTo100 = sample:GetFont()
+check(backTo100 and base and math.abs(backTo100 - base) < 0.001,
+      "and 100% is exactly where it started",
+      tostring(base) .. " vs " .. tostring(backTo100))
+
+print("== text size: bounds, persistence and the buttons ==")
+local fmin, fmax = A.ui.FontScaleBounds()
+A.ui.SetFontScale(fmax + 5)
+check(A.ui.FontScale() == fmax, "it cannot go past the maximum", A.ui.FontScale())
+A.ui.SetFontScale(fmin - 5)
+check(A.ui.FontScale() == fmin, "nor below the minimum", A.ui.FontScale())
+check(A.db.GetFontScale() == fmin, "and the choice is saved per character")
+
+A.ui.SelectSubTab("Courier")
+check(A.ui.btnFontUp ~= nil and A.ui.btnFontDown ~= nil,
+      "the Courier tab has the text-size buttons")
+check(Click(A.ui.btnFontUp), "plus is clickable")
+check(A.ui.FontScale() > fmin, "and makes the text bigger", A.ui.FontScale())
+check(A.util.Contains(rawget(A.ui.fontText, "text") or "", "%"),
+      "the readout is a percentage", rawget(A.ui.fontText, "text"))
+Click(A.ui.btnFontDown)
+check(A.ui.FontScale() == fmin, "minus brings it back")
+Click(A.ui.btnFontUp)
+Click(A.ui.btnFontUp)
+check(Click(A.ui.btnFontReset), "reset is clickable")
+check(A.ui.FontScale() == 1.0, "and returns to 100%", A.ui.FontScale())
+
+-- It reaches BUTTON labels and EDIT BOXES too, not only plain labels -- those
+-- are separate creation paths and each had to be registered by hand.
+A.ui.SetFontScale(1.3)
+local _, btnSize = A.ui.btnFontReset.label:GetFont()
+local _, boxSize = A.ui.sendTo:GetFont()
+check(btnSize ~= nil and btnSize > 12, "button labels scale too", tostring(btnSize))
+check(boxSize ~= nil and boxSize > 10, "and so do the edit boxes", tostring(boxSize))
+A.ui.SetFontScale(1.0)
 
 end
 
