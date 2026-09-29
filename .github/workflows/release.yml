@@ -1,0 +1,114 @@
+name: Release
+
+# A GitHub release for every version that reaches main.
+#
+# WHY THIS EXISTS. Launchers compare an installed addon against the latest
+# GitHub release. With no releases at all they either insist an update is
+# available forever or never offer one -- and this repo had zero tags, so both
+# were on the table.
+#
+# The shape: a push to main reads "## Version" out of the .toc and tags it, if
+# that tag is not there already. The tag run packages and publishes. A merge
+# that leaves the version alone -- docs, tooling, tests -- finds its tag
+# present and does nothing, so nothing is released twice.
+#
+# THREE TRAPS LIVE IN HERE, every one of them hit for real in Aegis:
+# Pathfinder. None of them is obvious from reading the happy path, and each
+# fails QUIETLY -- a green run that published nothing. Do not "tidy" them away.
+#
+#   1. A TAG PUSHED WITH GITHUB_TOKEN STARTS NO WORKFLOW RUN. GitHub refuses to
+#      trigger workflows from its own token, deliberately, so an `on: push:
+#      tags` trigger never fires for the tag this file just pushed. A
+#      workflow_dispatch made with that same token DOES start one -- which is
+#      why the branch run ends with `gh workflow run ... --ref "$tag"` instead
+#      of trusting the tag push to do it.
+#
+#   2. THE PACKAGER REFUSES A BRANCH BUILD WHOSE COMMIT IS TAGGED. It logs
+#      `Found future tag "vX.Y.Z", not packaging.`, exits 0 and publishes
+#      nothing. So the packager step must be gated on `github.ref_type ==
+#      'tag'` and must never run in the main push itself -- including "just to
+#      save a run" when the tag was created moments earlier.
+#
+#   3. WITH NO MANUAL CHANGELOG THE PACKAGER USES THE COMMIT LOG since the
+#      previous tag as the release body. Before the first release that is the
+#      entire history, and GitHub rejects it: `body is too long (maximum is
+#      125000 characters)`. So the tag run extracts this version's entry from
+#      CHANGELOG.md into RELEASE_NOTES.md, and .pkgmeta names that file as the
+#      manual changelog.
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  # For `gh workflow run` in the tag step. Trap 1: without this the dispatch
+  # is refused and the tag is never packaged.
+  actions: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # The packager reads tags and history; a shallow checkout gives it
+          # neither.
+          fetch-depth: 0
+
+      - name: Tag the version, if it is new
+        if: github.ref_type == 'branch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(sed -n 's/^## Version:[[:space:]]*\([^[:space:]]*\).*/\1/p' Aegis_Courier.toc | tr -d '\r')
+          if ! printf '%s' "$version" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "::error::No MAJOR.MINOR.PATCH version in Aegis_Courier.toc (got '$version')"
+            exit 1
+          fi
+          tag="v$version"
+          if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+            echo "$tag is released already; nothing to do."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$tag" -m "Aegis: Courier $version"
+          git push origin "$tag"
+          gh workflow run release.yml --repo "$GITHUB_REPOSITORY" --ref "$tag"
+          echo "Tagged $tag; it is packaged in the run started on the tag."
+
+      - name: Release notes from CHANGELOG.md
+        if: github.ref_type == 'tag'
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          # Headings are `## [X.Y.Z]`, sometimes with a date and a **restart**
+          # note after them -- so match the PREFIX rather than the whole line.
+          # Stop at the next version heading, or at the link-reference block
+          # (`[X.Y.Z]: https://...`) that ends the file.
+          awk -v head="## [$version]" '
+            index($0, head) == 1 { on = 1; print; next }
+            on && (/^## \[/ || /^\[[^]]*\]: /) { exit }
+            on { print }
+          ' CHANGELOG.md > RELEASE_NOTES.md
+          if [ ! -s RELEASE_NOTES.md ]; then
+            echo "Aegis: Courier $version" > RELEASE_NOTES.md
+          fi
+          cat RELEASE_NOTES.md
+
+      # Trap 2: tag refs only. In the main push run this finds its own fresh
+      # tag, calls it a "future tag" and publishes nothing.
+      - name: Package and release to GitHub
+        if: github.ref_type == 'tag'
+        uses: BigWigsMods/packager@v2
+        env:
+          GITHUB_OAUTH: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,33 @@
+# BigWigsMods/packager. The repository root IS the addon folder, so there is
+# no move-folders section -- package-as just names what the zip unpacks to,
+# and it must match the .toc's own name or the client will not load it.
+package-as: Aegis_Courier
+
+# Trap 3 in .github/workflows/release.yml: without a manual changelog the
+# packager falls back to the commit log since the previous tag, which before
+# the first release is the entire history -- and GitHub rejects a release body
+# over 125,000 characters. The tag run writes this file from CHANGELOG.md.
+# It is gitignored; the packager ships it regardless of whether it is tracked.
+manual-changelog:
+    filename: RELEASE_NOTES.md
+    markup-type: markdown
+
+# What does NOT belong in a player's AddOns folder.
+#
+# media/ is the one directory that needs picking apart rather than keeping or
+# dropping whole: three .tga files are loaded at runtime and total 18 KB, while
+# the screenshots, the logo and the icon's source art come to 3.4 MB. Shipping
+# the folder as-is would make the download two hundred times bigger for no
+# gain to anyone who is not editing the addon.
+ignore:
+    - .github
+    - .gitignore
+    - CLAUDE.md
+    - ROADMAP.md
+    - docs
+    - tests
+    - media/*.jpg
+    - media/*.png
+    - media/*.py
+    - media/README.md
+    - media/test
