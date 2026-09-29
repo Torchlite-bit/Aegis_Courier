@@ -699,9 +699,39 @@ Aegis_Courier/
                          -- and NOT loaded by us; it just calls A.skin.Apply()
   tests/harness.lua      -- off-client test harness; stubs the 1.12 API
   docs/turtlemail-audit.md -- feature audit that defines the replacement scope
+  .pkgmeta               -- BigWigsMods packager: package-as, manual changelog,
+                         -- and what does NOT go in a player's AddOns folder
+  .github/workflows/release.yml -- tags and publishes every version that
+                         -- reaches main; read its header before editing it
   CLAUDE.md              -- this file
   ROADMAP.md             -- staged plan; check before starting a large feature
 ```
+
+**Releases are automatic. Do not push a `v*` tag by hand.** A merge to `main`
+that changes `## Version` in the `.toc` gets tagged and published on its own;
+a merge that leaves the version alone releases nothing, so tooling and docs
+cost nothing. Launchers compare an installed addon against the latest GitHub
+release, so a repo with no releases either nags about an update forever or
+never offers one.
+
+The workflow's header comment documents three traps, every one of which fails
+**silently** — a green run that published nothing. Re-read it before
+simplifying anything in that file:
+
+1. A tag pushed with `GITHUB_TOKEN` starts no workflow run, which is why the
+   branch run ends with an explicit `gh workflow run --ref "$tag"`.
+2. The packager refuses a branch build whose commit is tagged (`Found future
+   tag "vX.Y.Z", not packaging.`), so its step is gated on a **tag** ref and
+   must never run in the `main` push.
+3. With no manual changelog the packager uses the commit log since the last
+   tag as the release body; before the first release that is the whole
+   history and GitHub rejects it as `body is too long`. The tag run extracts
+   the version's entry from `CHANGELOG.md` into `RELEASE_NOTES.md`, which
+   `.pkgmeta` names as the manual changelog.
+
+The extraction matches the heading by **prefix** (`## [X.Y.Z]`), because older
+entries carry a date and a `**restart**` note after it, and stops at the next
+version heading **or** at the link-reference block that ends the file.
 
 Load order is fixed by the `.toc`: `init` → `util` → `db` → `bridge` →
 `inbox` → `send` → `frame` → `skin`. `skin` is only reached at runtime, so its

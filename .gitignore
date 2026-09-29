@@ -39,3 +39,6 @@ luac.out
 *.x86_64
 *.hex
 
+
+# Written by the release workflow from CHANGELOG.md; never committed.
+/RELEASE_NOTES.md
