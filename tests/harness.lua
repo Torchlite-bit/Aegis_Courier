@@ -85,8 +85,32 @@ local function newRegion()
     -- unanswerable.
     function r:SetWidth(w) rawset(self, "w", w) end
     function r:SetHeight(h) rawset(self, "h", h) end
-    function r:GetWidth() return rawget(self, "w") or 0 end
-    function r:GetHeight() return rawget(self, "h") or 0 end
+    -- The LAST point set with this name, or nil.
+    function r:PointOffset(name)
+        local pts = rawget(self, "points") or {}
+        local found, i = nil, 1
+        while i <= table.getn(pts) do
+            if pts[i].point == name then found = pts[i] end
+            i = i + 1
+        end
+        return found
+    end
+    -- Size DERIVED from opposite-corner anchors when none was set explicitly.
+    -- A texture pinned TOPLEFT and BOTTOMRIGHT inside its parent has a real
+    -- size -- that is how an inset icon is built -- and a mock that answers 0
+    -- cannot tell an inset that silently became a fill from one that did not.
+    local function derived(self, horizontal)
+        local tl, br = self:PointOffset("TOPLEFT"), self:PointOffset("BOTTOMRIGHT")
+        if not tl or not br then return nil end
+        local rel = tl.rel
+        if type(rel) ~= "table" or not rel.GetWidth then return nil end
+        if horizontal then
+            return rel:GetWidth() + (br.x or 0) - (tl.x or 0)
+        end
+        return rel:GetHeight() + (tl.y or 0) - (br.y or 0)
+    end
+    function r:GetWidth() return rawget(self, "w") or derived(self, true) or 0 end
+    function r:GetHeight() return rawget(self, "h") or derived(self, false) or 0 end
     function r:SetAllPoints(other)
         rawset(self, "allPoints", other or true)
         if type(other) == "table" and other.GetWidth then
@@ -3191,18 +3215,25 @@ local iconPath = mb.icon and rawget(mb.icon, "texture") or nil
 check(iconPath == "Interface\\AddOns\\Aegis_Courier\\media\\minimap",
       "the icon points at our own art", tostring(iconPath))
 
--- THE ICON FILLS THE BUTTON. The usual shape is a 20px icon inside Blizzard's
--- tracking-border ring, but this logo is a ring already -- so the border is
--- not drawn and the emblem gets the whole button instead of the middle of it.
--- That is 30px rather than 20px, two and a quarter times the pixels, and it
--- is the only real lever there is: a 20px icon is 400 pixels, 0.04% of the
--- 1024x1024 source. Assert it as a PROPORTION, so a future resize of the
--- button cannot quietly shrink the art back into the middle.
+-- THE ICON IS INSET, AND BOTH BOUNDS MATTER. Blizzard's shape is a 20px icon
+-- inside a tracking-border ring; this logo IS a ring, so the border is not
+-- drawn. Filling the frame edge to edge then made the visible disc bigger than
+-- every neighbouring button -- measured on a player's own minimap at ~42px
+-- against ~35 -- while shrinking it back to 20 is the squeeze that read as
+-- pixelated in the first place.
+--
+-- Asserted as a PROPORTION at both ends, so neither mistake can come back: a
+-- future resize cannot shrink the art into the middle, and a future "let it
+-- fill the button" cannot make it the biggest thing on the ring.
 local bw = mb:GetWidth()
 local iw = mb.icon and mb.icon:GetWidth() or 0
-check(bw > 0 and iw / bw > 0.9,
-      "the icon fills its button rather than sitting in the middle of it",
+check(bw > 0 and iw / bw > 0.7,
+      "the icon is most of its button, not a squeeze in the middle",
       iw .. " of " .. bw)
+check(bw > 0 and iw < bw,
+      "but inset from it, so it does not outsize its neighbours",
+      iw .. " of " .. bw)
+check(iw == mb.icon:GetHeight(), "and it is square", iw .. "x" .. mb.icon:GetHeight())
 check(mb.border == nil,
       "and Blizzard's border ring is not drawn over the logo's own")
 
@@ -3224,17 +3255,47 @@ check(mb.ring and not mb.ring:IsVisible(), "which goes again on leave")
 
 -- Pressed: the logo sinks a pixel. On a button with no plate behind it this
 -- is the only thing that makes a click feel like one.
-local function iconOffset()
-    local pts = rawget(mb.icon, "points") or {}
-    local last = pts[table.getn(pts)]
-    if not last then return nil end
-    return (last.x or 0) .. "," .. (last.y or 0)
+-- Read off the TOPLEFT anchor. The icon is pinned at two opposite corners, so
+-- the nudge has to move BOTH -- adding a CENTER point on top would
+-- over-constrain the texture rather than shift it.
+local function iconNudge()
+    local tl = mb.icon:PointOffset("TOPLEFT")
+    local br = mb.icon:PointOffset("BOTTOMRIGHT")
+    if not tl or not br then return nil end
+    return tl.x .. "," .. tl.y .. " / " .. br.x .. "," .. br.y
 end
-check(iconOffset() == "0,0", "the logo sits centred at rest", iconOffset())
+local atRest = iconNudge()
+check(atRest == "3,-3 / -3,3", "the logo sits inset at rest", tostring(atRest))
+arg1 = "LeftButton"
 mb.scripts.OnMouseDown()
-check(iconOffset() == "1,-1", "and sinks a pixel when pressed", iconOffset())
+check(iconNudge() == "4,-4 / -2,2", "and sinks a pixel when pressed",
+      tostring(iconNudge()))
+check(mb.icon:GetWidth() == iw, "without changing size", mb.icon:GetWidth())
+-- EXACTLY TWO ANCHORS, the opposite corners. A texture pinned at both is
+-- already fully constrained, so nudging it with an extra CENTER point adds a
+-- third, conflicting rule rather than moving anything -- which is what the
+-- nudge used to do before the icon was inset.
+local function anchorNames(r)
+    local pts = rawget(r, "points") or {}
+    local out, i = {}, 1
+    while i <= table.getn(pts) do
+        table.insert(out, pts[i].point); i = i + 1
+    end
+    table.sort(out)
+    return table.concat(out, "+")
+end
+check(anchorNames(mb.icon) == "BOTTOMRIGHT+TOPLEFT",
+      "and by exactly its two opposite corners", anchorNames(mb.icon))
 mb.scripts.OnMouseUp()
-check(iconOffset() == "0,0", "then comes back up", iconOffset())
+check(iconNudge() == atRest, "then comes back up", tostring(iconNudge()))
+
+-- A RIGHT-click press neither sinks the logo nor arms a drag.
+arg1 = "RightButton"
+mb.scripts.OnMouseDown()
+check(iconNudge() == atRest, "a right-click press does not sink it",
+      tostring(iconNudge()))
+check(mb.scripts.OnUpdate == nil, "nor arm the drag tracker")
+arg1 = "LeftButton"
 local f = io.open("media/minimap.tga", "rb")
 check(f ~= nil, "and that art is really in the repo")
 if f then
@@ -3326,6 +3387,93 @@ uiScale = 1
 mb.scripts.OnDragStop()
 check(mb.dragging == false, "the drag stopped")
 check(mb.scripts.OnUpdate == nil, "and it stopped tracking")
+
+print("== minimap: a PRESS drags it, and a click still clicks ==")
+-- Reported as "it is not movable". The old code leaned entirely on
+-- RegisterForDrag + OnDragStart, which is the tidy mechanism and the one
+-- Pathfinder uses -- and on at least one player's client the button would not
+-- move at all. The press now drives it, with a slop threshold so that a plain
+-- click is not a one-pixel drag.
+A.ui.SetMinimapAngle(0)
+cursorX, cursorY = minimapCX + 60, minimapCY
+arg1 = "LeftButton"
+mb.scripts.OnMouseDown()
+check(mb.scripts.OnUpdate ~= nil, "pressing arms the tracker")
+check(mb.dragging == false, "but it is not a drag yet")
+-- Guarded: with no tracker armed every call below would error on a nil, which
+-- reports worse than the check that already failed.
+if not mb.scripts.OnUpdate then mb.scripts.OnUpdate = function() end end
+
+-- Below the threshold: the tracker runs and deliberately does nothing. This is
+-- what keeps clicking usable -- without it the icon would creep around the
+-- ring every time you opened the window.
+cursorX, cursorY = minimapCX + 61, minimapCY + 1
+mb.scripts.OnUpdate()
+check(mb.dragging == false, "a twitch is not a drag")
+check(A.ui.MinimapAngle() == 0, "and the button has not moved",
+      A.ui.MinimapAngle())
+
+-- Past it: now it is a drag, and the button follows the cursor.
+cursorX, cursorY = minimapCX, minimapCY + 60
+mb.scripts.OnUpdate()
+check(mb.dragging == true, "a real movement IS a drag")
+check(A.ui.MinimapAngle() == 90, "and the button followed the cursor",
+      A.ui.MinimapAngle())
+
+mb.scripts.OnMouseUp()
+check(mb.scripts.OnUpdate == nil, "releasing stops the tracker")
+check(mb.dragging == false, "and clears the drag")
+
+-- A press and release with no movement at all leaves the angle alone, which is
+-- what every ordinary click is.
+A.ui.SetMinimapAngle(45)
+cursorX, cursorY = minimapCX + 10, minimapCY + 10
+mb.scripts.OnMouseDown()
+-- Same guard as above: an unarmed tracker is a failed check further up, not a
+-- reason for this line to error.
+if mb.scripts.OnUpdate then mb.scripts.OnUpdate() end
+mb.scripts.OnMouseUp()
+check(A.ui.MinimapAngle() == 45, "a click moves nothing", A.ui.MinimapAngle())
+A.ui.CloseWindow()
+mb.scripts.OnClick()
+check(A.ui.frame:IsVisible(), "and still opens the window")
+A.ui.CloseWindow()
+
+-- Hidden mid-drag: no tracker left running on a frame nobody can see.
+mb.scripts.OnMouseDown()
+check(mb.scripts.OnUpdate ~= nil, "armed again")
+check(mb.scripts.OnHide ~= nil, "the button handles being hidden")
+if mb.scripts.OnHide then mb.scripts.OnHide() end
+check(mb.scripts.OnUpdate == nil, "hiding the button stops the tracker")
+mb.scripts.OnUpdate = nil
+
+print("== minimap: /courier icon places it when dragging cannot ==")
+-- A minimap-button collector -- the kind that arranges every button into an
+-- even ring -- re-anchors what it manages, and will put ours back wherever it
+-- likes however well our own drag works. This is the way out that nothing can
+-- argue with.
+local slash = SlashCmdList["AEGISCOURIER"]
+check(slash ~= nil, "the slash handler is registered")
+A.ui.SetMinimapAngle(0)
+slash("icon 135")
+check(A.ui.MinimapAngle() == 135, "a number places it", A.ui.MinimapAngle())
+check(A.db.GetMinimapAngle() == 135, "and is remembered")
+slash("icon 400")
+check(A.ui.MinimapAngle() == 40, "out of range wraps rather than refusing",
+      A.ui.MinimapAngle())
+slash("icon -30")
+check(A.ui.MinimapAngle() == 330, "and negatives wrap the other way",
+      A.ui.MinimapAngle())
+local before = A.ui.MinimapAngle()
+DEFAULT_CHAT_FRAME.messages = {}
+slash("icon sideways")
+check(A.ui.MinimapAngle() == before, "nonsense moves nothing", A.ui.MinimapAngle())
+local said = table.concat(DEFAULT_CHAT_FRAME.messages, " | ")
+check(A.util.Contains(said, "not a number"), "and says so", said)
+DEFAULT_CHAT_FRAME.messages = {}
+slash("icon")
+said = table.concat(DEFAULT_CHAT_FRAME.messages, " | ")
+check(A.util.Contains(said, "330"), "bare 'icon' reports where it is", said)
 
 print("== minimap: the three clicks ==")
 A.ui.CloseWindow()

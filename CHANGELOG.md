@@ -9,6 +9,38 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.11]
+
+Two fixes to the minimap button. `/reload`.
+
+### Fixed
+- **It was bigger than every other button on the ring.** A stock minimap
+  button is a 32px frame whose *visible* part is Blizzard's border ring at
+  about 26-28px with a 20px icon inside it. Courier's logo is its own ring, so
+  it draws no border — and filling the frame edge to edge made the visible disc
+  32px where its neighbours read as 26-28. Measured on a player's own minimap:
+  ours ~42px against ~35.
+  - The art is now **inset** from the frame rather than filling it. The frame
+    stays 32px, which is what a minimap-button collector expects to find, and
+    the inset is anchored by points so a collector that resizes the frame takes
+    the art with it.
+- **It would not move.** The drag leaned entirely on `RegisterForDrag`, which
+  is the tidy mechanism and the one Aegis: Pathfinder uses — and on at least
+  one player's client it never fired. **The press now drives it:** holding the
+  button and moving the mouse moves the icon, releasing stops it.
+  - A plain click still clicks. The tracker does nothing until the cursor has
+    travelled a few pixels, so opening the window does not nudge the icon
+    around the ring every time.
+
+### Added
+- **`/courier icon <0-359>`** places the button at an angle outright, and
+  `/courier icon` on its own says where it is.
+  - This exists because **a minimap-button collector will beat any drag.** The
+    kind of addon that arranges every button into an even ring re-anchors what
+    it manages, and will put Courier's back wherever it likes however well the
+    drag works. If dragging still does nothing after this update, that is what
+    is happening — and this command still works.
+
 ## [1.9.10]
 
 Two bag addons at the mailbox, and bigger text. `/reload`.

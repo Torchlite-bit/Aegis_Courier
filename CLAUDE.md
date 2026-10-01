@@ -527,6 +527,32 @@ section, which is Courier's equivalent hazard surface.
     - A click that asks for a named tab **opens**, it does not toggle: it asked
       for that tab to be in front of you, and closing the window because it was
       already open is the wrong answer to that question.
+    - **THE FRAME IS 32px BUT THE ART IS INSET.** A stock button is a 32px
+      frame whose visible part is Blizzard's border ring at ~26-28px around a
+      20px icon. Art that fills the frame edge to edge therefore reads as
+      BIGGER than every neighbour — measured on a player's minimap at ~42px
+      against ~35. Keep the frame at 32, which is what a minimap-button
+      collector expects to find and resize, and inset the art by POINTS
+      (`MINIMAP_ICON_INSET`) so a collector that resizes the frame takes the
+      art with it. Assert the proportion at BOTH ends: too small is the
+      squeeze that reads as pixelated, too large outsizes the ring.
+    - A texture pinned TOPLEFT **and** BOTTOMRIGHT is fully constrained, so the
+      pressed nudge has to move BOTH corners. Adding a CENTER point on top is
+      a third, conflicting rule, not a shift — assert the icon carries exactly
+      its two opposite anchors.
+    - **DO NOT RELY ON `RegisterForDrag` ALONE.** It is the tidy mechanism and
+      Pathfinder uses it, and on a real player's client the button would not
+      move at all. The press drives the drag instead: `OnMouseDown` arms a
+      per-frame tracker, which does nothing until the cursor has travelled
+      past `MINIMAP_DRAG_SLOP`. **The slop is what keeps clicking usable** —
+      without it every click is a one-pixel drag and the icon creeps around the
+      ring. `OnDragStart` stays as a second way in, forcing the drag on.
+      Release and `OnHide` both stop the tracker.
+    - **A minimap-button COLLECTOR will beat any drag.** The kind that arranges
+      every button into an even ring re-anchors what it manages, and no amount
+      of correctness on our side survives that — so `/courier icon <0-359>`
+      sets the angle outright. Offer the deterministic route rather than
+      insisting the drag should have worked.
     - **BUILT THE WAY AEGIS: PATHFINDER'S IS**, and that is not a style
       preference: the two addons put buttons on the same minimap, so size,
       orbit radius, texture format, the hover ring and the pressed nudge are
@@ -860,7 +886,9 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       lives where the BUTTON reads it: the window opens anywhere, from
       `/courier` and from the minimap button.
 - [ ] A minimap or icon button set `courierNoSkin`, reads its mouse button from
-      `arg1`, and divides `GetCursorPosition()` by the effective UI scale.
+      `arg1`, and divides `GetCursorPosition()` by the effective UI scale. Its
+      art is INSET from a 32px frame, not filling it, and its drag is driven by
+      the press with a slop threshold rather than by `RegisterForDrag` alone.
 - [ ] Nothing in the addon opens a bag. The backpack at a mailbox is the
       CLIENT's `OpenBackpack()`; Courier may decline it behind
       `closeBagsAtMailbox` (deferred a tick, queued before the takeover

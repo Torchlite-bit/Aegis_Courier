@@ -4321,10 +4321,22 @@ end
 -- with "not at a mailbox" so the Send button is dead too. Opening the window
 -- from here can therefore only show you things, never half-do something.
 
--- These are Aegis: Pathfinder's numbers, from its MinimapButton.lua, because
--- the two addons' buttons should sit on the same ring and feel the same to
--- use. 32px is the stock minimap buttons' size, and 80 is where they orbit.
+-- Pathfinder's numbers, from its MinimapButton.lua: 32px is the stock minimap
+-- buttons' FRAME size and 80 is where they orbit. The frame stays 32 because
+-- that is what every minimap-button collector expects to find and resize.
+--
+-- THE ART IS INSET, and that is the fix for "bigger than the others". A stock
+-- button is a 32px frame whose visible part is Blizzard's tracking-border ring
+-- at roughly 26-28px with a 20px icon inside it. Ours has no border -- the
+-- logo is its own ring -- so filling the frame edge to edge made the visible
+-- disc 32px where everyone else's reads as 26-28, about a third more area.
+-- Measured against a player's own minimap: ours ~42px to its neighbours' ~35.
+--
+-- Inset by POINTS rather than a fixed width, so that a collector which resizes
+-- the frame takes the art with it instead of leaving a 26px logo adrift in a
+-- 20px button.
 local MINIMAP_BUTTON_SIZE = 32
+local MINIMAP_ICON_INSET  = 3     -- 32 - 2*3 = a 26px visible disc
 local MINIMAP_RADIUS = 80
 -- Degrees anticlockwise from east. NOT Pathfinder's 215: a 32px button on an
 -- 80px ring spans about 23 degrees, so two Aegis addons defaulting to the same
@@ -4381,6 +4393,54 @@ local function MinimapDragUpdate()
     ui.SetMinimapAngle(math.deg(math.atan2(cy / scale - my, cx / scale - mx)))
 end
 
+-- HOW A DRAG ACTUALLY STARTS, and this is the fix for "it is not movable".
+--
+-- It used to rely solely on RegisterForDrag + OnDragStart. That is the tidy
+-- way and it is what Pathfinder does, but it is also a mechanism this addon
+-- cannot verify from outside the game -- and on at least one player's client
+-- the button would not move at all. So the press itself now drives it:
+-- OnMouseDown starts a per-frame tracker, and the tracker does nothing until
+-- the cursor has travelled far enough to mean it.
+--
+-- THE SLOP IS WHAT KEEPS CLICKING WORKING. Without it every click would be a
+-- one-pixel drag and the icon would creep around the ring each time you opened
+-- the window. Below the threshold the tracker returns having done nothing, the
+-- button never moves, and OnClick fires on release exactly as before.
+local MINIMAP_DRAG_SLOP = 4
+local minimapPressX, minimapPressY
+
+local function MinimapTrack()
+    local b = ui.minimapButton
+    if not b then return end
+    local cx, cy = GetCursorPosition()
+    if not cx then return end
+    if not b.dragging then
+        local dx = cx - (minimapPressX or cx)
+        local dy = cy - (minimapPressY or cy)
+        if (dx * dx + dy * dy) < MINIMAP_DRAG_SLOP * MINIMAP_DRAG_SLOP then
+            return
+        end
+        b.dragging = true
+        GameTooltip:Hide()
+    end
+    MinimapDragUpdate()
+end
+
+function ui.StartMinimapDrag(force)
+    local b = ui.minimapButton
+    if not b then return end
+    minimapPressX, minimapPressY = GetCursorPosition()
+    b.dragging = force and true or false
+    b:SetScript("OnUpdate", MinimapTrack)
+end
+
+function ui.StopMinimapDrag()
+    local b = ui.minimapButton
+    if not b then return end
+    b:SetScript("OnUpdate", nil)
+    b.dragging = false
+end
+
 function ui.BuildMinimapButton()
     if ui.minimapButton then return ui.minimapButton end
     -- A UI replacement with no Minimap is not an error, it is a client we
@@ -4405,18 +4465,26 @@ function ui.BuildMinimapButton()
     -- click still arrives as OnClick.
     b:RegisterForDrag("LeftButton")
 
-    -- THE LOGO IS THE BUTTON FACE, at full size. Pathfinder's shape exactly:
-    -- the art is a dark disc with its own red and gold rune ring, so it needs
-    -- no border of ours -- Blizzard's MiniMap-TrackingBorder would be a
-    -- second ring drawn around the first, with the emblem squeezed into the
-    -- middle of its own button at 20px instead of 32.
+    -- THE LOGO IS THE BUTTON FACE. Pathfinder's shape: the art is a dark disc
+    -- with its own red and gold rune ring, so it needs no border of ours --
+    -- Blizzard's MiniMap-TrackingBorder would be a second ring drawn around
+    -- the first, with the emblem squeezed into the middle of its own button.
     --
-    -- That squeeze was the whole complaint. The source art is 1024x1024 and
-    -- spotless; 400 pixels was the problem, not the picture.
+    -- Inset from the frame rather than filling it, so the visible disc matches
+    -- what a stock button's border ring occupies. See MINIMAP_ICON_INSET.
     local icon = b:CreateTexture(nil, "ARTWORK")
-    icon:SetWidth(MINIMAP_BUTTON_SIZE)
-    icon:SetHeight(MINIMAP_BUTTON_SIZE)
-    icon:SetPoint("CENTER", b, "CENTER", 0, 0)
+    -- Both corners move together. A texture anchored TOPLEFT *and*
+    -- BOTTOMRIGHT is already fully constrained, so the old trick of nudging it
+    -- with an extra CENTER point would over-constrain it rather than move it.
+    local function PlaceIcon(dx, dy)
+        icon:ClearAllPoints()
+        icon:SetPoint("TOPLEFT", b, "TOPLEFT",
+            MINIMAP_ICON_INSET + dx, -MINIMAP_ICON_INSET + dy)
+        icon:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT",
+            -MINIMAP_ICON_INSET + dx, MINIMAP_ICON_INSET + dy)
+    end
+    b.PlaceIcon = PlaceIcon
+    PlaceIcon(0, 0)
     -- No file extension: the client appends .blp or .tga itself. Ours is a
     -- 64x64 32-bit RLE TGA written by media/make-minimap-icon.py, the same
     -- format every texture in Aegis: Pathfinder's media folder uses.
@@ -4429,21 +4497,30 @@ function ui.BuildMinimapButton()
     -- can be seen instead of baked into a file where it cannot.
     local ring = b:CreateTexture(nil, "OVERLAY")
     ring:SetTexture("Interface\\AddOns\\Aegis_Courier\\media\\minimap-ring")
-    ring:SetPoint("TOPLEFT", b, "TOPLEFT", -2, 2)
-    ring:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", 2, -2)
+    -- Anchored to the ICON, not the button: the art is inset now, and a ring
+    -- hugging the frame would float a clear gap outside the logo it is meant
+    -- to outline.
+    ring:SetPoint("TOPLEFT", icon, "TOPLEFT", -2, 2)
+    ring:SetPoint("BOTTOMRIGHT", icon, "BOTTOMRIGHT", 2, -2)
     ring:SetVertexColor(C.gold[1], C.gold[2], C.gold[3])
     ring:Hide()
     b.ring = ring
 
-    -- Pressed: the logo sinks a pixel, as a button face would. Straight from
-    -- Pathfinder -- it is the only thing that makes a bare texture feel like
-    -- a button when it has no plate behind it.
+    -- Pressed: the logo sinks a pixel, as a button face would -- and the same
+    -- press arms the drag tracker. 1.12 puts the mouse button in the global
+    -- arg1, so a right-click press neither sinks the logo nor starts a drag.
     b:SetScript("OnMouseDown", function()
-        icon:SetPoint("CENTER", b, "CENTER", 1, -1)
+        if arg1 and arg1 ~= "LeftButton" then return end
+        PlaceIcon(1, -1)
+        ui.StartMinimapDrag()
     end)
     b:SetScript("OnMouseUp", function()
-        icon:SetPoint("CENTER", b, "CENTER", 0, 0)
+        PlaceIcon(0, 0)
+        ui.StopMinimapDrag()
     end)
+    -- A button hidden mid-drag must not leave a tracker running on a frame
+    -- nobody can see.
+    b:SetScript("OnHide", function() ui.StopMinimapDrag() end)
 
     b:SetScript("OnEnter", function()
         ring:Show()
@@ -4466,15 +4543,14 @@ function ui.BuildMinimapButton()
         GameTooltip:Hide()
     end)
 
+    -- Belt to the braces above. Where RegisterForDrag does fire, it starts the
+    -- same tracker and skips the slop test, because the client has already
+    -- decided this is a drag.
     b:SetScript("OnDragStart", function()
-        b.dragging = true
         GameTooltip:Hide()
-        b:SetScript("OnUpdate", MinimapDragUpdate)
+        ui.StartMinimapDrag(true)
     end)
-    b:SetScript("OnDragStop", function()
-        b.dragging = false
-        b:SetScript("OnUpdate", nil)
-    end)
+    b:SetScript("OnDragStop", function() ui.StopMinimapDrag() end)
 
     -- 1.12 passes the mouse button in the GLOBAL arg1, not as a parameter.
     b:SetScript("OnClick", function()
@@ -4541,10 +4617,34 @@ A.OnLoad(function()
         elseif cmd == "blizzard" then
             ui.ShowBlizzardMail()
             A.Print("handed this visit back to the stock mail window.")
+        elseif string.sub(cmd, 1, 4) == "icon" then
+            -- A WAY TO PLACE THE BUTTON THAT NOTHING CAN ARGUE WITH.
+            -- Dragging is the nice way, but a minimap-button collector -- the
+            -- kind that arranges every button into an even ring -- re-anchors
+            -- what it manages, and will put ours back wherever it likes however
+            -- well our own drag works. This sets the angle outright.
+            local rest = util.Trim(string.sub(cmd, 5))
+            if rest == "" then
+                A.Print("minimap button at " ..
+                    math.floor(ui.MinimapAngle() + 0.5) ..
+                    " degrees. /courier icon <0-359> to move it.")
+            else
+                local deg = tonumber(rest)
+                if not deg then
+                    A.Print("'" .. rest ..
+                        "' is not a number. /courier icon <0-359>.")
+                else
+                    ui.SetMinimapAngle(deg)
+                    A.Print("minimap button moved to " ..
+                        math.floor(ui.MinimapAngle() + 0.5) .. " degrees.")
+                end
+            end
         elseif cmd == "help" then
             A.Print("/courier         - toggle the window")
             A.Print("/courier status  - integration and ledger summary")
             A.Print("/courier blizzard- use the stock mail window this visit")
+            A.Print("/courier icon    - where the minimap button sits")
+            A.Print("/courier icon 90 - put it there instead (0-359)")
         else
             ui.Toggle()
         end
