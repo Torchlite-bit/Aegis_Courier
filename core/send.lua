@@ -486,6 +486,7 @@ function send.Start(to, subject, body, money, isCOD, codAll)
     -- that reports its own cost turns that into a number.
     send.startedAt = (GetTime and GetTime()) or nil
     send.retries   = 0
+    send.silent    = 0
     send.inFlight  = nil
     send.sending   = true
     if A.ui and A.ui.RefreshSend then A.ui.RefreshSend() end
@@ -817,6 +818,23 @@ send.SETTLE = 0
 -- to that mail alone and never to the rest of the batch.
 send.RETRY_WAIT = 0.3
 
+-- HOW LONG TO WAIT FOR AN ACKNOWLEDGEMENT BEFORE GIVING UP ON THE RUN.
+--
+-- This is the fix for "the addon gets stuck when sending mail". Between
+-- issuing SendMail and the server answering, the run is armed by NOTHING: the
+-- driver only steps when MAIL_SEND_SUCCESS or MAIL_FAILED arms it. If neither
+-- ever arrives -- a dropped packet, a server hiccup, a session that went away
+-- underneath us -- send.sending stays true FOREVER. The Send button then reads
+-- "already sending" for the rest of the session and only a /reload clears it.
+-- That is a hang with no way out, and it needs no bug anywhere in this file to
+-- happen; it only needs the server to go quiet once.
+--
+-- Ten seconds is deliberately generous. A real acknowledgement lands in well
+-- under a second, so this fires only when something is genuinely wrong, and a
+-- laggy server never trips it.
+send.ACK_TIMEOUT = 10
+send.silent = 0
+
 driver:SetScript("OnUpdate", function()
     if not send.armed then
         -- Stay SHOWN for the duration of a batch. A hidden frame runs no
@@ -825,7 +843,25 @@ driver:SetScript("OnUpdate", function()
         -- update frame is simply always live while the mailbox is open, and
         -- this is the same thing scoped to a run. Idle cost is one comparison
         -- per frame, and only while actually sending.
-        if not send.sending then driver:Hide() end
+        if not send.sending then
+            driver:Hide()
+            waited, send.silent = 0, 0
+            return
+        end
+        -- SENDING BUT NOT ARMED IS EXACTLY ONE STATE: a mail has gone to the
+        -- server and we are waiting to be told what happened to it. Nothing
+        -- else will wake the run, so this is the only place a lost
+        -- acknowledgement can be noticed. A step that is merely waiting on a
+        -- locked bag slot re-arms itself and never reaches here.
+        send.silent = (send.silent or 0) + (arg1 or 0)
+        if send.silent >= send.ACK_TIMEOUT then
+            -- NOT wound back here. The run is over, and the frame that
+            -- notices that is the one that winds the clock back (the
+            -- not-sending branch above). Doing it in both places is exactly
+            -- what made neither of them load-bearing.
+            send.GiveUpWaiting()
+            return
+        end
         waited = 0
         return
     end
@@ -836,6 +872,24 @@ driver:SetScript("OnUpdate", function()
     send.armed = false
     send.Step()
 end)
+
+-- The server never answered. STOP, and do not retry.
+--
+-- A retry is safe after MAIL_FAILED because that event means the mail
+-- definitively did not go out. Silence means we do not KNOW -- and if the mail
+-- did go out, the gold rides the first one, so re-sending it could send the
+-- gold twice. The unsent attachments stay on the list, so pressing Send again
+-- is one click; that choice belongs to the player, who can see what arrived.
+function send.GiveUpWaiting()
+    local left = (send.queue and table.getn(send.queue)) or 0
+    if send.inFlight then left = left + 1 end
+    A.Print("no reply from the server for mail " .. (send.sentCount + 1) ..
+        " of " .. (send.total or 0) .. " after " ..
+        math.floor(send.ACK_TIMEOUT) .. "s -- stopped. " ..
+        send.sentCount .. " sent, " .. left ..
+        " still attached. Press Send to try the rest.")
+    send.Abort()
+end
 
 -- Bring the driver up WITHOUT arming a step.
 --
@@ -852,6 +906,15 @@ end
 function send.Arm(wait)
     send.wait = wait or 0
     waited = 0
+    -- ARMING IS THE ONE THING THAT ENDS A WAIT, so it is the one place the
+    -- silence clock is reset. It was reset in four places -- both
+    -- acknowledgement handlers, the driver's own step branch and here -- and
+    -- that redundancy meant no single one of them was load-bearing, so
+    -- removing any of them passed the whole suite. The clock measures
+    -- CONTINUOUS time in the "mail issued, server quiet" state; we leave that
+    -- state by arming a step or by stopping, and those are now the only two
+    -- resets there are.
+    send.silent = 0
     send.armed = true
     driver:Show()
 end
@@ -919,7 +982,6 @@ end)
 -- capped globally; only a mail that fails repeatedly gives up.
 A.RegisterEvent("MAIL_FAILED", function()
     if not send.sending then return end
-
     send.retries = (send.retries or 0) + 1
     if send.retries <= send.MAX_RETRIES then
         -- Put the attachment back at the head of the queue. sentCount did not
@@ -1266,6 +1328,22 @@ end)
 A.RegisterEvent("MAIL_CLOSED", function()
     send.atMailbox = false
     send.ReleaseRosters()
+    -- THE OTHER HALF OF THE HANG. With the session gone, SendMail posts into
+    -- nothing and no acknowledgement is ever coming -- so a batch left running
+    -- here waits for a reply that cannot arrive. The watchdog above would
+    -- eventually catch it, but ten seconds of a dead progress line is a bad
+    -- answer to something we have been told outright.
+    --
+    -- And this is EASY TO HIT: closing Courier's own window calls CloseMail(),
+    -- so starting a twelve-item send and shutting the window is all it takes.
+    if send.sending then
+        local left = (send.queue and table.getn(send.queue)) or 0
+        if send.inFlight then left = left + 1 end
+        A.Print("the mailbox closed mid-send -- stopped. " ..
+            send.sentCount .. " sent, " .. left ..
+            " still attached. Press Send at a mailbox to finish.")
+        send.Abort()
+    end
 end)
 -- MAIL_CLOSED is not guaranteed: log out or hearth away with the mailbox open
 -- and it never arrives, which would leave the borrowed "show offline members"

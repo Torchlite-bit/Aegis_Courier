@@ -112,6 +112,19 @@ local PANEL_PAD      = 6                    -- panel inset inside the content we
 
 -- Panels are children of the content well now, so their inset from the WINDOW
 -- is the sum of both. Reported by ui.Geometry for the clearance assertions.
+-- How far the settings block is inset inside its scroll child.
+--
+-- A SCROLLFRAME IS THE ONLY 1.12 WIDGET THAT CLIPS -- this client has no
+-- SetClipsChildren -- and the clip line falls exactly on the scroll child's
+-- left edge. Content at x=0 sits ON it, which text gets away with because a
+-- glyph carries its own side bearing; a checkbox's solid 1px edge texture does
+-- not, so the boxes -- and only the boxes -- come back shaved. The scroll
+-- frame moves the same distance the other way, so the block still lines up
+-- with the panel and the inset is pure clip margin. Carried over from Aegis:
+-- Exchange, which learned it the same way.
+local SET_INSET = 6
+local SET_BAR_W = 16                        -- the settings scrollbar
+
 local PANEL_SIDE   = CONTENT_SIDE + PANEL_PAD
 local PANEL_TOP    = CONTENT_TOP + PANEL_PAD
 local PANEL_BOTTOM = CONTENT_BOTTOM + PANEL_PAD
@@ -2064,39 +2077,148 @@ function ui.AutoCompleteSectionCap(rows, sectionCount)
     return per
 end
 
+-- A checkbox drawn from flat textures, NOT from UICheckButtonTemplate.
+--
+-- A VERBATIM PORT of Aegis: Exchange's ui.MakeCheckBox, for the same reason
+-- BTN_KIND is a verbatim port: the two addons sit in the same UI and a
+-- hand-adjusted copy drifts. Re-port if Exchange retunes it; never tune one
+-- side alone. The three reasons it exists over the stock template:
+--
+-- 1. The template's art is Blizzard blue-grey and cannot be recoloured -- the
+--    same problem UIPanelButtonTemplate has, and the reason ui.MakeButton
+--    exists. Four 1px border textures stay square at any size, where a
+--    SetBackdrop whose edgeSize approaches the frame size renders as a garbled
+--    CROSS rather than a box.
+-- 2. pfUI reskins anything reporting `CheckButton`, which turns a small box
+--    into a circle under the skin while it looks correct unskinned.
+--    courierNoSkin opts out, exactly as the inbox rows already do.
+-- 3. The template's caption is a GLOBAL named "<name>Text", so every row
+--    needed a frame name just to reach its own label. SetLabel is a method.
+--
+-- The CHECKED STATE stays the WIDGET'S OWN -- SetChecked/GetChecked are
+-- deliberately NOT overridden. A CheckButton toggles itself before OnClick
+-- runs and every handler here is written against that (they read GetChecked()
+-- inside OnClick and expect the new value). Shadowing those two with our own
+-- flag would leave the widget's state and ours disagreeing, and each handler
+-- would silently read the wrong one. We replace only the ART: the tick is the
+-- widget's CHECKED texture, so the client shows and hides it for us and it
+-- cannot drift.
+local CHK = {
+    fill = { 0.08, 0.07, 0.06 },
+    edge = { 0.45, 0.38, 0.22 },
+    tick = { 1.00, 0.82, 0.00 },
+}
+local CHK_SIZE   = 14   -- Exchange's default; the old template boxes were 20-22
+local CHK_INSET  = 3    -- tick inset inside the box
+local CHK_LABEL  = 5    -- box -> caption gap
+
+function ui.MakeCheckBox(parent, size, name)
+    size = size or CHK_SIZE
+    local c = CreateFrame("CheckButton", name, parent)
+    c:SetWidth(size); c:SetHeight(size)
+    c.courierNoSkin = true          -- our art, not pfUI's
+
+    local fill = c:CreateTexture(nil, "BACKGROUND")
+    fill:SetAllPoints(c)
+    fill:SetTexture(CHK.fill[1], CHK.fill[2], CHK.fill[3], 1)
+    c.fill = fill
+
+    c.edge = {}
+    local ei = 1
+    while ei <= 4 do
+        local ln = c:CreateTexture(nil, "BORDER")
+        ln:SetTexture(CHK.edge[1], CHK.edge[2], CHK.edge[3], 1)
+        c.edge[ei] = ln
+        ei = ei + 1
+    end
+    c.edge[1]:SetPoint("TOPLEFT", c, "TOPLEFT", 0, 0)
+    c.edge[1]:SetPoint("TOPRIGHT", c, "TOPRIGHT", 0, 0)
+    c.edge[1]:SetHeight(1)
+    c.edge[2]:SetPoint("BOTTOMLEFT", c, "BOTTOMLEFT", 0, 0)
+    c.edge[2]:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
+    c.edge[2]:SetHeight(1)
+    c.edge[3]:SetPoint("TOPLEFT", c, "TOPLEFT", 0, 0)
+    c.edge[3]:SetPoint("BOTTOMLEFT", c, "BOTTOMLEFT", 0, 0)
+    c.edge[3]:SetWidth(1)
+    c.edge[4]:SetPoint("TOPRIGHT", c, "TOPRIGHT", 0, 0)
+    c.edge[4]:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", 0, 0)
+    c.edge[4]:SetWidth(1)
+
+    -- SetCheckedTexture takes a PATH on 1.12, not a texture object, so the
+    -- texture has to be created from a file that exists -- then immediately
+    -- re-pointed and repainted as a flat colour, which SetTexture(r,g,b,a)
+    -- does without touching the file again. If a client ever fails to hand
+    -- back the region the stock check mark stays: wrong art, still legible,
+    -- never a box whose state you cannot read.
+    pcall(function()
+        c:SetCheckedTexture("Interface\\Buttons\\UI-CheckBox-Check")
+    end)
+    local tick
+    pcall(function() tick = c:GetCheckedTexture() end)
+    if tick then
+        tick:ClearAllPoints()
+        tick:SetPoint("TOPLEFT", c, "TOPLEFT", CHK_INSET, -CHK_INSET)
+        tick:SetPoint("BOTTOMRIGHT", c, "BOTTOMRIGHT", -CHK_INSET, CHK_INSET)
+        tick:SetTexture(CHK.tick[1], CHK.tick[2], CHK.tick[3], 1)
+        c.tick = tick
+    end
+
+    -- Caption to the right of the box, registered with the font it was BORN
+    -- with so the text-size setting reaches it -- a creation path that skips
+    -- ui.RegisterFont silently stays small forever.
+    c.SetLabel = function(self, text, colour)
+        if not self.label then
+            self.label = self:CreateFontString(nil, "OVERLAY",
+                "GameFontHighlightSmall")
+            self.label:SetPoint("LEFT", self, "RIGHT", CHK_LABEL, 0)
+            self.label:SetJustifyH("LEFT")
+            ui.RegisterFont(self.label, "GameFontHighlightSmall")
+        end
+        self.label:SetText(text)
+        local col = colour or C.text
+        self.label:SetTextColor(col[1], col[2], col[3])
+        return self.label
+    end
+
+    -- Dimmed rather than hidden, so a row you cannot tick still reads as a row
+    -- with a tick box rather than one missing a column. Pairs with Disable(),
+    -- which is what actually refuses the click -- on 1.12 Disable() dims the
+    -- box art only and a FontString keeps its colour, so a disabled option
+    -- otherwise still reads as available.
+    c.SetDimmed = function(self, on)
+        local a = on and 0.30 or 1
+        self.fill:SetAlpha(a)
+        if self.tick then self.tick:SetAlpha(a) end
+        local k = 1
+        while k <= 4 do self.edge[k]:SetAlpha(a); k = k + 1 end
+        if self.label then
+            if on then
+                self.label:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
+            else
+                self.label:SetTextColor(C.text[1], C.text[2], C.text[3])
+            end
+            self.label:SetAlpha(on and 0.45 or 1)
+        end
+        if on then self:Disable() else self:Enable() end
+    end
+    return c
+end
+
 -- A plain checkbox with no SavedVariables binding, for the send form's
 -- per-mail toggles. (The settings tab's MakeCheck writes through to the DB and
 -- is declared further down, so it is not in scope here anyway.)
 local function MakeToggle(parent, name, label)
-    local c = CreateFrame("CheckButton", "AegisCourierToggle" .. name, parent,
-        "UICheckButtonTemplate")
-    c:SetWidth(20)
-    c:SetHeight(20)
-    local text = getglobal("AegisCourierToggle" .. name .. "Text")
-    if text then
-        text:SetText(label)
-        text:SetTextColor(C.text[1], C.text[2], C.text[3])
-    end
-    -- Kept so the label can be greyed with the box. CheckButton:Disable()
-    -- dims the box art only; on 1.12 the FontString keeps its colour and a
-    -- disabled option still reads as available.
-    c.labelText = text
+    local c = ui.MakeCheckBox(parent, CHK_SIZE,
+        "AegisCourierToggle" .. name)
+    -- Kept under its old name so every caller that reaches for the caption
+    -- still finds it; it is now the box's own FontString, not a global.
+    c.labelText = c:SetLabel(label)
     return c
 end
 
 -- Enable/disable a MakeToggle checkbox and colour its label to match.
 local function SetToggleEnabled(toggle, enabled)
-    if enabled then
-        toggle:Enable()
-        if toggle.labelText then
-            toggle.labelText:SetTextColor(C.text[1], C.text[2], C.text[3])
-        end
-    else
-        toggle:Disable()
-        if toggle.labelText then
-            toggle.labelText:SetTextColor(C.dim[1], C.dim[2], C.dim[3])
-        end
-    end
+    toggle:SetDimmed(not enabled)
 end
 
 -- A gold / silver / copper money input, matching Aegis: Exchange's.
@@ -3641,15 +3763,8 @@ end
 -- ---------------------------------------------------------------------------
 
 local function MakeCheck(parent, name, label, setting, onChange)
-    local c = CreateFrame("CheckButton", "AegisCourierCheck" .. name, parent,
-        "UICheckButtonTemplate")
-    c:SetWidth(22)
-    c:SetHeight(22)
-    local text = getglobal("AegisCourierCheck" .. name .. "Text")
-    if text then
-        text:SetText(label)
-        text:SetTextColor(C.text[1], C.text[2], C.text[3])
-    end
+    local c = ui.MakeCheckBox(parent, CHK_SIZE, "AegisCourierCheck" .. name)
+    local text = c:SetLabel(label)
     c:SetScript("OnClick", function()
         local on = c:GetChecked() and true or false
         db.SetSetting(setting, on)
@@ -3662,11 +3777,172 @@ local function MakeCheck(parent, name, label, setting, onChange)
     return c
 end
 
+-- The lowest point anything inside `frame` reaches, as a height from its top.
+--
+-- Measured rather than summed. The settings block is a chain of twenty-odd
+-- widgets whose offsets live in the layout code; a second copy of those
+-- numbers written out as a total is a copy that drifts, and the first thing it
+-- would get wrong is a wrapped hint line, whose height depends on the font
+-- scale and so is not a constant at all.
+--
+-- Returns nil when the frame has no resolved position yet (GetTop is nil while
+-- hidden), so callers keep the last good value.
+function ui.ContentExtent(frame)
+    local top = frame:GetTop()
+    if not top then return nil end
+    local lowest = top
+    local function sweep(list)
+        local i = 1
+        local n = table.getn(list)
+        while i <= n do
+            local o = list[i]
+            if o and o.GetBottom then
+                local b = o:GetBottom()
+                if b and b < lowest then lowest = b end
+            end
+            i = i + 1
+        end
+    end
+    -- 1.12 returns these as multiple values; the table constructor captures
+    -- them without needing select(), which does not exist on Lua 5.0.
+    sweep({ frame:GetChildren() })
+    sweep({ frame:GetRegions() })
+    return top - lowest
+end
+
+-- Fit the settings scroll child to its content and update the bar's range.
+-- Hides the bar entirely when everything already fits, which is the normal
+-- case on a window the player has dragged taller.
+function ui.UpdateCourierScroll()
+    local scroll, child = ui.courierScroll, ui.courierScrollChild
+    local sb = ui.courierScrollBar
+    if not scroll or not child or not sb then return end
+
+    local w = scroll:GetWidth()
+    if w and w > 0 then
+        child:SetWidth(w)
+        -- The integration status is the one block that WRAPS, so its width has
+        -- to follow the scroll rather than a constant: a literal WIN_W - 48
+        -- was both wrong once the bar appeared and wrong again the moment the
+        -- window was widened.
+        if ui.integStatus then
+            ui.integStatus:SetWidth(w - (SET_INSET * 2) - 4)
+        end
+    end
+
+    local measured = ui.ContentExtent(child)
+    if measured then
+        ui.courierContentH = measured + 10   -- breathing room under the last row
+    end
+    local contentH = ui.courierContentH or 300
+    child:SetHeight(contentH)
+
+    local viewH = scroll:GetHeight() or 0
+    local maxScroll = contentH - viewH
+    if maxScroll < 1 then
+        -- SetMinMaxValues clamps the current value into the new range by
+        -- itself, so the explicit reset is belt-and-braces; it is here because
+        -- "the bar went away and the block stayed scrolled up with empty space
+        -- under it" is a worse bug than one redundant call.
+        sb:SetMinMaxValues(0, 0)
+        sb:SetValue(0)
+        sb:Hide()
+    else
+        sb:SetMinMaxValues(0, maxScroll)
+        if sb:GetValue() > maxScroll then sb:SetValue(maxScroll) end
+        sb:Show()
+    end
+    ui.courierMaxScroll = maxScroll
+end
+
 function ui.BuildCourierPanel()
     local panel = ui.panels["Courier"]
 
+    -- EVERY SETTING LIVES IN A SCROLLFRAME, and that is a bug fix, not
+    -- decoration. The block is a fixed ~400px of controls and hint lines; the
+    -- panel is 330px at the window's minimum height, so at that size the last
+    -- two hints and the Forget-names button drew straight over the footer --
+    -- reported as "when it's at its smallest size it clips at the bottom".
+    -- 1.12 does not clip children, it just draws over whatever is there, so
+    -- there was nothing to stop it.
+    --
+    -- Raising the window's own minimum height would have worked and was the
+    -- wrong trade: the inbox is the view players keep small, and it would have
+    -- been forced 135px taller to make room for a tab it is not on.
+    local scroll = CreateFrame("ScrollFrame", "AegisCourierCourierScroll",
+        panel)
+    -- Pulled left by exactly the inset the content carries, so the block still
+    -- lines up with the panel edge and the inset is pure clip margin.
+    scroll:SetPoint("TOPLEFT", panel, "TOPLEFT", -SET_INSET, 0)
+    scroll:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -(SET_BAR_W + 6), 2)
+    ui.courierScroll = scroll
+
+    local child = CreateFrame("Frame", "AegisCourierCourierScrollChild", scroll)
+    child:SetWidth(WIN_W - 48)
+    child:SetHeight(400)
+    scroll:SetScrollChild(child)
+    ui.courierScrollChild = child
+
+    -- Hand-built from a base Slider rather than inheriting a scroll template:
+    -- Slider is a primitive widget type that always exists, so there is no
+    -- "Couldn't find inherited node" risk from guessing a 1.12 template name,
+    -- and it matches the Courier palette. courierNoSkin because pfUI's
+    -- SkinScrollbar reaches for the up/down buttons a template would have
+    -- supplied and ours has none.
+    local sb = CreateFrame("Slider", "AegisCourierCourierScrollBar", panel)
+    sb.courierNoSkin = true
+    sb:SetWidth(SET_BAR_W)
+    sb:SetPoint("TOPLEFT", scroll, "TOPRIGHT", 4, 0)
+    sb:SetPoint("BOTTOMLEFT", scroll, "BOTTOMRIGHT", 4, 0)
+    sb:SetOrientation("VERTICAL")
+    sb:SetMinMaxValues(0, 0)
+    sb:SetValue(0)
+    sb:SetValueStep(1)
+    sb:SetBackdrop({
+        bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
+        edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 3, right = 3, top = 6, bottom = 6 },
+    })
+    local thumb = sb:CreateTexture(nil, "OVERLAY")
+    thumb:SetTexture("Interface\\Buttons\\UI-SliderBar-Button-Vertical")
+    thumb:SetWidth(SET_BAR_W)
+    thumb:SetHeight(24)
+    sb:SetThumbTexture(thumb)
+    -- 1.12: the scripted widget is the global `this`, never a self argument.
+    --
+    -- NO REENTRANCY GUARD IS NEEDED HERE, and that is worth saying because
+    -- every FauxScrollFrame in this file has one. The loop those guard against
+    -- is FauxScrollFrame_Update -> OnValueChanged -> SetVerticalScroll ->
+    -- OnVerticalScroll -> the update function, which closes because
+    -- FauxScrollFrame routes the scroll back into the painter. A REAL
+    -- ScrollFrame's SetVerticalScroll just moves its child and calls nothing,
+    -- so the chain ends here.
+    sb:SetScript("OnValueChanged", function()
+        scroll:SetVerticalScroll(this:GetValue())
+    end)
+    sb:Hide()
+    ui.courierScrollBar = sb
+
+    -- Wheel over the settings scrolls them. arg1 is the wheel delta global
+    -- (+1 up / -1 down) on this client, not an argument.
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function()
+        local _, maxV = sb:GetMinMaxValues()
+        local v = sb:GetValue() - ((arg1 or 0) * 24)
+        if v < 0 then v = 0 end
+        if v > maxV then v = maxV end
+        sb:SetValue(v)
+    end)
+
+    -- From here down, the settings are built into the SCROLL CHILD. `panel` is
+    -- deliberately shadowed so nothing below can anchor to the clipping frame
+    -- by accident -- a widget pinned to the panel would sit outside the scroll
+    -- and keep the exact overflow this exists to fix.
+    local panel = child
+
     local head = Label(panel, "GameFontNormal", C.gold)
-    head:SetPoint("TOPLEFT", panel, "TOPLEFT", 6, -4)
+    head:SetPoint("TOPLEFT", panel, "TOPLEFT", 6 + SET_INSET, -4)
     head:SetText("Settings")
 
     local takeover = MakeCheck(panel, "Takeover",
@@ -3875,7 +4151,12 @@ function ui.BuildCourierPanel()
     local forget = ui.MakeButton(panel, "quiet", "AegisCourierBtnForgetNames")
     forget:SetWidth(120)
     forget:SetHeight(20)
-    forget:SetPoint("BOTTOMRIGHT", panel, "BOTTOMRIGHT", -4, 2)
+    -- IN THE FLOW, not pinned to the bottom. It used to hang off the panel's
+    -- BOTTOMRIGHT, which inside a scroll child means the bottom of the CHILD
+    -- -- 400px down and off screen -- and which on the unscrolled panel put it
+    -- straight on top of the stats line at the window's minimum height. The
+    -- last thing in the block is simply the last thing in the block.
+    forget:SetPoint("TOPLEFT", stats, "BOTTOMLEFT", -2, -12)
     forget:SetText("Forget names")
     forget:SetScript("OnEnter", function()
         GameTooltip:SetOwner(forget, "ANCHOR_LEFT")
@@ -3975,6 +4256,12 @@ function ui.RefreshCourier()
         "   |   Names: " .. table.getn(db.MatchContacts("", nil)) ..
         " recent, " ..
         table.getn(db.Alts(UnitName and UnitName("player") or nil)) .. " alts")
+
+    -- LAST, so the extent is measured against the text that is actually
+    -- there. The integration status runs to four wrapped lines when Aegis is
+    -- absent and one when it is not, so the block's height is not a constant
+    -- and re-fitting before writing it would measure the previous visit's.
+    ui.UpdateCourierScroll()
 end
 
 -- ---------------------------------------------------------------------------

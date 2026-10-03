@@ -35,6 +35,129 @@ local function MockIndex(_, key)
     return nil
 end
 
+-- ---------------------------------------------------------------------------
+-- REAL VERTICAL GEOMETRY, resolved through the anchor chain.
+--
+-- GetTop / GetBottom fell through to the CamelCase no-op, which made "does
+-- this panel's content actually fit inside its well" -- the exact question the
+-- settings tab overflowing its footer raised -- unanswerable. Courier measures
+-- its settings content by sweeping children and regions for the lowest
+-- GetBottom(), and a mock that answers nil for every one of them would agree
+-- with a panel that spills a hundred pixels past the window.
+--
+-- The model is the client's: y grows UPWARD, a widget's own named edge is
+-- placed at its anchor's named edge plus the offset, and a widget with no
+-- point at all has no position. Only the vertical axis is resolved, because
+-- that is the axis every overflow in this addon has been on.
+-- Size DERIVED from opposite-corner anchors when none was set explicitly.
+-- A texture pinned TOPLEFT and BOTTOMRIGHT inside its parent has a real size
+-- -- that is how an inset icon is built, and how every panel sits in its well
+-- -- and a mock that answers 0 cannot tell an inset that silently became a
+-- fill from one that did not, nor a panel from the empty space around it.
+local function derivedSize(self, horizontal)
+    local tl, br = self:PointOffset("TOPLEFT"), self:PointOffset("BOTTOMRIGHT")
+    if not tl or not br then return nil end
+    local rel = tl.rel
+    if type(rel) ~= "table" or not rel.GetWidth then return nil end
+    if horizontal then
+        return rel:GetWidth() + (br.x or 0) - (tl.x or 0)
+    end
+    return rel:GetHeight() + (tl.y or 0) - (br.y or 0)
+end
+
+local function edgeNames(pt)
+    pt = pt or "CENTER"
+    if string.find(pt, "^TOP") then return "top" end
+    if string.find(pt, "^BOTTOM") then return "bottom" end
+    return "middle"
+end
+
+local RESOLVING = {}
+
+-- Absolute y of `o`'s `which` edge ("top" / "bottom" / "middle"), or nil.
+local function edgeY(o, which)
+    if type(o) ~= "table" then return nil end
+    if o.MockEdgeY then return o:MockEdgeY(which) end
+    return nil
+end
+
+-- Installed on both frames and regions, so a font string trailing a button
+-- resolves exactly as the button does.
+local function installGeometry(o)
+    function o:MockEdgeY(which)
+        -- A cycle in the anchor graph is a bug in the addon, not something to
+        -- loop on: answer nil and let the measurement come back short.
+        if RESOLVING[self] then return nil end
+        local pts = rawget(self, "points") or {}
+        local n = table.getn(pts)
+        if n == 0 then
+            -- NO POINT MEANS NO POSITION, exactly as on the client, where
+            -- GetTop() on an unplaced frame answers nil. Only the SCREEN has
+            -- an origin of its own (mockOrigin, set on UIParent), and every
+            -- chain resolves back to it.
+            --
+            -- This is not a detail: answering 0 here put an unanchored
+            -- stand-in BELOW every real widget, because these coordinates are
+            -- positive. A content sweep then measured to that stand-in and
+            -- reported a height bigger than anything in the frame -- which is
+            -- how a mock that hands back a fresh region instead of the real
+            -- ones passed a measurement it could not make.
+            if rawget(self, "mockOrigin") then
+                local h = self:GetHeight() or 0
+                if which == "top" then return 0 end
+                if which == "bottom" then return -h end
+                return -h / 2
+            end
+            -- A FRAME the client placed for us -- our own window is positioned
+            -- by the client's user-placed machinery, not by a SetPoint of
+            -- ours -- resolves to its parent's top, which keeps every offset
+            -- below it a real, comparable number.
+            --
+            -- A REGION cannot reach this: regions carry no parent, so a bare
+            -- stand-in handed back by a mock that lost the real ones answers
+            -- nil and is skipped, instead of reporting a position BELOW every
+            -- real widget (these coordinates are positive) and inflating a
+            -- content measurement past anything in the frame.
+            local parent = rawget(self, "parent")
+            if not parent then return nil end
+            local pt = edgeY(parent, "top")
+            if not pt then return nil end
+            local h = self:GetHeight() or 0
+            if which == "top" then return pt end
+            if which == "bottom" then return pt - h end
+            return pt - h / 2
+        end
+        RESOLVING[self] = true
+        local h = self:GetHeight() or 0
+        local myTop
+        local i = 1
+        while i <= n do
+            local pt = pts[i]
+            local anchor = edgeY(pt.rel, edgeNames(pt.relPoint or pt.point))
+            if anchor then
+                local y = anchor + (pt.y or 0)
+                local mine = edgeNames(pt.point)
+                local top
+                if mine == "top" then top = y
+                elseif mine == "bottom" then top = y + h
+                else top = y + h / 2 end
+                -- The HIGHEST top wins, which is what a frame pinned at both
+                -- TOPLEFT and BOTTOMRIGHT resolves to on the client: its top
+                -- comes from the top point.
+                if mine == "top" or not myTop then myTop = top end
+            end
+            i = i + 1
+        end
+        RESOLVING[self] = nil
+        if not myTop then return nil end
+        if which == "top" then return myTop end
+        if which == "bottom" then return myTop - h end
+        return myTop - h / 2
+    end
+    function o:GetTop() return self:MockEdgeY("top") end
+    function o:GetBottom() return self:MockEdgeY("bottom") end
+end
+
 local function newRegion()
     local r = { visible = true }
     setmetatable(r, { __index = MockIndex })
@@ -95,22 +218,12 @@ local function newRegion()
         end
         return found
     end
-    -- Size DERIVED from opposite-corner anchors when none was set explicitly.
-    -- A texture pinned TOPLEFT and BOTTOMRIGHT inside its parent has a real
-    -- size -- that is how an inset icon is built -- and a mock that answers 0
-    -- cannot tell an inset that silently became a fill from one that did not.
-    local function derived(self, horizontal)
-        local tl, br = self:PointOffset("TOPLEFT"), self:PointOffset("BOTTOMRIGHT")
-        if not tl or not br then return nil end
-        local rel = tl.rel
-        if type(rel) ~= "table" or not rel.GetWidth then return nil end
-        if horizontal then
-            return rel:GetWidth() + (br.x or 0) - (tl.x or 0)
-        end
-        return rel:GetHeight() + (tl.y or 0) - (br.y or 0)
-    end
+    local derived = derivedSize
     function r:GetWidth() return rawget(self, "w") or derived(self, true) or 0 end
-    function r:GetHeight() return rawget(self, "h") or derived(self, false) or 0 end
+    function r:GetHeight()
+        return rawget(self, "h") or derived(self, false)
+            or self:MockTextHeight() or 0
+    end
     function r:SetAllPoints(other)
         rawset(self, "allPoints", other or true)
         if type(other) == "table" and other.GetWidth then
@@ -119,7 +232,35 @@ local function newRegion()
         end
     end
     function r:GetStringWidth() return string.len(rawget(self, "text") or "") * 6 end
+    -- A FONT STRING HAS A HEIGHT even though nothing ever calls SetHeight on
+    -- one: the client gives it its font's line height, times however many
+    -- lines the text wraps to. Answering 0 is what let a panel whose content
+    -- is almost entirely text measure as empty, which is the one measurement
+    -- the settings overflow turns on. The per-character width model is the
+    -- same 6px one GetStringWidth already uses, so the two agree.
+    local LINE_PAD = 2
+    function r:MockTextHeight()
+        local text = rawget(self, "text")
+        if not text or text == "" then return nil end
+        local _, size = self:GetFont()
+        local line = size or 12
+        local lines = 1
+        local w = rawget(self, "w")
+        if w and w > 0 then
+            lines = math.ceil(self:GetStringWidth() / w)
+            if lines < 1 then lines = 1 end
+        end
+        return lines * line + (lines - 1) * (rawget(self, "spacing") or LINE_PAD)
+    end
+    function r:SetSpacing(s) rawset(self, "spacing", s) end
+    installGeometry(r)
     function r:SetTexture(t) self.texture = t end
+    -- REAL ALPHA. SetDimmed is entirely alpha, so a mock that swallows it can
+    -- only ever assert "it did not error" -- which is how a disabled option
+    -- that still looks available ships.
+    rawset(r, "alpha", 1)
+    function r:SetAlpha(a) rawset(self, "alpha", a or 1) end
+    function r:GetAlpha() return rawget(self, "alpha") or 1 end
     function r:Show() self.visible = true end
     function r:Hide() self.visible = false end
     function r:IsVisible() return self.visible end
@@ -138,15 +279,40 @@ CreateFrame = function(kind, name, parent, template)
     if type(parent) == "table" and rawget(parent, "children") then
         table.insert(parent.children, f)
     end
+    -- Kept for the geometry resolver: a frame with no point of its own falls
+    -- back to its parent's top. See MockEdgeY.
+    if type(parent) == "table" then rawset(f, "parent", parent) end
+    function f:GetParent() return rawget(self, "parent") end
     function f:GetChildren() return unpack(rawget(self, "children") or {}) end
     function f:GetObjectType() return rawget(self, "kind") or "Frame" end
     function f:SetScript(k, fn) self.scripts[k] = fn end
     function f:GetScript(k) return self.scripts[k] end
     function f:HasScript() return true end
     function f:RegisterEvent(e) self.events[e] = true end
-    function f:CreateFontString() return newRegion() end
-    function f:CreateTexture() return newRegion() end
-    function f:GetRegions() return newRegion() end
+    -- REAL region tracking. GetRegions() handed back a single FRESH region, so
+    -- a sweep over a frame's own font strings and textures -- which is how the
+    -- settings content measures itself -- found one empty stand-in and
+    -- concluded the panel was empty. Regions are still not CHILDREN, matching
+    -- the client.
+    local function keepRegion(self, rname)
+        local rs = rawget(self, "regions")
+        if not rs then rs = {}; rawset(self, "regions", rs) end
+        local r = newRegion()
+        r.name = rname
+        -- A NAMED region becomes a GLOBAL, exactly as on the client. The name
+        -- argument was swallowed, so "did this stop creating a global for its
+        -- caption" -- the whole reason the checkbox label is a method now --
+        -- was unanswerable.
+        -- _G directly, not setglobal: this runs inside CreateFrame, which is
+        -- defined above the setglobal shim.
+        if rname then _G[rname] = r end
+        table.insert(rs, r)
+        return r
+    end
+    function f:CreateFontString(rname) return keepRegion(self, rname) end
+    function f:CreateTexture(rname) return keepRegion(self, rname) end
+    function f:GetRegions() return unpack(rawget(self, "regions") or {}) end
+    installGeometry(f)
     function f:IsVisible() return self.visible end
     -- REAL mouse-enable tracking. A plain Frame does NOT receive mouse events
     -- until EnableMouse(true) -- only Buttons are interactive by default -- so
@@ -157,6 +323,21 @@ CreateFrame = function(kind, name, parent, template)
     rawset(f, "mouseEnabled", (kind == "Button"))
     function f:EnableMouse(on) rawset(self, "mouseEnabled", on and true or false) end
     function f:IsMouseEnabled() return rawget(self, "mouseEnabled") end
+    -- The CHECKED TEXTURE is a real region. SetCheckedTexture takes a PATH on
+    -- 1.12 and the only way to recolour the tick is to ask for the region back
+    -- and repaint it; a mock that hands back nil cannot tell the gold tick
+    -- from Blizzard's blue-grey one, and the code's own nil fallback would
+    -- have been the only path ever tested.
+    function f:SetCheckedTexture(path)
+        local r = rawget(self, "checkedTex")
+        if not r then r = newRegion(); rawset(self, "checkedTex", r) end
+        r.texture = path
+        return r
+    end
+    function f:GetCheckedTexture() return rawget(self, "checkedTex") end
+    rawset(f, "alpha", 1)
+    function f:SetAlpha(a) rawset(self, "alpha", a or 1) end
+    function f:GetAlpha() return rawget(self, "alpha") or 1 end
     function f:GetChecked() return self.checked end
     function f:SetChecked(v) self.checked = v and true or false end
     -- Fonts, same as on regions: an EditBox is a FRAME, so a text-size setting
@@ -230,6 +411,15 @@ CreateFrame = function(kind, name, parent, template)
         table.insert(pts, { point = pt, rel = rel, relPoint = relPt, x = x, y = y })
     end
     function f:ClearAllPoints() rawset(self, "points", {}) end
+    function f:PointOffset(name)
+        local pts = rawget(self, "points") or {}
+        local found, i = nil, 1
+        while i <= table.getn(pts) do
+            if pts[i].point == name then found = pts[i] end
+            i = i + 1
+        end
+        return found
+    end
     -- Which frame this is currently pinned to, or nil.
     function f:AnchorTarget()
         local pts = rawget(self, "points")
@@ -254,8 +444,61 @@ CreateFrame = function(kind, name, parent, template)
     end
     function f:SetWidth(w) rawset(self, "w", w) end
     function f:SetHeight(h) rawset(self, "h", h) end
-    function f:GetWidth() return rawget(self, "w") or 0 end
-    function f:GetHeight() return rawget(self, "h") or 0 end
+    -- Derived from opposite-corner anchors when no size was set, exactly as on
+    -- regions. A panel pinned TOPLEFT and BOTTOMRIGHT inside its well has a
+    -- real height, and answering 0 for it made every "does the content fit"
+    -- question compare against nothing.
+    function f:GetWidth()
+        return rawget(self, "w") or derivedSize(self, true) or 0
+    end
+    function f:GetHeight()
+        return rawget(self, "h") or derivedSize(self, false) or 0
+    end
+    -- REAL SLIDER AND SCROLLFRAME BEHAVIOUR. Both fell through to the
+    -- CamelCase no-op, so GetValue answered nil and a settings pane that
+    -- scrolled nowhere at all -- or crashed comparing that nil -- would have
+    -- passed. A scrollbar is value, range and clamping; a mock that holds none
+    -- of the three cannot answer "did the content fit".
+    rawset(f, "value", 0)
+    rawset(f, "minV", 0)
+    rawset(f, "maxV", 0)
+    function f:SetMinMaxValues(lo, hi)
+        rawset(self, "minV", lo or 0)
+        rawset(self, "maxV", hi or 0)
+        -- The client clamps the current value into the new range, and that
+        -- re-fires OnValueChanged. Modelled, because a range that shrinks
+        -- under a scrolled-down bar is exactly the resize case.
+        local v = rawget(self, "value") or 0
+        if v > (hi or 0) then self:SetValue(hi or 0) end
+    end
+    function f:GetMinMaxValues()
+        return rawget(self, "minV") or 0, rawget(self, "maxV") or 0
+    end
+    function f:SetValue(v)
+        v = v or 0
+        local lo, hi = self:GetMinMaxValues()
+        if v < lo then v = lo end
+        if v > hi then v = hi end
+        local was = rawget(self, "value")
+        rawset(self, "value", v)
+        if was == v then return end
+        local fn = self.scripts and self.scripts.OnValueChanged
+        if not fn then return end
+        local prev = this
+        this = self
+        fn()
+        this = prev
+    end
+    function f:GetValue() return rawget(self, "value") or 0 end
+    function f:SetValueStep(s) rawset(self, "valueStep", s) end
+    function f:SetScrollChild(c) rawset(self, "scrollChild", c) end
+    function f:GetScrollChild() return rawget(self, "scrollChild") end
+    function f:SetVerticalScroll(v) rawset(self, "vScroll", v or 0) end
+    function f:GetVerticalScroll() return rawget(self, "vScroll") or 0 end
+    function f:EnableMouseWheel(on)
+        rawset(self, "wheelEnabled", on and true or false)
+    end
+    function f:IsMouseWheelEnabled() return rawget(self, "wheelEnabled") end
     function f:SetFrameLevel(n) rawset(self, "level", n) end
     function f:GetFrameLevel() return rawget(self, "level") or 1 end
     function f:SetFocus() focusedBox = self end
@@ -296,6 +539,10 @@ getglobal = function(n) return _G[n] end
 setglobal = function(n, v) _G[n] = v end
 
 UIParent = CreateFrame("Frame", "UIParent")
+-- The screen is the one frame with an origin of its own; see MockEdgeY.
+rawset(UIParent, "mockOrigin", true)
+UIParent:SetWidth(1024)
+UIParent:SetHeight(768)
 UISpecialFrames = {}
 
 -- ---- font objects ----------------------------------------------------------
@@ -856,6 +1103,21 @@ local A = AegisCourier
 local function Click(btn)
     if not btn or not btn.scripts or not btn.scripts.OnClick then return false end
     if btn.IsEnabled and not btn:IsEnabled() then return false end
+    -- A CHECKBUTTON TOGGLES ITSELF BEFORE OnClick RUNS on this client, and
+    -- every handler in the addon is written against that -- they read
+    -- GetChecked() inside OnClick and expect the NEW value. Firing OnClick
+    -- without the toggle hand-feeds the handler the old state, and it also
+    -- means a widget whose SetChecked/GetChecked had been shadowed by a
+    -- private flag would pass: the shadow and the widget only disagree once
+    -- the WIDGET is the thing that moved.
+    if btn.GetObjectType and btn:GetObjectType() == "CheckButton" then
+        -- RAW, not through SetChecked: the ENGINE flips the widget, it does
+        -- not call a Lua method. Going through the method is what let a
+        -- shadowed SetChecked/GetChecked pair look self-consistent -- the
+        -- shadow and the widget only disagree because the engine writes one
+        -- and the handler reads the other.
+        rawset(btn, "checked", not rawget(btn, "checked"))
+    end
     btn.scripts.OnClick()
     return true
 end
@@ -3732,6 +3994,448 @@ A.ui.SetFontScale(1.0)
 
 end
 
+do
+print("== send: a server that never answers does not hang the addon ==")
+-- REPORTED AS "it gets stuck when sending mail". Between SendMail and the
+-- server's reply the run is armed by NOTHING -- only MAIL_SEND_SUCCESS or
+-- MAIL_FAILED arms the next step. If neither ever comes, send.sending stays
+-- true for the rest of the session, the Send button reads "already sending"
+-- forever, and only a /reload clears it. No bug in the send loop is needed:
+-- the server going quiet once is enough.
+local function tickSilent(seconds)
+    -- The driver, with NO acknowledgement delivered. pumpSend always hands one
+    -- over, so it can never see this state.
+    --
+    -- A HIDDEN FRAME RUNS NO OnUpdate on the real client, so this must be a
+    -- loud failure and not a silent skip: a mock that ticks a hidden frame
+    -- hands the watchdog a clock the client would never provide, and the
+    -- watchdog is only reachable at all because send.Wake keeps the driver
+    -- shown for the whole batch.
+    if not sdriver.visible then
+        check(false, "the send driver must be SHOWN to tick")
+        return
+    end
+    arg1 = seconds
+    sdriver.scripts.OnUpdate()
+    arg1 = nil
+end
+
+-- Everything below is DERIVED from send.ACK_TIMEOUT so the behaviour test
+-- cannot drift from the constant -- but that also means the constant itself
+-- needs a bound of its own, or a patience of ten hours would satisfy every
+-- check here and still be an unrecoverable hang to the player.
+check(send.ACK_TIMEOUT >= 3 and send.ACK_TIMEOUT <= 30,
+      "the patience is a human timeframe", send.ACK_TIMEOUT)
+
+stockBags()
+send.atMailbox = true
+send.ClearAttachments()
+send.Attach(0, 1); send.Attach(0, 2)
+DEFAULT_CHAT_FRAME.messages = {}
+check(send.Start("Ann", "x", "", 0, false, false), "a batch started")
+pendingAck = nil                      -- the server simply says nothing
+check(send.sending, "and is waiting on the server")
+check(sdriver.visible, "with the driver live to notice the silence")
+
+tickSilent(send.ACK_TIMEOUT - 1)
+check(send.sending, "a slow reply is still waited for")
+
+tickSilent(2)
+check(not send.sending, "but silence past the timeout stops the run")
+check(send.armed == false, "with nothing left armed")
+local said = table.concat(DEFAULT_CHAT_FRAME.messages, " | ")
+check(A.util.Contains(said, "no reply"), "and says why", said)
+check(A.util.Contains(said, "still attached"),
+      "and what is still waiting to go", said)
+-- The attachments are the player's list, and a run that stopped must leave
+-- them alone -- every item is still in their bags.
+check(send.Count() > 0, "the attachment list survives", send.Count())
+
+-- And the driver puts ITSELF away afterwards, with the clock wound back. It
+-- stays up for one more frame because only an OnUpdate can notice the run has
+-- ended -- which is also the frame that has to leave send.silent at zero, or
+-- the next batch inherits this one's accumulated silence and trips early.
+check(sdriver.visible, "the driver is up for one more frame")
+tickSilent(1)
+check(not sdriver.visible, "and then puts itself away")
+check((send.silent or 0) == 0, "with the clock wound back for the next batch",
+      send.silent)
+
+print("== send: an acknowledgement resets the patience ==")
+-- A long healthy batch must never trip the watchdog: arming the next step
+-- restarts the clock, so only a genuinely silent server reaches it.
+--
+-- The silence has to land in SEVERAL un-armed frames PER MAIL for this to test
+-- anything. An earlier version of this test ticked once and acknowledged in
+-- the same breath, so the clock never got a second reading and every reset in
+-- the file could be deleted with the suite still green.
+send.ClearAttachments()
+send.Attach(0, 1); send.Attach(0, 2); send.Attach(0, 3)
+send.atMailbox = true
+DEFAULT_CHAT_FRAME.messages = {}
+send.Start("Ann", "x", "", 0, false, false)
+local long, half = 0, (send.ACK_TIMEOUT - 1) / 2
+while send.sending and long < 40 do
+    if send.armed then
+        tickSilent(0)                     -- the armed step issues the next mail
+    else
+        tickSilent(half)                  -- nearly out of patience...
+        tickSilent(half)                  -- ...and this is the second reading
+        if send.sending and pendingAck then
+            local ack = pendingAck; pendingAck = nil; fire(ack)   -- then a reply
+        end
+    end
+    long = long + 1
+end
+check(not send.sending, "the batch finished")
+check(table.getn(SENT) >= 3, "and every mail went out", table.getn(SENT))
+check(not A.util.Contains(
+          table.concat(DEFAULT_CHAT_FRAME.messages, " | "), "no reply"),
+      "and the watchdog never fired on it")
+
+print("== send: a step waiting on a locked slot is not silence ==")
+-- The watchdog must only ever see "mail issued, server quiet". A step that is
+-- merely re-arming itself to wait for a bag lock is armed, so it never reaches
+-- the silence branch -- otherwise a slow bag update would abort a healthy run.
+send.ClearAttachments()
+send.sending = true
+send.armed = true
+send.wait = 999                       -- armed and waiting a long time
+send.silent = 0
+sdriver:Show()
+rawset(sdriver, "justShown", nil)
+tickSilent(send.ACK_TIMEOUT * 3)
+check(send.sending, "an armed step is left alone")
+check((send.silent or 0) == 0, "and the silence clock never started",
+      send.silent)
+send.sending = false
+send.armed = false
+send.wait = 0
+sdriver:Hide()
+
+print("== send: closing the mailbox mid-batch stops it cleanly ==")
+-- The easy way to hit the hang: closing Courier's own window calls
+-- CloseMail(), so starting a twelve-item send and shutting the window was all
+-- it took. With the session gone no acknowledgement can arrive at all.
+stockBags()
+send.atMailbox = true
+send.ClearAttachments()
+send.Attach(0, 1); send.Attach(0, 2)
+send.Start("Ann", "x", "", 0, false, false)
+pendingAck = nil
+check(send.sending, "a batch is running")
+DEFAULT_CHAT_FRAME.messages = {}
+fire("MAIL_CLOSED")
+check(not send.sending, "closing the mailbox stops it")
+said = table.concat(DEFAULT_CHAT_FRAME.messages, " | ")
+check(A.util.Contains(said, "mailbox closed"), "and says so", said)
+check(A.util.Contains(said, "still attached"), "and what is left", said)
+check(send.Count() > 0, "the attachment list survives that too", send.Count())
+
+-- And it says nothing at all when no batch was running, which is every other
+-- time a player walks away from a mailbox.
+DEFAULT_CHAT_FRAME.messages = {}
+fire("MAIL_SHOW")
+fire("MAIL_CLOSED")
+said = table.concat(DEFAULT_CHAT_FRAME.messages, " | ")
+check(not A.util.Contains(said, "mid-send"),
+      "walking away with nothing in flight is silent", said)
+send.ClearAttachments()
+
+end
+
+do
+print("== checkbox: our art, not the template's and not pfUI's ==")
+-- A VERBATIM PORT of Exchange's ui.MakeCheckBox, for the reason BTN_KIND is
+-- one: the two addons sit in the same UI and a hand-adjusted copy drifts.
+local box = A.ui.MakeCheckBox(A.ui.frame, nil, "AegisCourierTestChk")
+check(box:GetObjectType() == "CheckButton", "still a real CheckButton",
+      box:GetObjectType())
+check(box.courierNoSkin and true or false,
+      "opted out of pfUI -- its SkinCheckbox renders a small box as a circle")
+check(box:GetWidth() == box:GetHeight(), "square", box:GetWidth())
+check(box.fill ~= nil, "a flat fill rather than template art")
+check(table.getn(box.edge) == 4,
+      "and FOUR 1px borders, not a backdrop -- an edgeSize approaching the "
+      .. "frame size renders as a garbled cross", table.getn(box.edge))
+-- Each border is 1px on its own axis and stretched on the other, which is
+-- what keeps it square at any size.
+check(box.edge[1]:GetHeight() == 1, "top edge is 1px", box.edge[1]:GetHeight())
+check(box.edge[3]:GetWidth() == 1, "left edge is 1px", box.edge[3]:GetWidth())
+
+-- THE CHECKED STATE IS THE WIDGET'S OWN. SetChecked/GetChecked must not be
+-- shadowed: a CheckButton toggles itself BEFORE OnClick runs and every handler
+-- here reads GetChecked() inside OnClick expecting the new value, so a private
+-- flag would leave two answers and each handler reading the wrong one.
+box:SetChecked(true)
+check(box:GetChecked() and true or false, "checked state is the widget's")
+box:SetChecked(false)
+check(not box:GetChecked(), "and clears")
+
+-- AND THE CLICK PATH PROVES IT. The client toggles the widget before OnClick
+-- runs, so a handler reading GetChecked() reads the new value; shadowing the
+-- pair with a private flag leaves the widget and the shadow disagreeing the
+-- moment the WIDGET is what moved, and every settings handler then writes the
+-- wrong thing to the DB.
+local wasLog = A.db.Setting("logEnabled") and true or false
+check(Click(A.ui.checkLog), "a settings box is clickable")
+check((A.db.Setting("logEnabled") and true or false) ~= wasLog,
+      "and one click flips the setting it is bound to",
+      tostring(A.db.Setting("logEnabled")))
+check(Click(A.ui.checkLog), "clickable again")
+check((A.db.Setting("logEnabled") and true or false) == wasLog,
+      "and the second click flips it back -- not stuck on one value",
+      tostring(A.db.Setting("logEnabled")))
+
+-- The tick is the widget's CHECKED texture, recoloured -- so the client shows
+-- and hides it for us and it can never disagree with the state.
+check(box.tick ~= nil, "the tick is the widget's own checked texture")
+if box.tick then
+    local tl = box.tick:PointOffset("TOPLEFT")
+    local br = box.tick:PointOffset("BOTTOMRIGHT")
+    check(tl ~= nil and br ~= nil, "inset at both corners")
+    if tl and br then
+        check(tl.x > 0 and br.x < 0, "inside the box, not filling it",
+              tostring(tl.x) .. "/" .. tostring(br.x))
+    end
+end
+
+print("== checkbox: the caption is a METHOD, not a global ==")
+-- UICheckButtonTemplate supplied one as a global named "<name>Text", so every
+-- settings row needed a frame name just to reach its own label.
+local lbl = box:SetLabel("Hello")
+check(lbl ~= nil and lbl:GetText() == "Hello", "SetLabel returns the string",
+      lbl and lbl:GetText())
+check(getglobal("AegisCourierTestChkText") == nil,
+      "and no global was created for it")
+local pt = lbl:PointOffset("LEFT")
+check(pt ~= nil and pt.relPoint == "RIGHT", "sitting to the right of the box")
+
+-- Rule 32: every creation path REGISTERS with the font it was born with, or it
+-- silently stays small forever.
+A.ui.SetFontScale(1.4)
+local _, sz = lbl:GetFont()
+check(sz ~= nil and sz > 10, "and the text-size setting reaches it", tostring(sz))
+A.ui.SetFontScale(1.0)
+
+print("== checkbox: dimmed reads as unavailable, not as missing ==")
+box:SetLabel("Hello")
+box:SetDimmed(true)
+check(box.fill:GetAlpha() < 1, "the box fades", box.fill:GetAlpha())
+check(box.label:GetAlpha() < 1, "and so does the caption", box.label:GetAlpha())
+check(box.edge[1]:GetAlpha() < 1, "borders too", box.edge[1]:GetAlpha())
+-- 1.12's IsEnabled answers 1 or NIL, never false.
+check(not box:IsEnabled(),
+      "and the click is actually refused, not just greyed")
+box:SetDimmed(false)
+check(box.fill:GetAlpha() == 1, "and it all comes back", box.fill:GetAlpha())
+check(box:IsEnabled() and true or false, "clickable again")
+end
+
+do
+print("== settings: the block SCROLLS, so it cannot clip the footer ==")
+-- REPORTED AS "when it's at its smallest size it clips at the bottom". The
+-- settings block is a fixed stack of controls and hint lines taller than the
+-- panel is at the window's minimum height, and 1.12 does not clip children --
+-- it draws over whatever is there, which was the footer and the window edge.
+local g = A.ui.Geometry()
+local scroll = A.ui.courierScroll
+local child  = A.ui.courierScrollChild
+local sb     = A.ui.courierScrollBar
+check(scroll ~= nil and child ~= nil and sb ~= nil, "there is a scroll frame")
+check(scroll:GetObjectType() == "ScrollFrame",
+      "a REAL ScrollFrame -- the only 1.12 widget that clips",
+      scroll:GetObjectType())
+check(scroll:GetScrollChild() == child, "with the settings block as its child")
+check(sb.courierNoSkin and true or false,
+      "the bar opts out of pfUI, which reaches for buttons we never built")
+
+A.ui.frame:Show()
+local function fitAt(h)
+    A.ui.frame:SetHeight(h)
+    A.ui.SelectSubTab("Courier")
+    A.ui.RefreshCourier()
+    return scroll:GetHeight() or 0, child:GetHeight() or 0
+end
+
+-- ACROSS THE SIZE RANGE, not at one height: the whole bug lived at the
+-- minimum and was invisible at the default.
+local heights = { g.minH, g.defaultH, g.maxH }
+local i = 1
+while i <= table.getn(heights) do
+    local h = heights[i]
+    local viewH, contentH = fitAt(h)
+    check(viewH > 0, "at h=" .. h .. " the view has a height", viewH)
+    check(contentH > 0, "and the content measures itself", contentH)
+    -- The invariant: either everything fits, or the bar is there to reach the
+    -- rest. Never "content taller than the view and no way down".
+    local fits = contentH <= viewH
+    check(fits or sb:IsVisible(),
+          "either it fits or the bar is up (h=" .. h .. ")",
+          contentH .. " in " .. viewH)
+    check((not fits) or (not sb:IsVisible()),
+          "and the bar is NOT up when it fits (h=" .. h .. ")")
+    if not fits then
+        local _, maxV = sb:GetMinMaxValues()
+        check(maxV >= contentH - viewH,
+              "the bar reaches the bottom of the content (h=" .. h .. ")",
+              maxV .. " vs " .. (contentH - viewH))
+    end
+    i = i + 1
+end
+
+print("== settings: the measurement sweeps children AND regions ==")
+-- The block is half frames (checkboxes, buttons) and half font strings, so a
+-- sweep that looks at only one of them under-measures and the bar stops short
+-- of the bottom. Both are checked against the child's own measured height.
+local viewH0, contentH0 = fitAt(g.minH)
+local top = child:GetTop()
+local function lowest(list)
+    local low, i, n = nil, 1, table.getn(list)
+    while i <= n do
+        local o = list[i]
+        if o and o.GetBottom then
+            local b = o:GetBottom()
+            if b and (not low or b < low) then low = b end
+        end
+        i = i + 1
+    end
+    return low
+end
+local lowKid = lowest({ child:GetChildren() })
+local lowReg = lowest({ child:GetRegions() })
+check(lowKid ~= nil, "there are child frames to measure")
+check(lowReg ~= nil, "and regions to measure")
+if top and lowKid then
+    check(contentH0 >= top - lowKid,
+          "the measured height reaches the lowest CHILD",
+          contentH0 .. " vs " .. (top - lowKid))
+end
+if top and lowReg then
+    check(contentH0 >= top - lowReg,
+          "and the lowest REGION", contentH0 .. " vs " .. (top - lowReg))
+end
+
+-- Directly, on a frame whose LOWEST item is a region. Today the settings
+-- block ends in a button, so the region sweep rides along without being
+-- load-bearing -- and the day a hint line is the last thing, a children-only
+-- sweep would under-measure and the bar would stop short of it.
+local probe = CreateFrame("Frame", nil, A.ui.frame)
+probe:SetWidth(100); probe:SetHeight(10)
+probe:SetPoint("TOPLEFT", A.ui.frame, "TOPLEFT", 0, 0)
+local pk = CreateFrame("Frame", nil, probe)
+pk:SetWidth(10); pk:SetHeight(10)
+pk:SetPoint("TOPLEFT", probe, "TOPLEFT", 0, -20)
+local pr = probe:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+pr:SetPoint("TOPLEFT", pk, "BOTTOMLEFT", 0, -40)
+pr:SetText("the last word")
+local extent = A.ui.ContentExtent(probe)
+check(extent ~= nil and extent >= 70,
+      "a trailing font string is measured, not just the child frames",
+      tostring(extent))
+
+print("== settings: the smallest window is the case that broke ==")
+local viewH, contentH = fitAt(g.minH)
+check(contentH > viewH,
+      "the block really is taller than the panel at minimum size",
+      contentH .. " > " .. viewH)
+check(sb:IsVisible(), "so the bar is there")
+
+-- The wheel scrolls it. arg1 is the wheel delta GLOBAL on this client, so a
+-- handler written to take a parameter would scroll by nil.
+local before = sb:GetValue()
+arg1 = -1
+scroll.scripts.OnMouseWheel()
+arg1 = nil
+check(sb:GetValue() > before, "the wheel scrolls down", sb:GetValue())
+check(scroll:GetVerticalScroll() == sb:GetValue(),
+      "and the view follows the bar", scroll:GetVerticalScroll())
+check(scroll:IsMouseWheelEnabled() and true or false,
+      "because the frame actually takes wheel events")
+
+arg1 = 1
+scroll.scripts.OnMouseWheel()
+arg1 = nil
+check(sb:GetValue() == before, "and back up", sb:GetValue())
+
+-- Scrolled to the bottom, then the window is dragged tall enough to fit:
+-- the bar goes away and the view must come back to the top, or the block sits
+-- shifted up with empty space under it.
+sb:SetValue(1000)
+fitAt(g.defaultH)
+check(not sb:IsVisible(), "growing the window puts the bar away")
+check(scroll:GetVerticalScroll() == 0, "and scrolls back to the top",
+      scroll:GetVerticalScroll())
+
+print("== settings: nothing is anchored to the clipping frame ==")
+-- A widget pinned to the PANEL rather than to the scroll child sits outside
+-- the scroll and keeps the exact overflow this exists to fix. `panel` is
+-- shadowed in the builder so that cannot happen by accident; this is the
+-- assertion that says so.
+local panel = A.ui.panels["Courier"]
+local strays = 0
+local kids = { panel:GetChildren() }
+local k = 1
+while k <= table.getn(kids) do
+    local c = kids[k]
+    if c ~= scroll and c ~= sb then strays = strays + 1 end
+    k = k + 1
+end
+check(strays == 0,
+      "the panel holds only the scroll frame and its bar", strays)
+
+-- And the Forget button is IN THE FLOW. Pinned to a scroll child's bottom it
+-- would sit at the bottom of the 417px child -- off screen -- and pinned to
+-- the panel it drew over the stats line at minimum height.
+local forget = A.ui.btnForgetNames
+check(forget:PointOffset("BOTTOMRIGHT") == nil,
+      "Forget names is not pinned to a bottom")
+check(forget:AnchorTarget() ~= panel,
+      "and not to the clipping panel either")
+
+print("== settings: the clip line does not shave the checkboxes ==")
+-- The clip line falls on the scroll child's left edge. Text gets away with
+-- sitting on it because a glyph carries its own side bearing; a checkbox's
+-- solid 1px edge texture does not, and comes back shaved. The block is inset
+-- and the scroll frame pulled left by the same amount, so the inset is pure
+-- clip margin and the layout does not move.
+local box = A.ui.checkTakeover
+local sp = scroll:PointOffset("TOPLEFT")
+check(sp ~= nil and sp.x < 0,
+      "the scroll frame is pulled LEFT of the panel by the inset",
+      sp and sp.x)
+-- Walk the checkbox's anchor chain back to the child and sum the x offsets.
+local function leftInset(w)
+    local total, guard = 0, 0
+    while w and w ~= child and guard < 20 do
+        local pts = rawget(w, "points") or {}
+        local p = pts[table.getn(pts)]
+        if not p then return nil end
+        total = total + (p.x or 0)
+        w = p.rel
+        guard = guard + 1
+    end
+    if w ~= child then return nil end
+    return total
+end
+local inset = leftInset(box)
+check(inset ~= nil and inset > 0,
+      "and every checkbox sits INSIDE it, not on it", tostring(inset))
+
+-- The wrapping status block follows the scroll's width rather than a literal,
+-- or it is wrong the moment the bar appears and wrong again when the window
+-- is widened.
+fitAt(g.minH)
+local narrow = A.ui.integStatus:GetWidth()
+A.ui.frame:SetWidth(900)
+fitAt(g.minH)
+check(A.ui.integStatus:GetWidth() > narrow,
+      "the status text widens with the window", narrow .. " -> " ..
+      A.ui.integStatus:GetWidth())
+A.ui.frame:SetWidth(660)
+fitAt(g.defaultH)
+end
+
 print("== version: the title bar cannot drift from the .toc ==")
 -- Two releases shipped with the .toc bumped and this literal left behind, so
 -- the in-game title kept reporting an old build and bug reports came in
@@ -5935,7 +6639,15 @@ check(skin.applied == true, "and marks itself applied")
 check(calls.backdrop > 0, "backdrops applied", calls.backdrop)
 check(calls.button > 0, "buttons skinned", calls.button)
 check(calls.close > 0, "the close button used pfUI's close skin", calls.close)
-check(calls.checkbox > 0, "checkboxes skinned", calls.checkbox)
+-- NOT skinned, and that is the point. pfUI's SkinCheckbox replaces the box
+-- art, which on our 14px flat boxes renders as a circle -- correct unskinned,
+-- wrong under the skin, which is how it shipped in Exchange before the same
+-- port. Every checkbox here opts out, so pfUI is never asked.
+check(calls.checkbox == 0, "checkboxes are NOT handed to pfUI", calls.checkbox)
+check(A.ui.checkTakeover.courierNoSkin and true or false,
+      "because each one opts out by name")
+check(A.ui.sendCODAll.courierNoSkin and true or false,
+      "the send form's toggles too")
 check(calls.editbox + calls.strip > 0, "edit boxes stripped and backdropped",
       calls.strip)
 -- Opt-outs must be honoured: inbox rows and attachment slots are click targets
