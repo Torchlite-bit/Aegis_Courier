@@ -342,6 +342,31 @@ section, which is Courier's equivalent hazard surface.
       frame to every acknowledgement, and with real latency that is every mail.
     - A test harness that ticks hidden frames, or treats `Show()` as immediate,
       cannot see any of this and will happily pass a driver that sleeps.
+    - **"SENDING BUT NOT ARMED" IS ONE STATE, and it is a HANG WAITING TO
+      HAPPEN.** Between `SendMail` and the server's reply, nothing is armed —
+      `MAIL_SEND_SUCCESS` / `MAIL_FAILED` are the only things that arm the next
+      step. If neither arrives, `send.sending` stays true for the rest of the
+      session, the Send button reads *already sending*, and only a `/reload`
+      clears it. **No bug in this file is needed** for that; the server going
+      quiet once is enough, and it shipped as "it gets stuck when sending
+      mail". `send.ACK_TIMEOUT` (10s) is the only place that can notice, since
+      it is the only code that runs in that state.
+      - **STOP, do not retry.** A retry is safe after `MAIL_FAILED` because
+        that event means the mail definitively did not go out. Silence means we
+        do not KNOW — and gold rides the first mail of a batch (rule 26), so
+        re-sending could send the gold twice. Leave the attachments on the list
+        and let the player, who can see what arrived, press Send again.
+      - **`MAIL_CLOSED` must ABORT a running batch.** Closing Courier's own
+        window calls `CloseMail()`, so starting a twelve-item send and shutting
+        the window is enough to guarantee no acknowledgement can ever arrive.
+      - **The silence clock is reset in `send.Arm` and NOWHERE ELSE** (plus the
+        driver's own put-itself-away branch). It was reset in four places —
+        both handlers, the step branch and Arm — and that redundancy meant no
+        single one was load-bearing, so every one of them could be deleted with
+        the suite still green. Arming is the one thing that ends a wait.
+      - **A test that ticks once and acknowledges in the same breath cannot see
+        any of this.** The clock needs a SECOND reading per mail, in the
+        un-armed state, or it is never asked to accumulate.
 23. **There is NO `GetCursorInfo()` on 1.12.** `CursorHasItem()` tells you only
     *that* something is held, never *what*. The only way to identify a dragged
     item is to remember where it came from: save-and-replace
@@ -654,6 +679,88 @@ section, which is Courier's equivalent hazard surface.
       the outer pass reads the clamped offset right after `Update`, so the
       paint stays correct. See `ui.RefreshInbox`.
 
+36. **Checkboxes come from `ui.MakeCheckBox`, never from
+    `UICheckButtonTemplate`** — a **VERBATIM PORT** of Aegis: Exchange's, for
+    the same reason `BTN_KIND` is one: the two addons sit in the same UI and a
+    hand-adjusted copy drifts. Re-port if Exchange retunes it; never tune one
+    side alone.
+    - The template's blue-grey art cannot be recoloured, exactly like
+      `UIPanelButtonTemplate`. The border is **four 1px textures**, because a
+      `SetBackdrop` whose `edgeSize` approaches the frame size renders as a
+      garbled CROSS — two corner pieces of `edgeSize` square cannot both fit
+      across a 14px frame.
+    - **`courierNoSkin`, always.** pfUI reskins anything reporting
+      `CheckButton`, which renders a small flat box as a CIRCLE — correct
+      unskinned, wrong under the skin. `ui/skin.lua` therefore has no checkbox
+      path at all; a `CheckButton` falls through it untouched, and that is the
+      intended outcome rather than an omission.
+    - **DO NOT SHADOW `SetChecked` / `GetChecked`.** A `CheckButton` toggles
+      itself **before** `OnClick` runs, and every handler here reads
+      `GetChecked()` inside `OnClick` expecting the new value. A private flag
+      leaves the widget's state and ours disagreeing the moment the WIDGET is
+      what moved, and each handler silently reads the wrong one. Replace only
+      the ART: the tick is the widget's own CHECKED texture, so the client
+      shows and hides it for us and it cannot drift.
+      - `SetCheckedTexture` takes a **PATH** on 1.12, not a texture object, so
+        the region has to be created from a file that exists and then
+        re-pointed and repainted. A nil region is not an error — the stock
+        check mark stays: wrong art, still legible.
+      - **A harness whose `Click` fires `OnClick` directly cannot see this.**
+        The pre-toggle must write the widget's state RAW, because the engine
+        flips the widget and does not call a Lua method — going through
+        `SetChecked` makes a shadowed pair look self-consistent.
+    - The caption is a **method** (`SetLabel`), not the template's global
+      `"<name>Text"`, so a settings row no longer needs a frame name just to
+      reach its own label. It registers with `ui.RegisterFont` like every other
+      creation path (rule 32).
+    - **Dimmed, not hidden** (`SetDimmed`): box, tick, borders AND caption fade
+      together, and `Disable()` is what actually refuses the click — on 1.12
+      `Disable()` dims the box art only and a FontString keeps its colour, so a
+      disabled option otherwise still reads as available.
+37. **A SCROLLFRAME IS THE ONLY 1.12 WIDGET THAT CLIPS.** There is no
+    `SetClipsChildren`; a panel whose content overruns simply draws over
+    whatever is beneath it, which is the footer and then the window edge. The
+    settings block is a fixed ~420px of controls and hint lines against a panel
+    that is 330px at the window's minimum height, and it shipped drawing over
+    the footer — reported as "at its smallest size it clips at the bottom".
+    - **Raising `MIN_H` is the wrong trade.** It works, and it forces every
+      player's inbox 135px taller to make room for a tab they are not on. The
+      inbox is the view kept small; a tall panel scrolls instead.
+    - **A real `ScrollFrame`, not a `FauxScrollFrame`.** Faux virtualises
+      fixed-height rows; settings are heterogeneous widgets that cannot be
+      recycled. **No reentrancy guard is needed** here and that is worth
+      stating, because every `FauxScrollFrame` in the file has one (rule 35):
+      the loop those guard against closes because Faux routes the scroll back
+      into the painter. A real `ScrollFrame`'s `SetVerticalScroll` just moves
+      its child and calls nothing.
+    - The bar is **hand-built from a base `Slider`** — a primitive widget type
+      that always exists, so there is no "Couldn't find inherited node" risk
+      from guessing a 1.12 template name — and marked `courierNoSkin` because
+      pfUI's `SkinScrollbar` reaches for up/down buttons a template would have
+      supplied and ours has none.
+    - **THE CLIP LINE FALLS ON THE SCROLL CHILD'S LEFT EDGE.** Text at x=0 gets
+      away with sitting on it because a glyph carries its own side bearing; a
+      checkbox's solid 1px edge texture does not, and comes back shaved. Inset
+      the content by `SET_INSET` and pull the scroll frame LEFT by the same
+      amount, so the inset is pure clip margin and the layout does not move.
+    - **Shadow `panel` with the scroll child** in the builder. A widget pinned
+      to the panel sits outside the scroll and keeps the exact overflow this
+      exists to fix — and one pinned to the child's BOTTOM sits at the bottom
+      of the child, hundreds of pixels down and off screen. The last thing in
+      the block is simply the last thing in the block.
+    - **MEASURE the content, never sum it.** `ui.ContentExtent` sweeps children
+      **and** regions for the lowest `GetBottom()`. A second copy of the
+      layout's offsets written out as a total is a copy that drifts, and the
+      first thing it gets wrong is a wrapped hint line — whose height depends
+      on the font scale and so is not a constant at all. Re-fit **after**
+      writing the text, or it measures the previous visit's.
+    - **A mock that answers nil for `GetTop` / `GetBottom`, 0 for a font
+      string's height, or a fresh stand-in from `GetRegions`, agrees with a
+      panel that spills a hundred pixels past the window.** And an unplaced
+      stand-in must report **no position**, not 0: these coordinates are
+      positive, so a 0 sits BELOW every real widget and inflates the
+      measurement past anything in the frame.
+
 ---
 
 ## Aegis: Exchange integration — the whole contract
@@ -826,6 +933,14 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       v1.0.4 crash. Re-fit once, on mouse-up.
 - [ ] Geometry invariants are asserted across the SIZE RANGE (min / default /
       max), not at one height.
+- [ ] Checkboxes are built with `ui.MakeCheckBox`, never
+      `UICheckButtonTemplate`; they set `courierNoSkin`, do NOT shadow
+      `SetChecked`/`GetChecked`, label via `SetLabel`, and the harness's
+      `Click` pre-toggles a `CheckButton` RAW the way the engine does.
+- [ ] A panel whose content can outgrow it lives in a real `ScrollFrame` — the
+      only 1.12 widget that clips — with its content inset off the clip line,
+      `panel` shadowed by the scroll child, nothing pinned to a bottom, and the
+      height MEASURED (children and regions) rather than summed.
 - [ ] Buttons are built with `ui.MakeButton(parent, kind, name)`, never
       `UIPanelButtonTemplate` — that template cannot be recoloured. Kinds are
       `primary` (one per area), `accent` (Back), `quiet` (default), and the
@@ -853,6 +968,10 @@ Read their patterns for how vanilla mailbox automation is done in practice —
       because it must be verified first.
 - [ ] No delay is imposed on a whole batch because one mail failed. The retry
       is per mail; there is no standing settle.
+- [ ] A batch that is sending but not armed is being watched: `send.ACK_TIMEOUT`
+      stops it, without retrying, and `MAIL_CLOSED` aborts it. The silence clock
+      is reset in `send.Arm` and nowhere else, and the test ticks TWICE per mail
+      so it is actually asked to accumulate.
 - [ ] The send hot path inspects NOTHING before the pickup — no `ResolveSlot`,
       no `locked` poll. Relocation and lock waiting happen only after a failed
       verify. A clean batch inspects zero bag slots and the harness says so.

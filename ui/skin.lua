@@ -48,7 +48,6 @@ local function Env()
         StripTextures   = env.StripTextures,
         SkinButton      = env.SkinButton,
         SkinCloseButton = env.SkinCloseButton,
-        SkinCheckbox    = env.SkinCheckbox,
         SkinScrollbar   = env.SkinScrollbar,
     }
     return skin.env
@@ -156,12 +155,6 @@ local function CloseButton(b)
     Button(b)
 end
 
-local function Checkbox(c)
-    local env = Env()
-    if not c or not env or not env.SkinCheckbox then return end
-    pcall(function() env.SkinCheckbox(c) end)
-end
-
 local function Scrollbar(sb)
     local env = Env()
     if not sb or not env or not env.SkinScrollbar then return end
@@ -222,11 +215,12 @@ local function SkinWidget(f)
         return true
     end
 
-    if otype == "CheckButton" then
-        Checkbox(f)
-        f.courierSkinned = true
-        return true
-    elseif otype == "Button" then
+    -- NO CHECKBOX PATH, deliberately. Every checkbox in this addon comes from
+    -- ui.MakeCheckBox, which draws its own flat art and sets courierNoSkin --
+    -- pfUI's SkinCheckbox turns a 14px box into a circle, which looked correct
+    -- unskinned and wrong under the skin. A CheckButton therefore falls
+    -- through here untouched, and that is the intended outcome.
+    if otype == "Button" then
         if f.courierCloseButton then
             CloseButton(f)
         else

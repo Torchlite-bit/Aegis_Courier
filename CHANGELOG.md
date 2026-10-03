@@ -9,6 +9,52 @@ release; everything below it was pre-release development.
 Releases that add a `.lua` file to the `.toc` are marked **restart** — the 1.12
 client reads the file list at startup, so `/reload` is not enough.
 
+## [1.9.12]
+
+Three fixes: the settings tab no longer runs off the bottom of a small window,
+the checkboxes match Aegis: Exchange's, and a send the server never answers can
+no longer wedge the Send button for the rest of the session. `/reload`.
+
+### Fixed
+- **Sending could get stuck, with no way out but `/reload`.** Between handing a
+  mail to the server and being told what happened to it, the batch is waiting
+  on an event and nothing else will wake it. If that acknowledgement never
+  arrived -- a hiccup, a dropped packet, a mail session that went away
+  underneath it -- the run stayed "in progress" forever and the Send button read
+  *already sending* for the rest of the session. No bug in the send code was
+  needed; the server going quiet once was enough.
+  - Courier now gives the server **ten seconds** and then stops, saying how
+    many mails went out and how many are still attached. A real reply lands in
+    well under a second, so a laggy server never trips it.
+  - It stops rather than retrying, deliberately. A *refused* mail is known not
+    to have gone out, so retrying it is safe and Courier already does. Silence
+    is not knowing -- and since gold rides the first mail of a batch, a retry
+    could send the gold twice. The unsent attachments stay on the list, so
+    carrying on is one click, and it is your call.
+- **Closing the mailbox mid-send left the batch hanging.** Walking away, or
+  closing Courier's own window (which ends the mail session), meant no
+  acknowledgement could arrive at all. That now stops the run with the same
+  summary instead of leaving it stuck.
+- **The settings tab clipped off the bottom of a small window.** The block of
+  options is taller than the panel is at the window's smallest size, and the
+  1.12 client does not clip -- it simply draws over whatever is underneath, so
+  the last hints and the Forget-names button landed on top of the footer.
+  - The settings now **scroll**, with a bar that appears only when they do not
+    fit and a mouse wheel that works over the whole block. Raising the window's
+    minimum height would also have fixed it, and would have forced every
+    player's inbox 135px taller to make room for a tab it is not on.
+
+### Changed
+- **The checkboxes are Aegis: Exchange's checkboxes.** Courier was still using
+  the stock Blizzard template, whose blue-grey art cannot be recoloured -- the
+  same reason Courier's buttons are hand-drawn. They are now a flat box in the
+  Courier palette with a gold tick, ported from Exchange so the two addons
+  match rather than nearly match, and they no longer turn circular under pfUI.
+  - A disabled option now actually reads as disabled: the box, its tick and its
+    caption fade together.
+- **Forget names** sits at the end of the settings list rather than pinned to
+  the bottom corner, where it used to overlap the line above it.
+
 ## [1.9.11]
 
 Two fixes to the minimap button. `/reload`.
